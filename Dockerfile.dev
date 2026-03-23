@@ -1,0 +1,48 @@
+ARG ELIXIR_VERSION=1.19.5
+ARG OTP_VERSION=28.3.2
+ARG UBUNTU_VERSION=noble-20260210.1
+
+ARG BASE_IMAGE="hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-ubuntu-${UBUNTU_VERSION}"
+
+FROM ${BASE_IMAGE}
+
+ARG USERNAME=ubuntu
+ARG USER_UID=1000
+ARG USER_GID=$USER_UID
+
+RUN groupmod -o -g $USER_GID $USERNAME
+RUN usermod -u $USER_UID -g $USERNAME $USERNAME
+
+
+RUN apt-get update \
+    && apt-get install -y software-properties-common sudo watchman dnsutils curl unzip cmake build-essential git postgresql-common csvkit ghostscript \
+    && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+    && apt-get install -y postgresql-client-common postgresql-client-17 \
+    && add-apt-repository ppa:xtradeb/apps -y && apt-get update && apt-get install -y chromium \
+    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME
+
+# ********************************************************
+# * Anything else you want to do like clean up goes here *
+# ********************************************************
+
+ARG PROTOC_VERSION=25.1
+
+RUN curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v$PROTOC_VERSION/protoc-$PROTOC_VERSION-linux-x86_64.zip \
+    && unzip protoc-$PROTOC_VERSION-linux-x86_64.zip -d usr/local \
+    && rm protoc-$PROTOC_VERSION-linux-x86_64.zip
+
+RUN mkdir /app
+RUN chown $USERNAME /app
+
+RUN curl -sL -o tidewave https://github.com/tidewave-ai/tidewave_app/releases/latest/download/tidewave-cli-$(uname -m)-unknown-linux-musl \
+    && chmod +x tidewave \
+    && mv tidewave /usr/local/bin/
+
+
+# [Optional] Set the default user. Omit if you want to keep the default as root.
+USER $USERNAME
+
+RUN mix local.hex --force && mix archive.install hex phx_new --force && mix local.rebar --force && mix escript.install hex protobuf --force
+
+ENV PATH="${PATH}:/home/$USERNAME/.mix/escripts"

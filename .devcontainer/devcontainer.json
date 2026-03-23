@@ -1,0 +1,25 @@
+{
+  "name": "Dev Environmet",
+  "dockerComposeFile": [
+    "../docker-compose.yml"
+  ],
+  "features": {
+    "ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
+      "packages": "nano,inotify-tools"
+    }
+  },
+  "remoteUser": "ubuntu",
+  "service": "app",
+  "workspaceFolder": "/home/ubuntu/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ExpertLSP.expert",
+        "ms-azuretools.vscode-docker",
+        "eamodio.gitlens",
+        "phoenixframework.phoenix",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  }
+}
