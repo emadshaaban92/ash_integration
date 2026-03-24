@@ -105,7 +105,7 @@ config :example, Example.Vault,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
-config :ash_integration, :config,
+config :ash_integration,
   otp_app: :example,
   outbound_integration_resource: Example.Integration.OutboundIntegration,
   delivery_log_resource: Example.Integration.DeliveryLog,

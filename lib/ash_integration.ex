@@ -16,11 +16,10 @@ defmodule AshIntegration do
         repo: MyApp.Repo,
         actor_resource: MyApp.Accounts.User,
         vault: MyApp.Vault
+
   """
 
-  @config Application.compile_env(:ash_integration, :config, [])
-
-  def config, do: @config
+  def config, do: Application.get_all_env(:ash_integration)
 
   def otp_app do
     Keyword.fetch!(config(), :otp_app)
