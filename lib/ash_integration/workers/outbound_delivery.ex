@@ -304,8 +304,14 @@ defmodule AshIntegration.Workers.OutboundDelivery do
   end
 
   defp truncate(nil, _), do: nil
-  defp truncate(str, max) when byte_size(str) > max, do: binary_part(str, 0, max)
-  defp truncate(str, _), do: str
+
+  defp truncate(str, max) do
+    if String.length(str) > max do
+      String.slice(str, 0, max)
+    else
+      str
+    end
+  end
 
   defp body_to_string(body) when is_binary(body), do: body
   defp body_to_string(body) when is_map(body), do: Jason.encode!(body)
