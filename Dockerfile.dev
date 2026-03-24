@@ -35,13 +35,27 @@ RUN curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v$PRO
 RUN mkdir /app
 RUN chown $USERNAME /app
 
-RUN curl -sL -o tidewave https://github.com/tidewave-ai/tidewave_app/releases/latest/download/tidewave-cli-$(uname -m)-unknown-linux-musl \
+ARG TIDEWAVE_VERSION=v0.3.8
+
+RUN curl -sL -o tidewave https://github.com/tidewave-ai/tidewave_app/releases/download/$TIDEWAVE_VERSION/tidewave-cli-$(uname -m)-unknown-linux-musl \
     && chmod +x tidewave \
     && mv tidewave /usr/local/bin/
 
+# Install Bun (glibc build) - the musl Bun that Tidewave downloads at runtime
+# doesn't work on glibc-based Ubuntu, so we pre-install a working one
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+RUN ln -s /usr/local/bin/bun /usr/local/bin/node
 
-# [Optional] Set the default user. Omit if you want to keep the default as root.
+# # [Optional] Set the default user. Omit if you want to keep the default as root.
 USER $USERNAME
+
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+RUN bun install -g @zed-industries/claude-agent-acp
+
+ENV PATH="${PATH}:/home/$USERNAME/.bun/bin"
+
+ENV TIDEWAVE_CLAUDE_AGENT_ACP_EXECUTABLE=/home/$USERNAME/.bun/bin/claude-agent-acp
 
 RUN mix local.hex --force && mix archive.install hex phx_new --force && mix local.rebar --force && mix escript.install hex protobuf --force
 
