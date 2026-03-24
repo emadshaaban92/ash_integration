@@ -83,10 +83,17 @@ defmodule AshIntegration.Workers.EventDispatcher do
 
   defp parse_datetime(dt) when is_binary(dt) do
     case DateTime.from_iso8601(dt) do
-      {:ok, datetime, _} -> datetime
-      _ -> DateTime.utc_now()
+      {:ok, datetime, _} ->
+        datetime
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "invalid occurred_at datetime #{inspect(dt)}: #{inspect(reason)}"
     end
   end
 
-  defp parse_datetime(_), do: DateTime.utc_now()
+  defp parse_datetime(other) do
+    raise ArgumentError,
+          "expected occurred_at to be an ISO 8601 string, got: #{inspect(other)}"
+  end
 end
