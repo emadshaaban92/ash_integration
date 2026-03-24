@@ -44,6 +44,11 @@ defmodule AshIntegration.HttpConfig do
       default 30_000
       constraints min: 1000, max: 120_000
     end
+
+    attribute :headers, :map do
+      public? true
+      default %{}
+    end
   end
 
   validations do

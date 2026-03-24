@@ -207,11 +207,13 @@ defmodule AshIntegration.Workers.OutboundDelivery do
     config = outbound_integration.transport_config
     json_payload = Jason.encode!(payload)
 
+    custom_headers = Enum.map(config.headers || %{}, fn {k, v} -> {k, v} end)
+
     headers =
       [
         {"content-type", "application/json"},
         {"x-event-id", event_id}
-      ] ++ auth_headers(config.auth)
+      ] ++ auth_headers(config.auth) ++ custom_headers
 
     case Req.post(config.url,
            body: json_payload,

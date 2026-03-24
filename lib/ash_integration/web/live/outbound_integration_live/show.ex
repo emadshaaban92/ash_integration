@@ -358,6 +358,10 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
         <dt class="text-base-content/60">Auth Method</dt>
         <dd>{humanize(@config.auth.type)}</dd>
       </div>
+      <div :if={@config.headers != nil and @config.headers != %{}} class="flex justify-between">
+        <dt class="text-base-content/60">Custom Headers</dt>
+        <dd class="truncate max-w-xs">{map_size(@config.headers)} header(s)</dd>
+      </div>
     </dl>
     """
   end

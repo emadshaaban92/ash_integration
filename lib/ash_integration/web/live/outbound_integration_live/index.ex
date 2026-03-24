@@ -34,6 +34,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
     socket
     |> assign(page_title: "New Outbound Integration")
     |> assign(form: form)
+    |> assign(header_rows: [])
     |> Helpers.assign_form_options(form)
     |> load_integrations(0)
   end
@@ -48,9 +49,14 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
           AshPhoenix.Form.for_update(integration, :update, actor: actor, forms: [auto?: true])
           |> Helpers.ensure_auth_subform()
 
+        header_rows =
+          ((integration.transport_config && integration.transport_config.headers) || %{})
+          |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
+
         socket
         |> assign(page_title: "Edit #{integration.name}")
         |> assign(form: form)
+        |> assign(header_rows: header_rows)
         |> Helpers.assign_form_options(form)
         |> load_integrations(0)
 
@@ -65,6 +71,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
     offset = Helpers.parse_int(params["offset"], 0)
 
     socket
+    |> assign_new(:header_rows, fn -> [] end)
     |> assign(page_title: "Outbound Integrations", form: nil)
     |> load_integrations(offset)
   end
@@ -113,7 +120,19 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
     {:noreply, load_integrations(socket, Helpers.parse_int(offset, 0))}
   end
 
+  def handle_event("add-header", _, socket) do
+    id = System.unique_integer([:positive])
+    {:noreply, assign(socket, header_rows: socket.assigns.header_rows ++ [{id, {"", ""}}])}
+  end
+
+  def handle_event("remove-header", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    rows = Enum.reject(socket.assigns.header_rows, fn {row_id, _} -> row_id == id end)
+    {:noreply, assign(socket, header_rows: rows)}
+  end
+
   def handle_event("validate", %{"form" => params}, socket) do
+    params = inject_headers_map(params)
     form = AshPhoenix.Form.validate(socket.assigns.form, params)
 
     {:noreply,
@@ -123,6 +142,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
   end
 
   def handle_event("save", %{"form" => params}, socket) do
+    params = inject_headers_map(params)
+
     case AshPhoenix.Form.submit(socket.assigns.form, params: params) do
       {:ok, _record} ->
         message =
@@ -275,6 +296,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
             action_options={@action_options}
             schema_version_options={@schema_version_options}
             actor={@current_user}
+            header_rows={@header_rows}
           />
           <div class="modal-action">
             <button type="button" class="btn" phx-click={JS.navigate(path(:index))}>Cancel</button>
@@ -293,6 +315,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
   attr :action_options, :list, required: true
   attr :schema_version_options, :list, required: true
   attr :actor, :any, default: nil
+  attr :header_rows, :list, default: []
 
   def integration_form_fields(assigns) do
     ~H"""
@@ -358,6 +381,38 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
             required
             phx-debounce="blur"
           />
+          <label class="label">Custom Headers</label>
+          <div class="space-y-2">
+            <div :for={{id, {key, value}} <- @header_rows} class="flex gap-2 items-center">
+              <input
+                type="text"
+                name={tc[:headers].name <> "[#{id}][key]"}
+                value={key}
+                placeholder="Header name"
+                class="input input-bordered input-sm flex-1"
+                phx-debounce="blur"
+              />
+              <input
+                type="text"
+                name={tc[:headers].name <> "[#{id}][value]"}
+                value={value}
+                placeholder="Header value"
+                class="input input-bordered input-sm flex-1"
+                phx-debounce="blur"
+              />
+              <button
+                type="button"
+                phx-click="remove-header"
+                phx-value-id={id}
+                class="btn btn-ghost btn-sm btn-square"
+              >
+                &times;
+              </button>
+            </div>
+            <button type="button" phx-click="add-header" class="btn btn-outline btn-xs">
+              + Add Header
+            </button>
+          </div>
 
           <div class="divider my-2"></div>
           <h5 class="font-semibold mb-3">Authentication</h5>
@@ -424,6 +479,22 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
       </.inputs_for>
     </div>
     """
+  end
+
+  defp inject_headers_map(params) do
+    case get_in(params, ["transport_config", "headers"]) do
+      raw when is_map(raw) ->
+        headers_map =
+          raw
+          |> Map.values()
+          |> Enum.reject(fn entry -> entry["key"] == "" end)
+          |> Map.new(fn entry -> {entry["key"], entry["value"] || ""} end)
+
+        put_in(params, ["transport_config", "headers"], headers_map)
+
+      _ ->
+        params
+    end
   end
 
   defp path(:index), do: integration_base_path()
