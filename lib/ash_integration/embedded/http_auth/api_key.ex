@@ -1,5 +1,5 @@
 defmodule AshIntegration.HttpAuth.ApiKey do
-  @vault Application.compile_env(:ash_integration, :config, []) |> Keyword.get(:vault)
+  @vault Application.compile_env(:ash_integration, :vault)
 
   use Ash.Resource,
     data_layer: :embedded,
