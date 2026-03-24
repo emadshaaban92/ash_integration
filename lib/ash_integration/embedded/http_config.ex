@@ -49,6 +49,13 @@ defmodule AshIntegration.HttpConfig do
       public? true
       default %{}
     end
+
+    attribute :method, :atom do
+      allow_nil? false
+      public? true
+      default :post
+      constraints one_of: [:post, :put, :patch, :delete]
+    end
   end
 
   validations do

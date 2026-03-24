@@ -215,7 +215,9 @@ defmodule AshIntegration.Workers.OutboundDelivery do
         {"x-event-id", event_id}
       ] ++ auth_headers(config.auth) ++ custom_headers
 
-    case Req.post(config.url,
+    case Req.request(
+           method: config.method || :post,
+           url: config.url,
            body: json_payload,
            headers: headers,
            receive_timeout: config.timeout_ms,

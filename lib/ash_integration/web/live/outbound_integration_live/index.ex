@@ -367,6 +367,12 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
         <div class="card card-border border-base-300 p-4 mt-4">
           <h4 class="font-semibold mb-3">HTTP Configuration</h4>
           <.input
+            field={tc[:method]}
+            type="select"
+            label="HTTP Method"
+            options={[{"POST", "post"}, {"PUT", "put"}, {"PATCH", "patch"}, {"DELETE", "delete"}]}
+          />
+          <.input
             field={tc[:url]}
             type="text"
             label="URL"

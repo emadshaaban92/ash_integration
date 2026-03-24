@@ -347,6 +347,10 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     ~H"""
     <dl class="space-y-2 text-sm">
       <div class="flex justify-between">
+        <dt class="text-base-content/60">Method</dt>
+        <dd>{(@config.method || :post) |> to_string() |> String.upcase()}</dd>
+      </div>
+      <div class="flex justify-between">
         <dt class="text-base-content/60">URL</dt>
         <dd class="truncate max-w-xs">{@config.url}</dd>
       </div>
