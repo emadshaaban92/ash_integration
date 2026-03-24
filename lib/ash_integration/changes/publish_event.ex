@@ -30,6 +30,8 @@ defmodule AshIntegration.Changes.PublishEvent do
             occurred_at: DateTime.utc_now() |> DateTime.to_iso8601()
           })
         end)
+        # Note: insert_all raises on failure (despite the non-bang name),
+        # so errors will propagate up naturally.
         |> Oban.insert_all()
       end
     end
