@@ -314,6 +314,11 @@ defmodule AshIntegration.Workers.OutboundDelivery do
   end
 
   defp body_to_string(body) when is_binary(body), do: body
-  defp body_to_string(body) when is_map(body), do: Jason.encode!(body)
-  defp body_to_string(body), do: inspect(body)
+
+  defp body_to_string(body) do
+    case Jason.encode(body) do
+      {:ok, json} -> json
+      {:error, _} -> inspect(body)
+    end
+  end
 end
