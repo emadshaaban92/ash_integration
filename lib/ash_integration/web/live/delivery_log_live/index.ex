@@ -110,7 +110,9 @@ defmodule AshIntegration.Web.DeliveryLogLive.Index do
                 <span :if={is_nil(log.duration_ms)} class="text-base-content/50">—</span>
               </td>
               <td class="text-sm text-error max-w-xs truncate">{log.error_message}</td>
-              <td class="text-sm text-base-content/60">{Helpers.format_datetime(log.created_at, :long)}</td>
+              <td class="text-sm text-base-content/60">
+                {Helpers.format_datetime(log.created_at, :long)}
+              </td>
               <td>
                 <.link navigate={"#{base_path()}/logs/#{log.id}"} class="btn btn-ghost btn-xs">
                   View

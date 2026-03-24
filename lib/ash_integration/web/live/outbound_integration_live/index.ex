@@ -220,7 +220,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
                   {integration.consecutive_failures}
                 </span>
               </td>
-              <td class="text-sm text-base-content/60">{Helpers.format_datetime(integration.created_at)}</td>
+              <td class="text-sm text-base-content/60">
+                {Helpers.format_datetime(integration.created_at)}
+              </td>
               <td>
                 <div class="dropdown dropdown-end">
                   <div tabindex="0" role="button" class="btn btn-ghost btn-xs">
