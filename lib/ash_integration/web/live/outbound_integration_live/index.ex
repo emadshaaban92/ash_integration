@@ -421,6 +421,22 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
           </div>
 
           <div class="divider my-2"></div>
+          <h5 class="font-semibold mb-3">Webhook Signing</h5>
+          <.input
+            field={tc[:signing_secret]}
+            type="password"
+            autocomplete="one-time-code"
+            label="HMAC Signing Secret"
+            placeholder="Leave blank to disable signing"
+            phx-debounce="blur"
+          />
+          <p class="text-xs text-base-content/50 mt-1">
+            When set, payloads are signed with HMAC-SHA256. The signature is sent in the
+            <code class="text-xs">x-webhook-signature</code>
+            header as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
+          </p>
+
+          <div class="divider my-2"></div>
           <h5 class="font-semibold mb-3">Authentication</h5>
 
           <.inputs_for :let={auth} field={tc[:auth]}>

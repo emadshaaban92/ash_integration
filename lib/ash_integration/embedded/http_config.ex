@@ -1,6 +1,15 @@
 defmodule AshIntegration.HttpConfig do
+  @vault Application.compile_env(:ash_integration, :vault)
+
   use Ash.Resource,
-    data_layer: :embedded
+    data_layer: :embedded,
+    extensions: [AshCloak]
+
+  cloak do
+    vault @vault
+    attributes [:signing_secret]
+    decrypt_by_default []
+  end
 
   attributes do
     attribute :url, :string do
@@ -55,6 +64,11 @@ defmodule AshIntegration.HttpConfig do
       public? true
       default :post
       constraints one_of: [:post, :put, :patch, :delete]
+    end
+
+    attribute :signing_secret, :string do
+      public? true
+      sensitive? true
     end
   end
 

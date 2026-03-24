@@ -213,7 +213,7 @@ defmodule AshIntegration.Workers.OutboundDelivery do
       [
         {"content-type", "application/json"},
         {"x-event-id", event_id}
-      ] ++ auth_headers(config.auth) ++ custom_headers
+      ] ++ auth_headers(config.auth) ++ custom_headers ++ signature_headers(config, json_payload)
 
     case Req.request(
            method: config.method || :post,
@@ -254,6 +254,27 @@ defmodule AshIntegration.Workers.OutboundDelivery do
   end
 
   defp auth_headers(%Ash.Union{type: :none}), do: []
+
+  defp signature_headers(%{signing_secret: nil}, _body), do: []
+
+  defp signature_headers(config, body) do
+    {:ok, config} = Ash.load(config, [:signing_secret], domain: AshIntegration.domain())
+
+    case config.signing_secret do
+      secret when is_binary(secret) and secret != "" ->
+        timestamp = System.system_time(:second)
+        signed_payload = "#{timestamp}.#{body}"
+
+        signature =
+          :crypto.mac(:hmac, :sha256, secret, signed_payload)
+          |> Base.encode16(case: :lower)
+
+        [{"x-webhook-signature", "t=#{timestamp},v1=#{signature}"}]
+
+      _ ->
+        []
+    end
+  end
 
   defp log_delivery(
          outbound_integration,
