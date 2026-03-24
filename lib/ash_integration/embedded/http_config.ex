@@ -46,6 +46,11 @@ defmodule AshIntegration.HttpConfig do
     end
   end
 
+  validations do
+    validate match(:url, ~r/\Ahttps?:\/\/.+/),
+      message: "must be a valid HTTP or HTTPS URL"
+  end
+
   actions do
     default_accept :*
     defaults [:read, :destroy, create: :*, update: :*]
