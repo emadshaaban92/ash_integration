@@ -65,7 +65,9 @@ config :example, ExampleWeb.Endpoint,
       ~r"priv/gettext/.*\.po$"E,
       # Router, Controllers, LiveViews and LiveComponents
       ~r"lib/example_web/router\.ex$"E,
-      ~r"lib/example_web/(controllers|live|components)/.*\.(ex|heex)$"E
+      ~r"lib/example_web/(controllers|live|components)/.*\.(ex|heex)$"E,
+      ~r"lib/example/.*\.(ex|heex)$"E,
+      ~r"../lib/ash_integration/.*\.(ex|heex)$"E
     ]
   ]
 
