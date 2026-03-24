@@ -2,7 +2,7 @@ defmodule AshIntegration.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/yourorg/ash_integration"
+  @source_url "https://github.com/emadshaaban92/ash_integration"
 
   def project do
     [
