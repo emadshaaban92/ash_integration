@@ -202,7 +202,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
         </.empty_state>
       </div>
 
-      <div :if={@integrations != []} class="overflow-x-auto">
+      <div :if={@integrations != []}>
         <table class="table table-zebra">
           <thead>
             <tr>
