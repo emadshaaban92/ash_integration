@@ -17,4 +17,19 @@ defmodule Example.Loaders.ProductLoader do
   def sample_resource_id(_actor, _action) do
     {:error, :no_sample_resource}
   end
+
+  @impl true
+  def sample_event(1) do
+    %{
+      resource: "product",
+      action: "create",
+      schema_version: 1,
+      occurred_at: "2024-01-15T10:30:00Z",
+      data: %{
+        id: "00000000-0000-0000-0000-000000000000",
+        name: "Example Product",
+        sku: "SKU-001"
+      }
+    }
+  end
 end

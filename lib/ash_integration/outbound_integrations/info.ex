@@ -68,6 +68,14 @@ defmodule AshIntegration.OutboundIntegrations.Info do
     end
   end
 
+  def sample_event(resource_identifier, schema_version)
+      when is_binary(resource_identifier) do
+    case resource_module(resource_identifier) do
+      nil -> nil
+      resource -> loader(resource).sample_event(schema_version)
+    end
+  end
+
   defp action_entity(resource, action_name) do
     action_name = to_string(action_name)
 

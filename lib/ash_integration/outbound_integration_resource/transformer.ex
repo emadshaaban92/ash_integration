@@ -414,7 +414,12 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
         Transformer.build_entity(Dsl, [:actions], :create,
           name: :create,
           primary?: true,
-          accept: @standard_accept
+          accept: @standard_accept,
+          changes: [
+            Transformer.build_entity!(Dsl, [:actions, :create], :change,
+              change: AshIntegration.Changes.DefaultSchemaVersion
+            )
+          ]
         )
 
       Transformer.add_entity(dsl_state, [:actions], action, type: :append)

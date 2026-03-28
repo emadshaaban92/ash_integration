@@ -11,4 +11,5 @@ defmodule AshIntegration.OutboundIntegrations.Loader do
               {:ok, map()} | {:error, term()}
   @callback sample_resource_id(actor :: term(), action :: atom()) ::
               {:ok, term()} | {:error, term()}
+  @callback sample_event(schema_version :: integer()) :: map()
 end

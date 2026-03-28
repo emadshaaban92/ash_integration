@@ -8,7 +8,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     Phoenix.Component.assign(socket,
       resource_options: resource_options,
       action_options: action_options(selected_resource),
-      schema_version_options: schema_version_options(selected_resource)
+      schema_version_options: schema_version_options(selected_resource),
+      sample_event: sample_event(selected_resource, selected_version(form))
     )
   end
 
@@ -96,6 +97,15 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     end
   end
 
+  defp selected_version(form) do
+    case Map.get(form.params || %{}, "schema_version") do
+      nil -> Map.get(form.data || %{}, :schema_version)
+      "" -> nil
+      val when is_binary(val) -> String.to_integer(val)
+      val -> val
+    end
+  end
+
   defp schema_version_options(nil), do: []
 
   defp schema_version_options(resource_identifier) do
@@ -107,6 +117,16 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
         resource
         |> OutboundInfo.supported_versions()
         |> Enum.map(&{"V#{&1}", &1})
+    end
+  end
+
+  defp sample_event(nil, _version), do: nil
+  defp sample_event(_resource, nil), do: nil
+
+  defp sample_event(resource_identifier, schema_version) do
+    case OutboundInfo.sample_event(resource_identifier, schema_version) do
+      nil -> nil
+      payload -> Jason.encode!(payload, pretty: true)
     end
   end
 end

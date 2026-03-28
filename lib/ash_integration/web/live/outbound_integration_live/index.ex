@@ -13,7 +13,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
        form: nil,
        resource_options: [],
        action_options: [],
-       schema_version_options: []
+       schema_version_options: [],
+       sample_event: nil
      )}
   end
 
@@ -295,6 +296,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
             resource_options={@resource_options}
             action_options={@action_options}
             schema_version_options={@schema_version_options}
+            sample_event={@sample_event}
             actor={@current_user}
             header_rows={@header_rows}
           />
@@ -314,6 +316,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
   attr :resource_options, :list, required: true
   attr :action_options, :list, required: true
   attr :schema_version_options, :list, required: true
+  attr :sample_event, :string, default: nil
   attr :actor, :any, default: nil
   attr :header_rows, :list, default: []
 
@@ -362,6 +365,24 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
         phx-debounce="blur"
         rows="6"
       />
+      <ul class="text-xs text-base-content/60 mt-1 list-disc list-inside space-y-0.5">
+        <li>Write a <strong>Lua</strong> script to transform the event before delivery.</li>
+        <li>The incoming event is available as <code class="text-xs">event</code> (a table).</li>
+        <li>Set <code class="text-xs">result</code> to the transformed payload to send.</li>
+        <li>If <code class="text-xs">result</code> is not set, the delivery is skipped.</li>
+      </ul>
+      <div
+        :if={@sample_event}
+        id={"sample-event-#{@form[:resource].value}-#{@form[:schema_version].value}"}
+        phx-update="ignore"
+        class="collapse collapse-arrow bg-base-200 mt-2"
+      >
+        <input type="checkbox" />
+        <div class="collapse-title text-sm font-medium">Sample Event</div>
+        <div class="collapse-content">
+          <pre class="text-xs overflow-x-auto"><code>{@sample_event}</code></pre>
+        </div>
+      </div>
 
       <.inputs_for :let={tc} field={@form[:transport_config]}>
         <div class="card card-border border-base-300 p-4 mt-4">
