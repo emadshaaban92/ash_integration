@@ -215,13 +215,17 @@ defmodule AshIntegration.Workers.OutboundDelivery do
         {"x-event-id", event_id}
       ] ++ auth_headers(config.auth) ++ custom_headers ++ signature_headers(config, json_payload)
 
+    req_options = Application.get_env(:ash_integration, :req_options, [])
+
     case Req.request(
-           method: config.method || :post,
-           url: config.url,
-           body: json_payload,
-           headers: headers,
-           receive_timeout: config.timeout_ms,
-           retry: false
+           [
+             method: config.method || :post,
+             url: config.url,
+             body: json_payload,
+             headers: headers,
+             receive_timeout: config.timeout_ms,
+             retry: false
+           ] ++ req_options
          ) do
       {:ok, %Req.Response{status: status, body: body}} when status >= 200 and status < 300 ->
         {:ok, status, body_to_string(body)}

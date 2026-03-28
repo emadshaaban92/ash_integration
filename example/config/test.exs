@@ -23,6 +23,12 @@ config :example, ExampleWeb.Endpoint,
   secret_key_base: "rdjqciemeeFhAG35Yc4Za6HlE7O6bAS7pjzFNumTaTQKQQqIVi8x041t6Fy0o2Gs",
   server: false
 
+# Configure Oban for testing
+config :example, Oban, testing: :manual
+
+# Route outbound delivery HTTP calls through Req.Test
+config :ash_integration, req_options: [plug: {Req.Test, AshIntegration.Workers.OutboundDelivery}]
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 
