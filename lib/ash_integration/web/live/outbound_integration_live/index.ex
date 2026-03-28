@@ -14,7 +14,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
        resource_options: [],
        action_options: [],
        schema_version_options: [],
-       sample_event: nil
+       sample_event: nil,
+       transform_preview: nil
      )}
   end
 
@@ -297,6 +298,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
             action_options={@action_options}
             schema_version_options={@schema_version_options}
             sample_event={@sample_event}
+            transform_preview={@transform_preview}
             actor={@current_user}
             header_rows={@header_rows}
           />
@@ -317,6 +319,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
   attr :action_options, :list, required: true
   attr :schema_version_options, :list, required: true
   attr :sample_event, :string, default: nil
+  attr :transform_preview, :any, default: nil
   attr :actor, :any, default: nil
   attr :header_rows, :list, default: []
 
@@ -362,7 +365,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
         type="textarea"
         label="Transform Script"
         required
-        phx-debounce="blur"
+        phx-debounce="500"
         rows="6"
       />
       <ul class="text-xs text-base-content/60 mt-1 list-disc list-inside space-y-0.5">
@@ -381,6 +384,26 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
         <div class="collapse-title text-sm font-medium">Sample Event</div>
         <div class="collapse-content">
           <pre class="text-xs overflow-x-auto"><code>{@sample_event}</code></pre>
+        </div>
+      </div>
+      <div :if={@transform_preview} class="mt-2">
+        <div :if={match?({:error, _}, @transform_preview)} class="alert alert-error text-xs">
+          <.icon name="hero-exclamation-triangle-mini" />
+          <span>{elem(@transform_preview, 1)}</span>
+        </div>
+        <div :if={@transform_preview == {:ok, :skip}} class="alert alert-warning text-xs">
+          <.icon name="hero-forward-mini" />
+          <span>Delivery will be skipped (result not set)</span>
+        </div>
+        <div
+          :if={match?({:ok, _}, @transform_preview) and @transform_preview != {:ok, :skip}}
+          class="collapse collapse-arrow bg-base-200"
+        >
+          <input type="checkbox" checked />
+          <div class="collapse-title text-sm font-medium">Transform Result</div>
+          <div class="collapse-content">
+            <pre class="text-xs overflow-x-auto"><code>{elem(@transform_preview, 1)}</code></pre>
+          </div>
         </div>
       </div>
 

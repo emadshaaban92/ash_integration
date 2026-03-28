@@ -4,12 +4,18 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
   def assign_form_options(socket, form) do
     resource_options = resource_options()
     selected_resource = selected_resource(form, resource_options)
+    sample_event_map = sample_event_map(selected_resource, selected_version(form))
+
+    script =
+      Map.get(form.params || %{}, "transform_script") ||
+        Map.get(form.data || %{}, :transform_script)
 
     Phoenix.Component.assign(socket,
       resource_options: resource_options,
       action_options: action_options(selected_resource),
       schema_version_options: schema_version_options(selected_resource),
-      sample_event: sample_event(selected_resource, selected_version(form))
+      sample_event: encode_sample(sample_event_map),
+      transform_preview: transform_preview(script, sample_event_map)
     )
   end
 
@@ -120,13 +126,25 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     end
   end
 
-  defp sample_event(nil, _version), do: nil
-  defp sample_event(_resource, nil), do: nil
+  defp sample_event_map(nil, _version), do: nil
+  defp sample_event_map(_resource, nil), do: nil
 
-  defp sample_event(resource_identifier, schema_version) do
-    case OutboundInfo.sample_event(resource_identifier, schema_version) do
-      nil -> nil
-      payload -> Jason.encode!(payload, pretty: true)
+  defp sample_event_map(resource_identifier, schema_version) do
+    OutboundInfo.sample_event(resource_identifier, schema_version)
+  end
+
+  defp encode_sample(nil), do: nil
+  defp encode_sample(map), do: Jason.encode!(map, pretty: true)
+
+  defp transform_preview(nil, _sample), do: nil
+  defp transform_preview(_script, nil), do: nil
+  defp transform_preview("", _sample), do: nil
+
+  defp transform_preview(script, sample_event_map) do
+    case AshIntegration.LuaSandbox.execute(script, sample_event_map) do
+      {:ok, :skip} -> {:ok, :skip}
+      {:ok, result} -> {:ok, Jason.encode!(result, pretty: true)}
+      {:error, message} -> {:error, message}
     end
   end
 end
