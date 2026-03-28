@@ -2,6 +2,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
   use AshIntegration.Web, :live_view
 
   alias AshIntegration.Web.OutboundIntegrationLive.Helpers
+  import AshIntegration.Web.OutboundIntegrationLive.FormComponent
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -29,7 +30,17 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
   end
 
   defp apply_action(socket, :show, _params) do
-    assign(socket, edit_form: nil, test_result: nil, testing: false)
+    assign(socket,
+      edit_form: nil,
+      test_result: nil,
+      testing: false,
+      header_rows: [],
+      resource_options: [],
+      action_options: [],
+      schema_version_options: [],
+      sample_event: nil,
+      transform_preview: nil
+    )
   end
 
   defp apply_action(socket, :edit, _params) do
@@ -40,15 +51,30 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
       AshPhoenix.Form.for_update(integration, :update, actor: actor, forms: [auto?: true])
       |> Helpers.ensure_auth_subform()
 
+    header_rows =
+      ((integration.transport_config && integration.transport_config.headers) || %{})
+      |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
+
     socket
     |> assign(page_title: "Edit #{integration.name}")
     |> assign(edit_form: form)
+    |> assign(header_rows: header_rows)
     |> assign(test_result: nil, testing: false)
     |> Helpers.assign_form_options(form)
   end
 
   defp apply_action(socket, :test, _params) do
-    assign(socket, edit_form: nil, test_result: nil, testing: false)
+    assign(socket,
+      edit_form: nil,
+      test_result: nil,
+      testing: false,
+      header_rows: [],
+      resource_options: [],
+      action_options: [],
+      schema_version_options: [],
+      sample_event: nil,
+      transform_preview: nil
+    )
   end
 
   @impl true
@@ -98,7 +124,19 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     end
   end
 
+  def handle_event("add-header", _, socket) do
+    id = System.unique_integer([:positive])
+    {:noreply, assign(socket, header_rows: socket.assigns.header_rows ++ [{id, {"", ""}}])}
+  end
+
+  def handle_event("remove-header", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    rows = Enum.reject(socket.assigns.header_rows, fn {row_id, _} -> row_id == id end)
+    {:noreply, assign(socket, header_rows: rows)}
+  end
+
   def handle_event("validate", %{"form" => params}, socket) do
+    params = Helpers.inject_headers_map(params)
     form = AshPhoenix.Form.validate(socket.assigns.edit_form, params)
 
     {:noreply,
@@ -108,6 +146,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
   end
 
   def handle_event("save", %{"form" => params}, socket) do
+    params = Helpers.inject_headers_map(params)
+
     case AshPhoenix.Form.submit(socket.assigns.edit_form, params: params) do
       {:ok, updated} ->
         {:noreply,
@@ -253,12 +293,15 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
           phx-change="validate"
           phx-submit="save"
         >
-          <AshIntegration.Web.OutboundIntegrationLive.Index.integration_form_fields
+          <.integration_form_fields
             form={f}
             resource_options={@resource_options}
             action_options={@action_options}
             schema_version_options={@schema_version_options}
+            sample_event={@sample_event}
+            transform_preview={@transform_preview}
             actor={@current_user}
+            header_rows={@header_rows}
           />
           <div class="modal-action">
             <button

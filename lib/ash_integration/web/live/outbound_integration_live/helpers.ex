@@ -126,6 +126,22 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     end
   end
 
+  def inject_headers_map(params) do
+    case get_in(params, ["transport_config", "headers"]) do
+      raw when is_map(raw) ->
+        headers_map =
+          raw
+          |> Map.values()
+          |> Enum.reject(fn entry -> entry["key"] == "" end)
+          |> Map.new(fn entry -> {entry["key"], entry["value"] || ""} end)
+
+        put_in(params, ["transport_config", "headers"], headers_map)
+
+      _ ->
+        params
+    end
+  end
+
   defp sample_event_map(nil, _version), do: nil
   defp sample_event_map(_resource, nil), do: nil
 
