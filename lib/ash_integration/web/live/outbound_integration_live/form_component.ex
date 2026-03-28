@@ -1,9 +1,158 @@
 defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
-  use Phoenix.Component
+  use AshIntegration.Web, :live_component
 
-  import AshIntegration.Web.Components
+  alias AshIntegration.Web.OutboundIntegrationLive.Helpers
+
+  @impl true
+  def update(assigns, socket) do
+    socket = assign(socket, Map.take(assigns, [:id, :actor, :action, :integration, :navigate]))
+
+    socket =
+      if socket.assigns[:form] do
+        socket
+      else
+        init_form(socket)
+      end
+
+    {:ok, socket}
+  end
+
+  defp init_form(%{assigns: %{action: :new, actor: actor}} = socket) do
+    resource = AshIntegration.outbound_integration_resource()
+
+    form =
+      AshPhoenix.Form.for_create(resource, :create, actor: actor, forms: [auto?: true])
+      |> AshPhoenix.Form.add_form("form[transport_config]")
+      |> Helpers.ensure_auth_subform()
+
+    socket
+    |> assign(form: form, header_rows: [], has_secrets: %{}, submitted?: false)
+    |> Helpers.assign_form_options(form)
+  end
+
+  defp init_form(%{assigns: %{action: :edit, integration: integration, actor: actor}} = socket) do
+    form =
+      AshPhoenix.Form.for_update(integration, :update, actor: actor, forms: [auto?: true])
+      |> Helpers.ensure_auth_subform()
+
+    header_rows =
+      ((integration.transport_config && integration.transport_config.headers) || %{})
+      |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
+
+    socket
+    |> assign(form: form, header_rows: header_rows, submitted?: false)
+    |> assign(has_secrets: Helpers.detect_existing_secrets(integration))
+    |> Helpers.assign_form_options(form)
+  end
+
+  @impl true
+  def handle_event("add-header", _, socket) do
+    id = System.unique_integer([:positive])
+    {:noreply, assign(socket, header_rows: socket.assigns.header_rows ++ [{id, {"", ""}}])}
+  end
+
+  def handle_event("remove-header", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    rows = Enum.reject(socket.assigns.header_rows, fn {row_id, _} -> row_id == id end)
+    {:noreply, assign(socket, header_rows: rows)}
+  end
+
+  def handle_event("validate", %{"form" => params}, socket) do
+    params = params |> Helpers.inject_headers_map() |> Helpers.strip_blank_secrets()
+    form = AshPhoenix.Form.validate(socket.assigns.form, params)
+
+    {:noreply,
+     socket
+     |> assign(form: form)
+     |> Helpers.assign_form_options(form)}
+  end
+
+  def handle_event("save", %{"form" => params}, socket) do
+    params = params |> Helpers.inject_headers_map() |> Helpers.strip_blank_secrets()
+
+    case AshPhoenix.Form.submit(socket.assigns.form, params: params) do
+      {:ok, record} ->
+        notify_parent({:saved, record})
+
+        {:noreply,
+         socket
+         |> put_flash(:info, success_message(socket.assigns.action))
+         |> push_navigate(to: socket.assigns.navigate)}
+
+      {:error, form} ->
+        {:noreply, assign(socket, form: form, submitted?: true)}
+    end
+  end
+
+  def handle_event("auth-type-changed", %{"_target" => path} = params, socket) do
+    new_type = get_in(params, path)
+    form_path = :lists.droplast(path)
+
+    form =
+      socket.assigns.form
+      |> AshPhoenix.Form.remove_form(form_path)
+      |> AshPhoenix.Form.add_form(form_path, params: %{"_union_type" => new_type})
+
+    has_secrets = Map.put(socket.assigns[:has_secrets] || %{}, :auth, false)
+
+    {:noreply,
+     socket
+     |> assign(form: form, has_secrets: has_secrets)
+     |> Helpers.assign_form_options(form)}
+  end
+
+  defp success_message(:new), do: "Integration created"
+  defp success_message(:edit), do: "Integration updated"
+
+  defp notify_parent(msg), do: send(self(), {__MODULE__, msg})
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <div>
+      <.form
+        :let={f}
+        for={@form}
+        id={@id}
+        phx-target={@myself}
+        phx-change="validate"
+        phx-submit="save"
+      >
+        <.form_fields
+          form={f}
+          action={@action}
+          has_secrets={@has_secrets}
+          submitted?={@submitted?}
+          resource_options={@resource_options}
+          action_options={@action_options}
+          schema_version_options={@schema_version_options}
+          sample_event={@sample_event}
+          transform_preview={@transform_preview}
+          actor={@actor}
+          header_rows={@header_rows}
+          myself={@myself}
+        />
+        <div class="modal-action">
+          <button
+            type="button"
+            class="btn"
+            phx-click={JS.navigate(@navigate)}
+          >
+            Cancel
+          </button>
+          <button type="submit" class="btn btn-primary" phx-disable-with="Saving...">
+            {if @action == :new, do: "Create", else: "Save Changes"}
+          </button>
+        </div>
+      </.form>
+    </div>
+    """
+  end
 
   attr :form, :any, required: true
+  attr :action, :atom, required: true
+  attr :has_secrets, :map, default: %{}
+  attr :submitted?, :boolean, default: false
   attr :resource_options, :list, required: true
   attr :action_options, :list, required: true
   attr :schema_version_options, :list, required: true
@@ -11,8 +160,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
   attr :transform_preview, :any, default: nil
   attr :actor, :any, default: nil
   attr :header_rows, :list, default: []
+  attr :myself, :any, required: true
 
-  def integration_form_fields(assigns) do
+  defp form_fields(assigns) do
     ~H"""
     <div class="space-y-4">
       <.input field={@form[:name]} type="text" label="Name" required phx-debounce="blur" />
@@ -142,13 +292,19 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
               <button
                 type="button"
                 phx-click="remove-header"
+                phx-target={@myself}
                 phx-value-id={id}
                 class="btn btn-ghost btn-sm btn-square"
               >
                 &times;
               </button>
             </div>
-            <button type="button" phx-click="add-header" class="btn btn-outline btn-xs">
+            <button
+              type="button"
+              phx-click="add-header"
+              phx-target={@myself}
+              class="btn btn-outline btn-xs"
+            >
               + Add Header
             </button>
           </div>
@@ -160,7 +316,11 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
             type="password"
             autocomplete="one-time-code"
             label="HMAC Signing Secret"
-            placeholder="Leave blank to disable signing"
+            placeholder={
+              if @has_secrets[:signing_secret],
+                do: "Leave blank to keep current",
+                else: "Leave blank to disable signing"
+            }
             phx-debounce="blur"
           />
           <p class="text-xs text-base-content/50 mt-1">
@@ -176,6 +336,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
             <.input
               field={auth[:_union_type]}
               phx-change="auth-type-changed"
+              phx-target={@myself}
               type="select"
               label="Auth Method"
               options={[
@@ -192,7 +353,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
                   type="password"
                   autocomplete="one-time-code"
                   label="Token"
-                  required
+                  required={@action == :new}
+                  force_errors={@submitted?}
+                  placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
                   phx-debounce="blur"
                 />
               <% "api_key" -> %>
@@ -201,6 +364,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
                   type="text"
                   label="Header Name"
                   required
+                  force_errors={@submitted?}
                   phx-debounce="blur"
                 />
                 <.input
@@ -208,7 +372,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
                   type="password"
                   autocomplete="one-time-code"
                   label="API Key Value"
-                  required
+                  required={@action == :new}
+                  force_errors={@submitted?}
+                  placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
                   phx-debounce="blur"
                 />
               <% "basic_auth" -> %>
@@ -217,6 +383,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
                   type="text"
                   label="Username"
                   required
+                  force_errors={@submitted?}
                   phx-debounce="blur"
                 />
                 <.input
@@ -224,7 +391,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
                   type="password"
                   autocomplete="one-time-code"
                   label="Password"
-                  required
+                  required={@action == :new}
+                  force_errors={@submitted?}
+                  placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
                   phx-debounce="blur"
                 />
               <% _ -> %>

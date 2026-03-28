@@ -1,8 +1,7 @@
 defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
   use AshIntegration.Web, :live_view
 
-  alias AshIntegration.Web.OutboundIntegrationLive.Helpers
-  import AshIntegration.Web.OutboundIntegrationLive.FormComponent
+  alias AshIntegration.Web.OutboundIntegrationLive.{Helpers, FormComponent}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -10,13 +9,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
      assign(socket,
        page_title: "Outbound Integrations",
        integrations: [],
-       page: %{offset: 0, limit: 20, count: 0},
-       form: nil,
-       resource_options: [],
-       action_options: [],
-       schema_version_options: [],
-       sample_event: nil,
-       transform_preview: nil
+       page: %{offset: 0, limit: 20, count: 0}
      )}
   end
 
@@ -26,19 +19,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
   end
 
   defp apply_action(socket, :new, _params) do
-    resource = AshIntegration.outbound_integration_resource()
-    actor = socket.assigns.current_user
-
-    form =
-      AshPhoenix.Form.for_create(resource, :create, actor: actor, forms: [auto?: true])
-      |> AshPhoenix.Form.add_form("form[transport_config]")
-      |> Helpers.ensure_auth_subform()
-
     socket
-    |> assign(page_title: "New Outbound Integration")
-    |> assign(form: form)
-    |> assign(header_rows: [])
-    |> Helpers.assign_form_options(form)
+    |> assign(page_title: "New Outbound Integration", integration: nil)
     |> load_integrations(0)
   end
 
@@ -48,19 +30,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
 
     case Ash.get(resource, id, actor: actor) do
       {:ok, integration} ->
-        form =
-          AshPhoenix.Form.for_update(integration, :update, actor: actor, forms: [auto?: true])
-          |> Helpers.ensure_auth_subform()
-
-        header_rows =
-          ((integration.transport_config && integration.transport_config.headers) || %{})
-          |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
-
         socket
-        |> assign(page_title: "Edit #{integration.name}")
-        |> assign(form: form)
-        |> assign(header_rows: header_rows)
-        |> Helpers.assign_form_options(form)
+        |> assign(page_title: "Edit #{integration.name}", integration: integration)
         |> load_integrations(0)
 
       {:error, _} ->
@@ -74,8 +45,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
     offset = Helpers.parse_int(params["offset"], 0)
 
     socket
-    |> assign_new(:header_rows, fn -> [] end)
-    |> assign(page_title: "Outbound Integrations", form: nil)
+    |> assign(page_title: "Outbound Integrations")
     |> load_integrations(offset)
   end
 
@@ -123,60 +93,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
     {:noreply, load_integrations(socket, Helpers.parse_int(offset, 0))}
   end
 
-  def handle_event("add-header", _, socket) do
-    id = System.unique_integer([:positive])
-    {:noreply, assign(socket, header_rows: socket.assigns.header_rows ++ [{id, {"", ""}}])}
-  end
-
-  def handle_event("remove-header", %{"id" => id}, socket) do
-    id = String.to_integer(id)
-    rows = Enum.reject(socket.assigns.header_rows, fn {row_id, _} -> row_id == id end)
-    {:noreply, assign(socket, header_rows: rows)}
-  end
-
-  def handle_event("validate", %{"form" => params}, socket) do
-    params = Helpers.inject_headers_map(params)
-    form = AshPhoenix.Form.validate(socket.assigns.form, params)
-
-    {:noreply,
-     socket
-     |> assign(form: form)
-     |> Helpers.assign_form_options(form)}
-  end
-
-  def handle_event("save", %{"form" => params}, socket) do
-    params = Helpers.inject_headers_map(params)
-
-    case AshPhoenix.Form.submit(socket.assigns.form, params: params) do
-      {:ok, _record} ->
-        message =
-          if socket.assigns.live_action == :edit,
-            do: "Integration updated",
-            else: "Integration created"
-
-        {:noreply,
-         socket
-         |> put_flash(:info, message)
-         |> push_navigate(to: path(:index))}
-
-      {:error, form} ->
-        {:noreply, assign(socket, form: form)}
-    end
-  end
-
-  def handle_event("auth-type-changed", %{"_target" => path} = params, socket) do
-    new_type = get_in(params, path)
-    form_path = :lists.droplast(path)
-
-    form =
-      socket.assigns.form
-      |> AshPhoenix.Form.remove_form(form_path)
-      |> AshPhoenix.Form.add_form(form_path, params: %{"_union_type" => new_type})
-
-    {:noreply,
-     socket
-     |> assign(form: form)
-     |> Helpers.assign_form_options(form)}
+  @impl true
+  def handle_info({FormComponent, {:saved, _record}}, socket) do
+    {:noreply, socket}
   end
 
   @impl true
@@ -286,30 +205,14 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
         <h3 class="text-lg font-bold mb-4">
           {if @live_action == :new, do: "New Outbound Integration", else: "Edit Outbound Integration"}
         </h3>
-        <.form
-          :let={f}
-          for={@form}
+        <.live_component
+          module={FormComponent}
           id="integration-form"
-          phx-change="validate"
-          phx-submit="save"
-        >
-          <.integration_form_fields
-            form={f}
-            resource_options={@resource_options}
-            action_options={@action_options}
-            schema_version_options={@schema_version_options}
-            sample_event={@sample_event}
-            transform_preview={@transform_preview}
-            actor={@current_user}
-            header_rows={@header_rows}
-          />
-          <div class="modal-action">
-            <button type="button" class="btn" phx-click={JS.navigate(path(:index))}>Cancel</button>
-            <button type="submit" class="btn btn-primary" phx-disable-with="Saving...">
-              {if @live_action == :new, do: "Create", else: "Save Changes"}
-            </button>
-          </div>
-        </.form>
+          action={@live_action}
+          integration={assigns[:integration]}
+          actor={@current_user}
+          navigate={path(:index)}
+        />
       </.modal>
     </div>
     """

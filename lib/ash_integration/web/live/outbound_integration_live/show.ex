@@ -1,8 +1,7 @@
 defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
   use AshIntegration.Web, :live_view
 
-  alias AshIntegration.Web.OutboundIntegrationLive.Helpers
-  import AshIntegration.Web.OutboundIntegrationLive.FormComponent
+  alias AshIntegration.Web.OutboundIntegrationLive.{Helpers, FormComponent}
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -30,51 +29,19 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
   end
 
   defp apply_action(socket, :show, _params) do
-    assign(socket,
-      edit_form: nil,
-      test_result: nil,
-      testing: false,
-      header_rows: [],
-      resource_options: [],
-      action_options: [],
-      schema_version_options: [],
-      sample_event: nil,
-      transform_preview: nil
-    )
+    assign(socket, test_result: nil, testing: false)
   end
 
   defp apply_action(socket, :edit, _params) do
-    integration = socket.assigns.integration
-    actor = socket.assigns.current_user
-
-    form =
-      AshPhoenix.Form.for_update(integration, :update, actor: actor, forms: [auto?: true])
-      |> Helpers.ensure_auth_subform()
-
-    header_rows =
-      ((integration.transport_config && integration.transport_config.headers) || %{})
-      |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
-
-    socket
-    |> assign(page_title: "Edit #{integration.name}")
-    |> assign(edit_form: form)
-    |> assign(header_rows: header_rows)
-    |> assign(test_result: nil, testing: false)
-    |> Helpers.assign_form_options(form)
+    assign(socket,
+      page_title: "Edit #{socket.assigns.integration.name}",
+      test_result: nil,
+      testing: false
+    )
   end
 
   defp apply_action(socket, :test, _params) do
-    assign(socket,
-      edit_form: nil,
-      test_result: nil,
-      testing: false,
-      header_rows: [],
-      resource_options: [],
-      action_options: [],
-      schema_version_options: [],
-      sample_event: nil,
-      transform_preview: nil
-    )
+    assign(socket, test_result: nil, testing: false)
   end
 
   @impl true
@@ -124,60 +91,14 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     end
   end
 
-  def handle_event("add-header", _, socket) do
-    id = System.unique_integer([:positive])
-    {:noreply, assign(socket, header_rows: socket.assigns.header_rows ++ [{id, {"", ""}}])}
-  end
-
-  def handle_event("remove-header", %{"id" => id}, socket) do
-    id = String.to_integer(id)
-    rows = Enum.reject(socket.assigns.header_rows, fn {row_id, _} -> row_id == id end)
-    {:noreply, assign(socket, header_rows: rows)}
-  end
-
-  def handle_event("validate", %{"form" => params}, socket) do
-    params = Helpers.inject_headers_map(params)
-    form = AshPhoenix.Form.validate(socket.assigns.edit_form, params)
-
-    {:noreply,
-     socket
-     |> assign(edit_form: form)
-     |> Helpers.assign_form_options(form)}
-  end
-
-  def handle_event("save", %{"form" => params}, socket) do
-    params = Helpers.inject_headers_map(params)
-
-    case AshPhoenix.Form.submit(socket.assigns.edit_form, params: params) do
-      {:ok, updated} ->
-        {:noreply,
-         socket
-         |> assign(integration: Ash.load!(updated, [:owner], actor: socket.assigns.current_user))
-         |> put_flash(:info, "Integration updated")
-         |> push_navigate(to: "#{base_path()}/#{updated.id}")}
-
-      {:error, form} ->
-        {:noreply, assign(socket, edit_form: form)}
-    end
-  end
-
-  def handle_event("auth-type-changed", %{"_target" => path} = params, socket) do
-    new_type = get_in(params, path)
-    form_path = :lists.droplast(path)
-
-    form =
-      socket.assigns.edit_form
-      |> AshPhoenix.Form.remove_form(form_path)
-      |> AshPhoenix.Form.add_form(form_path, params: %{"_union_type" => new_type})
-
-    {:noreply,
-     socket
-     |> assign(edit_form: form)
-     |> Helpers.assign_form_options(form)}
-  end
-
   def handle_event("paginate", %{"offset" => offset}, socket) do
     {:noreply, load_delivery_logs(socket, Helpers.parse_int(offset, 0))}
+  end
+
+  @impl true
+  def handle_info({FormComponent, {:saved, updated}}, socket) do
+    integration = Ash.load!(updated, [:owner], actor: socket.assigns.current_user)
+    {:noreply, assign(socket, integration: integration)}
   end
 
   defp handle_action(socket, action_name, success_msg) do
@@ -286,36 +207,14 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
         on_cancel={JS.navigate("#{base_path()}/#{@integration.id}")}
       >
         <h3 class="text-lg font-bold mb-4">Edit Outbound Integration</h3>
-        <.form
-          :let={f}
-          for={@edit_form}
+        <.live_component
+          module={FormComponent}
           id="edit-integration-form"
-          phx-change="validate"
-          phx-submit="save"
-        >
-          <.integration_form_fields
-            form={f}
-            resource_options={@resource_options}
-            action_options={@action_options}
-            schema_version_options={@schema_version_options}
-            sample_event={@sample_event}
-            transform_preview={@transform_preview}
-            actor={@current_user}
-            header_rows={@header_rows}
-          />
-          <div class="modal-action">
-            <button
-              type="button"
-              class="btn"
-              phx-click={JS.navigate("#{base_path()}/#{@integration.id}")}
-            >
-              Cancel
-            </button>
-            <button type="submit" class="btn btn-primary" phx-disable-with="Saving...">
-              Save Changes
-            </button>
-          </div>
-        </.form>
+          action={:edit}
+          integration={@integration}
+          actor={@current_user}
+          navigate={"#{base_path()}/#{@integration.id}"}
+        />
       </.modal>
     </div>
     """
@@ -412,7 +311,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
       <div class="flex justify-between">
         <dt class="text-base-content/60">HMAC Signing</dt>
         <dd>
-          {if @config.signing_secret && @config.signing_secret != "", do: "Enabled", else: "Disabled"}
+          {if @config.encrypted_signing_secret, do: "Enabled", else: "Disabled"}
         </dd>
       </div>
     </dl>

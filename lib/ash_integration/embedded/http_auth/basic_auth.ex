@@ -18,10 +18,14 @@ defmodule AshIntegration.HttpAuth.BasicAuth do
     end
 
     attribute :password, :string do
-      allow_nil? false
+      allow_nil? true
       public? true
       sensitive? true
     end
+  end
+
+  validations do
+    validate {AshIntegration.Validations.RequireEncryptedArgument, field: :password}
   end
 
   actions do

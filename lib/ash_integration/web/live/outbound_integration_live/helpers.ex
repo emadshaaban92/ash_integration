@@ -126,6 +126,49 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     end
   end
 
+  @encrypted_auth_fields ["token", "value", "password"]
+
+  def strip_blank_secrets(params) do
+    case get_in(params, ["transport_config"]) do
+      tc when is_map(tc) ->
+        tc =
+          tc
+          |> maybe_drop_blank("signing_secret")
+          |> Map.update("auth", %{}, fn auth when is_map(auth) ->
+            Enum.reduce(@encrypted_auth_fields, auth, &maybe_drop_blank(&2, &1))
+          end)
+
+        put_in(params, ["transport_config"], tc)
+
+      _ ->
+        params
+    end
+  end
+
+  defp maybe_drop_blank(map, key) do
+    case Map.get(map, key) do
+      val when val in [nil, ""] -> Map.delete(map, key)
+      _ -> map
+    end
+  end
+
+  def detect_existing_secrets(integration) do
+    tc = integration.transport_config
+
+    auth_secret =
+      case tc && tc.auth do
+        %{type: :bearer_token, value: v} -> v.encrypted_token != nil
+        %{type: :api_key, value: v} -> v.encrypted_value != nil
+        %{type: :basic_auth, value: v} -> v.encrypted_password != nil
+        _ -> false
+      end
+
+    %{
+      signing_secret: tc != nil and tc.encrypted_signing_secret != nil,
+      auth: auth_secret
+    }
+  end
+
   def inject_headers_map(params) do
     case get_in(params, ["transport_config", "headers"]) do
       raw when is_map(raw) ->

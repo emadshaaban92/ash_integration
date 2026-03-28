@@ -24,6 +24,7 @@ defmodule AshIntegration.Web do
       import AshIntegration.Web.Components
       import Phoenix.HTML
 
+      alias Phoenix.LiveView.JS
       alias AshIntegration.OutboundIntegrations.Info, as: OutboundInfo
 
       unquote(helpers())
