@@ -52,6 +52,59 @@ defmodule Example.AshIntegration.HttpConfigTest do
     end
   end
 
+  describe "timeout validation" do
+    test "rejects timeout_ms exceeding http_max_timeout_ms" do
+      max = AshIntegration.http_max_timeout_ms()
+
+      assert {:error, _} =
+               Example.Integration.OutboundIntegration
+               |> Ash.Changeset.for_create(
+                 :create,
+                 %{
+                   name: "slow-integration",
+                   resource: "product",
+                   actions: ["create"],
+                   schema_version: 1,
+                   transport_config: %{
+                     url: "http://localhost:9999/webhook",
+                     auth: %{type: "none"},
+                     timeout_ms: max + 1
+                   },
+                   transform_script: "result = event",
+                   owner_id: create_user!().id
+                 },
+                 authorize?: false
+               )
+               |> Ash.create(authorize?: false)
+    end
+
+    test "accepts timeout_ms at the maximum" do
+      max = AshIntegration.http_max_timeout_ms()
+      stub_webhook_success()
+
+      assert {:ok, _} =
+               Example.Integration.OutboundIntegration
+               |> Ash.Changeset.for_create(
+                 :create,
+                 %{
+                   name: "max-timeout-integration",
+                   resource: "product",
+                   actions: ["create"],
+                   schema_version: 1,
+                   transport_config: %{
+                     url: "http://localhost:9999/webhook",
+                     auth: %{type: "none"},
+                     timeout_ms: max
+                   },
+                   transform_script: "result = event",
+                   owner_id: create_user!().id
+                 },
+                 authorize?: false
+               )
+               |> Ash.create(authorize?: false)
+    end
+  end
+
   describe "URL validation" do
     test "rejects non-HTTP URLs" do
       assert {:error, _} =

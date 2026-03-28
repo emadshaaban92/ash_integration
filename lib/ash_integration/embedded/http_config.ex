@@ -51,7 +51,7 @@ defmodule AshIntegration.HttpConfig do
       allow_nil? false
       public? true
       default 30_000
-      constraints min: 1000, max: 120_000
+      constraints min: 1000
     end
 
     attribute :headers, :map do
@@ -75,6 +75,8 @@ defmodule AshIntegration.HttpConfig do
   validations do
     validate match(:url, ~r/\Ahttps?:\/\/.+/),
       message: "must be a valid HTTP or HTTPS URL"
+
+    validate {AshIntegration.Validations.HttpTimeout, []}
   end
 
   actions do

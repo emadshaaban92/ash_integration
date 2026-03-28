@@ -57,6 +57,10 @@ defmodule AshIntegration do
     Keyword.get(config(), :delivery_log_retention_days, 90)
   end
 
+  def http_max_timeout_ms do
+    Keyword.get(config(), :http_max_timeout_ms, 60_000)
+  end
+
   @outbound_action %Spark.Dsl.Entity{
     name: :outbound_action,
     describe: "Declares an action that can trigger outbound integrations.",
