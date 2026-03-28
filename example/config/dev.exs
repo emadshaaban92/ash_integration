@@ -24,6 +24,7 @@ config :example, ExampleWeb.Endpoint,
   http: [ip: {0, 0, 0, 0}],
   check_origin: false,
   code_reloader: true,
+  reloadable_apps: [:example, :ash_integration],
   debug_errors: true,
   secret_key_base: "OAiFcBLMp3wak/FHgx2z1bb2EbiL6ivYB3D55JWXgNallzh6Krio9cbp6tBsWl4R",
   watchers: [
@@ -55,6 +56,12 @@ config :example, ExampleWeb.Endpoint,
 # different ports.
 
 # Reload browser tabs when matching files change.
+# Watch the ash_integration library directory for live reload
+config :phoenix_live_reload, :dirs, [
+  Path.expand(".."),
+  Path.expand(".")
+]
+
 config :example, ExampleWeb.Endpoint,
   live_reload: [
     web_console_logger: true,
@@ -67,7 +74,7 @@ config :example, ExampleWeb.Endpoint,
       ~r"lib/example_web/router\.ex$"E,
       ~r"lib/example_web/(controllers|live|components)/.*\.(ex|heex)$"E,
       ~r"lib/example/.*\.(ex|heex)$"E,
-      ~r"../lib/ash_integration/.*\.(ex|heex)$"E
+      ~r"lib/ash_integration/.*\.(ex|heex)$"E
     ]
   ]
 
