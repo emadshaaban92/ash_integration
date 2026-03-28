@@ -19,9 +19,14 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
 
   defp init_form(%{assigns: %{action: :new, actor: actor}} = socket) do
     resource = AshIntegration.outbound_integration_resource()
+    defaults = Helpers.create_form_defaults()
 
     form =
-      AshPhoenix.Form.for_create(resource, :create, actor: actor, forms: [auto?: true])
+      AshPhoenix.Form.for_create(resource, :create,
+        actor: actor,
+        forms: [auto?: true],
+        params: defaults
+      )
       |> AshPhoenix.Form.add_form("form[transport_config]")
       |> Helpers.ensure_auth_subform()
 

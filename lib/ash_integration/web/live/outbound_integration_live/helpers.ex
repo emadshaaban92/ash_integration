@@ -1,6 +1,30 @@
 defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
   alias AshIntegration.OutboundIntegrations.Info, as: OutboundInfo
 
+  def create_form_defaults do
+    resource_options = resource_options()
+
+    case resource_options do
+      [{_, identifier} | _] ->
+        versions = schema_version_options(identifier)
+
+        version =
+          case versions do
+            [{_, v} | _] -> v
+            _ -> nil
+          end
+
+        %{
+          "resource" => identifier,
+          "schema_version" => version,
+          "transform_script" => "result = event"
+        }
+
+      _ ->
+        %{"transform_script" => "result = event"}
+    end
+  end
+
   def assign_form_options(socket, form) do
     resource_options = resource_options()
     selected_resource = selected_resource(form, resource_options)

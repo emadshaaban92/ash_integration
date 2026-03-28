@@ -40,6 +40,7 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
      |> add_attribute_if_not_exists(:transform_script, :string,
        allow_nil?: false,
        public?: true,
+       default: "result = event",
        constraints: [max_length: 10_240]
      )
      |> add_attribute_if_not_exists(:consecutive_failures, :integer,
