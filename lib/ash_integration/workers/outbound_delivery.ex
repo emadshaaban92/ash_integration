@@ -17,6 +17,7 @@ defmodule AshIntegration.Workers.OutboundDelivery do
           "action" => action,
           "outbound_integration_id" => outbound_integration_id,
           "resource_id" => resource_id,
+          "occurred_at" => occurred_at,
           "snapshot" => snapshot
         }
       }) do
@@ -28,6 +29,7 @@ defmodule AshIntegration.Workers.OutboundDelivery do
           resource,
           action,
           resource_id,
+          occurred_at,
           snapshot
         )
 
@@ -64,6 +66,7 @@ defmodule AshIntegration.Workers.OutboundDelivery do
          resource,
          action,
          resource_id,
+         occurred_at,
          snapshot
        ) do
     case Ash.get(AshIntegration.outbound_integration_resource(), outbound_integration_id,
@@ -71,7 +74,7 @@ defmodule AshIntegration.Workers.OutboundDelivery do
          ) do
       {:ok, outbound_integration} ->
         if outbound_integration.active do
-          run_pipeline(outbound_integration, event_id, resource, action, resource_id, snapshot)
+          run_pipeline(outbound_integration, event_id, resource, action, resource_id, occurred_at, snapshot)
         else
           :ok
         end
@@ -85,8 +88,18 @@ defmodule AshIntegration.Workers.OutboundDelivery do
     end
   end
 
-  defp run_pipeline(outbound_integration, event_id, resource, action, resource_id, snapshot) do
-    case LuaSandbox.execute(outbound_integration.transform_script, snapshot) do
+  defp run_pipeline(outbound_integration, event_id, resource, action, resource_id, occurred_at, snapshot) do
+    event =
+      AshIntegration.OutboundIntegrations.Info.build_event(%{
+        id: event_id,
+        resource: resource,
+        action: action,
+        schema_version: outbound_integration.schema_version,
+        occurred_at: occurred_at,
+        data: snapshot
+      })
+
+    case LuaSandbox.execute(outbound_integration.transform_script, event) do
       {:ok, :skip} ->
         log_delivery(
           outbound_integration,

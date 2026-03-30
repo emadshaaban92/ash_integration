@@ -52,14 +52,11 @@ defmodule AshIntegration.Workers.EventDispatcher do
          resource_id,
          occurred_at
        ) do
-    occurred_dt = parse_datetime(occurred_at)
-
-    case EventDataLoader.load_event(
+    case EventDataLoader.load_event_data(
            resource,
            resource_id,
            action,
            outbound_integration.schema_version,
-           occurred_dt,
            outbound_integration.owner
          ) do
       {:ok, event_data} ->
@@ -69,6 +66,7 @@ defmodule AshIntegration.Workers.EventDispatcher do
           action: action,
           outbound_integration_id: outbound_integration.id,
           resource_id: resource_id,
+          occurred_at: occurred_at,
           snapshot: event_data
         }
         |> AshIntegration.Workers.OutboundDelivery.new()
@@ -79,21 +77,5 @@ defmodule AshIntegration.Workers.EventDispatcher do
           "Failed to load event data for outbound integration #{outbound_integration.id}: #{inspect(reason)}"
         )
     end
-  end
-
-  defp parse_datetime(dt) when is_binary(dt) do
-    case DateTime.from_iso8601(dt) do
-      {:ok, datetime, _} ->
-        datetime
-
-      {:error, reason} ->
-        raise ArgumentError,
-              "invalid occurred_at datetime #{inspect(dt)}: #{inspect(reason)}"
-    end
-  end
-
-  defp parse_datetime(other) do
-    raise ArgumentError,
-          "expected occurred_at to be an ISO 8601 string, got: #{inspect(other)}"
   end
 end

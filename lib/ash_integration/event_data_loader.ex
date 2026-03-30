@@ -1,17 +1,16 @@
 defmodule AshIntegration.EventDataLoader do
   alias AshIntegration.OutboundIntegrations.Info
 
-  def load_event(resource_identifier, resource_id, action, schema_version, occurred_at, actor) do
+  def load_event_data(resource_identifier, resource_id, action, schema_version, actor) do
     with {:ok, resource_module} <- fetch_resource_module(resource_identifier),
          :ok <- validate_action(resource_module, action),
          :ok <- validate_schema_version(resource_module, schema_version),
          loader when not is_nil(loader) <- Info.loader(resource_module) do
-      loader.load_event(
+      loader.load_event_data(
         resource_id,
         Info.action_atom(resource_module, action),
         schema_version,
-        actor,
-        occurred_at
+        actor
       )
     else
       nil -> {:error, {:missing_loader, resource_identifier}}

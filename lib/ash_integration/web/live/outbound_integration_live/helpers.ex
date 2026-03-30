@@ -28,7 +28,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
   def assign_form_options(socket, form) do
     resource_options = resource_options()
     selected_resource = selected_resource(form, resource_options)
-    sample_event_map = sample_event_map(selected_resource, selected_version(form))
+    selected_action = selected_action(form)
+    sample_event_map = sample_event_map(selected_resource, selected_version(form), selected_action)
 
     script =
       Map.get(form.params || %{}, "transform_script") ||
@@ -209,11 +210,35 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     end
   end
 
-  defp sample_event_map(nil, _version), do: nil
-  defp sample_event_map(_resource, nil), do: nil
+  defp selected_action(form) do
+    case Map.get(form.params || %{}, "actions") do
+      [action | _] when is_binary(action) and action != "" -> action
+      _ ->
+        case Map.get(form.data || %{}, :actions) do
+          [action | _] -> to_string(action)
+          _ -> nil
+        end
+    end
+  end
 
-  defp sample_event_map(resource_identifier, schema_version) do
-    OutboundInfo.sample_event(resource_identifier, schema_version)
+  defp sample_event_map(nil, _version, _action), do: nil
+  defp sample_event_map(_resource, nil, _action), do: nil
+
+  defp sample_event_map(resource_identifier, schema_version, action) do
+    case OutboundInfo.sample_event_data(resource_identifier, schema_version) do
+      nil ->
+        nil
+
+      data ->
+        OutboundInfo.build_event(%{
+          id: "01970000-0000-7000-0000-000000000000",
+          resource: resource_identifier,
+          action: action || "create",
+          schema_version: schema_version,
+          occurred_at: "2024-01-15T10:30:00Z",
+          data: data
+        })
+    end
   end
 
   defp encode_sample(nil), do: nil

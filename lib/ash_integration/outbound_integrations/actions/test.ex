@@ -22,15 +22,24 @@ defmodule AshIntegration.OutboundIntegrations.Actions.Test do
              outbound_integration.resource,
              action
            ),
-         {:ok, event_data} <-
-           EventDataLoader.load_event(
+         {:ok, data} <-
+           EventDataLoader.load_event_data(
              outbound_integration.resource,
              sample_resource_id,
              action,
              outbound_integration.schema_version,
-             DateTime.utc_now(),
              outbound_integration.owner
            ) do
+      event_data =
+        Info.build_event(%{
+          id: Ash.UUIDv7.generate(),
+          resource: outbound_integration.resource,
+          action: action,
+          schema_version: outbound_integration.schema_version,
+          occurred_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+          data: data
+        })
+
       case LuaSandbox.execute(outbound_integration.transform_script, event_data) do
         {:ok, :skip} ->
           {:ok, %{input: event_data, output: nil, skipped: true, error: nil}}

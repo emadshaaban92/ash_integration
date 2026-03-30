@@ -202,31 +202,25 @@ To make a resource's actions trigger outbound integrations:
 
 ### 1. Implement a Loader
 
-The loader builds the JSON payload for outbound events. It receives a resource ID and returns a map:
+The loader fetches the domain-specific data for outbound events. It returns only the data payload — the library automatically wraps it in an envelope with `id`, `resource`, `action`, `action_type`, `schema_version`, and `occurred_at`:
 
 ```elixir
 defmodule MyApp.Integration.Loaders.Order do
   @behaviour AshIntegration.OutboundIntegrations.Loader
 
   @impl true
-  def load_event(order_id, action, schema_version, actor, occurred_at) do
+  def load_event_data(order_id, _action, 1 = _schema_version, actor) do
     case Ash.get(MyApp.Orders.Order, order_id, actor: actor, load: [:customer, :lines]) do
       {:ok, order} ->
         {:ok, %{
-          resource: "order",
-          action: to_string(action),
-          schema_version: schema_version,
-          occurred_at: DateTime.to_iso8601(occurred_at),
-          data: %{
-            id: order.id,
-            reference: order.reference,
-            status: to_string(order.status),
-            customer: %{
-              name: order.customer.name,
-              email: order.customer.email
-            },
-            total: Decimal.to_float(order.total)
-          }
+          id: order.id,
+          reference: order.reference,
+          status: to_string(order.status),
+          customer: %{
+            name: order.customer.name,
+            email: order.customer.email
+          },
+          total: Decimal.to_float(order.total)
         }}
 
       {:error, _} = error ->

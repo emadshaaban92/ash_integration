@@ -20,7 +20,8 @@ defmodule Example.AshIntegration.OrderingTest do
           action: "create",
           outbound_integration_id: integration.id,
           resource_id: resource_id,
-          snapshot: %{resource: "product", action: "create", data: %{id: resource_id}}
+          occurred_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+          snapshot: %{id: resource_id}
         })
         |> Oban.insert()
 
@@ -31,7 +32,8 @@ defmodule Example.AshIntegration.OrderingTest do
           action: "create",
           outbound_integration_id: integration.id,
           resource_id: resource_id,
-          snapshot: %{resource: "product", action: "create", data: %{id: resource_id}}
+          occurred_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+          snapshot: %{id: resource_id}
         })
         |> Oban.insert()
 
@@ -53,11 +55,8 @@ defmodule Example.AshIntegration.OrderingTest do
         "action" => "create",
         "outbound_integration_id" => integration.id,
         "resource_id" => product.id,
-        "snapshot" => %{
-          "resource" => "product",
-          "action" => "create",
-          "data" => %{"id" => product.id}
-        }
+        "occurred_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+        "snapshot" => %{"id" => product.id}
       }
 
       assert :ok = perform_job(AshIntegration.Workers.OutboundDelivery, args)
