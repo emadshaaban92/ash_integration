@@ -42,15 +42,6 @@ defmodule AshIntegration.OutboundIntegrations.Actions.Test do
           {:ok, %{input: event_data, output: nil, skipped: false, error: lua_error}}
       end
     else
-      {:error, :no_sample_resource} ->
-        {:ok,
-         %{
-           input: nil,
-           output: nil,
-           skipped: false,
-           error: "No sample resource found for this owner's seller"
-         }}
-
       {:error, :invalid_action} ->
         {:error,
          Ash.Error.Invalid.exception(
@@ -62,8 +53,11 @@ defmodule AshIntegration.OutboundIntegrations.Actions.Test do
            ]
          )}
 
+      {:error, reason} when is_binary(reason) ->
+        {:ok, %{input: nil, output: nil, skipped: false, error: reason}}
+
       {:error, reason} ->
-        {:error, reason}
+        {:ok, %{input: nil, output: nil, skipped: false, error: humanize_error(reason)}}
     end
   end
 
@@ -74,7 +68,7 @@ defmodule AshIntegration.OutboundIntegrations.Actions.Test do
   end
 
   defp first_action([action | _]), do: {:ok, action}
-  defp first_action(_), do: {:error, :no_sample_resource}
+  defp first_action(_), do: {:error, :invalid_action}
 
   defp find_sample_resource_id(owner, resource_identifier, action) do
     with resource_module when not is_nil(resource_module) <-
@@ -82,7 +76,13 @@ defmodule AshIntegration.OutboundIntegrations.Actions.Test do
          loader when not is_nil(loader) <- Info.loader(resource_module) do
       loader.sample_resource_id(owner, Info.action_atom(resource_module, action))
     else
-      _ -> {:error, :no_sample_resource}
+      _ -> {:error, "No loader configured for this resource"}
     end
   end
+
+  defp humanize_error(atom) when is_atom(atom) do
+    atom |> to_string() |> String.replace("_", " ") |> String.capitalize()
+  end
+
+  defp humanize_error(other), do: inspect(other)
 end
