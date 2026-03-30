@@ -1,6 +1,7 @@
 ARG ELIXIR_VERSION=1.19.5
-ARG OTP_VERSION=28.3.2
-ARG UBUNTU_VERSION=noble-20260210.1
+ARG OTP_VERSION=28.4.1
+ARG UBUNTU_VERSION=noble-20260217
+
 
 ARG BASE_IMAGE="hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-ubuntu-${UBUNTU_VERSION}"
 
@@ -15,10 +16,9 @@ RUN usermod -u $USER_UID -g $USERNAME $USERNAME
 
 
 RUN apt-get update \
-    && apt-get install -y software-properties-common sudo watchman dnsutils curl unzip cmake build-essential git postgresql-common csvkit ghostscript \
+    && apt-get install -y software-properties-common sudo watchman dnsutils curl unzip cmake build-essential git postgresql-common \
     && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
-    && apt-get install -y postgresql-client-common postgresql-client-17 \
-    && add-apt-repository ppa:xtradeb/apps -y && apt-get update && apt-get install -y chromium \
+    && apt-get install -y postgresql-client-common postgresql-client-18 \
     && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 
@@ -26,7 +26,7 @@ RUN apt-get update \
 # * Anything else you want to do like clean up goes here *
 # ********************************************************
 
-ARG PROTOC_VERSION=25.1
+ARG PROTOC_VERSION=25.9
 
 RUN curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v$PROTOC_VERSION/protoc-$PROTOC_VERSION-linux-x86_64.zip \
     && unzip protoc-$PROTOC_VERSION-linux-x86_64.zip -d usr/local \
@@ -35,27 +35,17 @@ RUN curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v$PRO
 RUN mkdir /app
 RUN chown $USERNAME /app
 
-ARG TIDEWAVE_VERSION=v0.3.8
-
-RUN curl -sL -o tidewave https://github.com/tidewave-ai/tidewave_app/releases/download/$TIDEWAVE_VERSION/tidewave-cli-$(uname -m)-unknown-linux-musl \
+ARG TIDEWAVE_VERSION=v0.4.0
+RUN curl -sL -o tidewave https://github.com/tidewave-ai/tidewave_app/releases/download/$TIDEWAVE_VERSION/tidewave-cli-$(uname -m)-unknown-linux-gnu \
     && chmod +x tidewave \
     && mv tidewave /usr/local/bin/
 
-# Install Bun (glibc build) - the musl Bun that Tidewave downloads at runtime
-# doesn't work on glibc-based Ubuntu, so we pre-install a working one
-RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
-RUN ln -s /usr/local/bin/bun /usr/local/bin/node
 
-# # [Optional] Set the default user. Omit if you want to keep the default as root.
+# [Optional] Set the default user. Omit if you want to keep the default as root.
 USER $USERNAME
 
-RUN curl -fsSL https://claude.ai/install.sh | bash
-
-RUN bun install -g @zed-industries/claude-agent-acp
-
-ENV PATH="${PATH}:/home/$USERNAME/.bun/bin"
-
-ENV TIDEWAVE_CLAUDE_AGENT_ACP_EXECUTABLE=/home/$USERNAME/.bun/bin/claude-agent-acp
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && ln -sf /home/$USERNAME/.claude/.claude.json /home/$USERNAME/.claude.json
 
 RUN mix local.hex --force && mix archive.install hex phx_new --force && mix local.rebar --force && mix escript.install hex protobuf --force
 

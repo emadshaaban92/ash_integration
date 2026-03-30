@@ -20,6 +20,7 @@ services:
 
     volumes:
       - ./.:/home/ubuntu/workspace
+      - claude-data:/home/ubuntu/.claude
   db:
     image: postgres:18
     environment:
@@ -93,3 +94,6 @@ services:
 volumes:
   db-data:
   redpanda-data:
+  claude-data:
+
+
