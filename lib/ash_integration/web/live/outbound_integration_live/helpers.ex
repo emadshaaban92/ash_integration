@@ -29,7 +29,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     resource_options = resource_options()
     selected_resource = selected_resource(form, resource_options)
     selected_action = selected_action(form)
-    sample_event_map = sample_event_map(selected_resource, selected_version(form), selected_action)
+
+    sample_event_map =
+      sample_event_map(selected_resource, selected_version(form), selected_action)
 
     script =
       Map.get(form.params || %{}, "transform_script") ||
@@ -178,20 +180,24 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
   end
 
   def detect_existing_secrets(integration) do
-    tc = integration.transport_config
+    case integration.transport_config do
+      %Ash.Union{type: :http, value: tc} ->
+        auth_secret =
+          case tc.auth do
+            %{type: :bearer_token, value: v} -> v.encrypted_token != nil
+            %{type: :api_key, value: v} -> v.encrypted_value != nil
+            %{type: :basic_auth, value: v} -> v.encrypted_password != nil
+            _ -> false
+          end
 
-    auth_secret =
-      case tc && tc.auth do
-        %{type: :bearer_token, value: v} -> v.encrypted_token != nil
-        %{type: :api_key, value: v} -> v.encrypted_value != nil
-        %{type: :basic_auth, value: v} -> v.encrypted_password != nil
-        _ -> false
-      end
+        %{
+          signing_secret: tc.encrypted_signing_secret != nil,
+          auth: auth_secret
+        }
 
-    %{
-      signing_secret: tc != nil and tc.encrypted_signing_secret != nil,
-      auth: auth_secret
-    }
+      _ ->
+        %{signing_secret: false, auth: false}
+    end
   end
 
   def inject_headers_map(params) do
@@ -212,7 +218,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
 
   defp selected_action(form) do
     case Map.get(form.params || %{}, "actions") do
-      [action | _] when is_binary(action) and action != "" -> action
+      [action | _] when is_binary(action) and action != "" ->
+        action
+
       _ ->
         case Map.get(form.data || %{}, :actions) do
           [action | _] -> to_string(action)

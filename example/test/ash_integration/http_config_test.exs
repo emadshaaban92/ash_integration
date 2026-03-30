@@ -10,6 +10,7 @@ defmodule Example.AshIntegration.HttpConfigTest do
 
       create_outbound_integration!(%{
         transport_config: %{
+          type: :http,
           url: "http://localhost:9999/webhook",
           auth: %{type: "none"},
           timeout_ms: 5000,
@@ -36,6 +37,7 @@ defmodule Example.AshIntegration.HttpConfigTest do
 
         create_outbound_integration!(%{
           transport_config: %{
+            type: :http,
             url: "http://localhost:9999/webhook",
             auth: %{type: "none"},
             timeout_ms: 5000,
@@ -66,6 +68,7 @@ defmodule Example.AshIntegration.HttpConfigTest do
                    actions: ["create"],
                    schema_version: 1,
                    transport_config: %{
+                     type: :http,
                      url: "http://localhost:9999/webhook",
                      auth: %{type: "none"},
                      timeout_ms: max + 1
@@ -92,6 +95,7 @@ defmodule Example.AshIntegration.HttpConfigTest do
                    actions: ["create"],
                    schema_version: 1,
                    transport_config: %{
+                     type: :http,
                      url: "http://localhost:9999/webhook",
                      auth: %{type: "none"},
                      timeout_ms: max
@@ -117,6 +121,7 @@ defmodule Example.AshIntegration.HttpConfigTest do
                    actions: ["create"],
                    schema_version: 1,
                    transport_config: %{
+                     type: :http,
                      url: "ftp://example.com/webhook",
                      auth: %{type: "none"}
                    },
@@ -136,6 +141,7 @@ defmodule Example.AshIntegration.HttpConfigTest do
       create_outbound_integration!(%{
         transport_config: %{
           url: "http://localhost:9999/webhook",
+          type: :http,
           auth: %{type: "bearer_token", token: "my-secret-token"},
           timeout_ms: 5000
         }
@@ -159,6 +165,7 @@ defmodule Example.AshIntegration.HttpConfigTest do
       create_outbound_integration!(%{
         transport_config: %{
           url: "http://localhost:9999/webhook",
+          type: :http,
           auth: %{type: "basic_auth", username: "user", password: "pass"},
           timeout_ms: 5000
         }
@@ -183,6 +190,7 @@ defmodule Example.AshIntegration.HttpConfigTest do
       create_outbound_integration!(%{
         transport_config: %{
           url: "http://localhost:9999/webhook",
+          type: :http,
           auth: %{type: "api_key", header_name: "x-api-key", value: "secret-key-123"},
           timeout_ms: 5000
         }

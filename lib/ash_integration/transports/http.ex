@@ -5,7 +5,7 @@ defmodule AshIntegration.Transports.Http do
 
   @impl true
   def deliver(outbound_integration, event_id, payload) do
-    config = outbound_integration.transport_config
+    %Ash.Union{type: :http, value: config} = outbound_integration.transport_config
     json_payload = Jason.encode!(payload)
 
     custom_headers = Enum.map(config.headers || %{}, fn {k, v} -> {k, v} end)

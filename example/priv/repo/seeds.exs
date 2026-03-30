@@ -54,8 +54,8 @@ OutboundIntegration
     actions: ["create", "update"],
     schema_version: 1,
     owner_id: user.id,
-    transport: :http,
     transport_config: %{
+      type: :http,
       url: "https://httpbin.org/post",
       method: :post,
       headers: %{"content-type" => "application/json"},

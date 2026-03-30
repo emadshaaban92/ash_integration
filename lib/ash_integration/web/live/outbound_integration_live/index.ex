@@ -152,7 +152,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
                 {Enum.map_join(integration.actions, ", ", &humanize/1)}
               </td>
               <td>V{integration.schema_version}</td>
-              <td>{humanize(integration.transport)}</td>
+              <td>{humanize(integration.transport_config.type)}</td>
               <td class="text-sm">{Helpers.owner_name(integration)}</td>
               <td><.active_badge active={integration.active} /></td>
               <td>

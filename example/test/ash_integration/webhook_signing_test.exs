@@ -12,6 +12,7 @@ defmodule Example.AshIntegration.WebhookSigningTest do
 
       create_outbound_integration!(%{
         transport_config: %{
+          type: :http,
           url: "http://localhost:9999/webhook",
           auth: %{type: "none"},
           timeout_ms: 5000,
@@ -50,6 +51,7 @@ defmodule Example.AshIntegration.WebhookSigningTest do
 
       create_outbound_integration!(%{
         transport_config: %{
+          type: :http,
           url: "http://localhost:9999/webhook",
           auth: %{type: "none"},
           timeout_ms: 5000

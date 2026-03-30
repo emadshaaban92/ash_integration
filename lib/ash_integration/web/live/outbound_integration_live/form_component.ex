@@ -27,7 +27,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
         forms: [auto?: true],
         params: defaults
       )
-      |> AshPhoenix.Form.add_form("form[transport_config]")
+      |> AshPhoenix.Form.add_form("form[transport_config]", params: %{"_union_type" => "http"})
       |> Helpers.ensure_auth_subform()
 
     socket
@@ -41,7 +41,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
       |> Helpers.ensure_auth_subform()
 
     header_rows =
-      ((integration.transport_config && integration.transport_config.headers) || %{})
+      get_http_headers(integration.transport_config)
       |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
 
     socket
@@ -105,6 +105,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
      |> assign(form: form, has_secrets: has_secrets)
      |> Helpers.assign_form_options(form)}
   end
+
+  defp get_http_headers(%Ash.Union{type: :http, value: config}), do: config.headers || %{}
+  defp get_http_headers(_), do: %{}
 
   defp success_message(:new), do: "Integration created"
   defp success_message(:edit), do: "Integration updated"

@@ -27,13 +27,7 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
        allow_nil?: false,
        public?: true
      )
-     |> add_attribute_if_not_exists(:transport, :atom,
-       allow_nil?: false,
-       public?: true,
-       default: :http,
-       constraints: [one_of: [:http]]
-     )
-     |> add_attribute_if_not_exists(:transport_config, AshIntegration.HttpConfig,
+     |> add_attribute_if_not_exists(:transport_config, AshIntegration.TransportConfig,
        allow_nil?: false,
        public?: true
      )
@@ -356,7 +350,6 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
     :actions,
     :schema_version,
     :owner_id,
-    :transport,
     :transport_config,
     :transform_script
   ]

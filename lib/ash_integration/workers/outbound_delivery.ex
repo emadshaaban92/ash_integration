@@ -74,7 +74,15 @@ defmodule AshIntegration.Workers.OutboundDelivery do
          ) do
       {:ok, outbound_integration} ->
         if outbound_integration.active do
-          run_pipeline(outbound_integration, event_id, resource, action, resource_id, occurred_at, snapshot)
+          run_pipeline(
+            outbound_integration,
+            event_id,
+            resource,
+            action,
+            resource_id,
+            occurred_at,
+            snapshot
+          )
         else
           :ok
         end
@@ -88,7 +96,15 @@ defmodule AshIntegration.Workers.OutboundDelivery do
     end
   end
 
-  defp run_pipeline(outbound_integration, event_id, resource, action, resource_id, occurred_at, snapshot) do
+  defp run_pipeline(
+         outbound_integration,
+         event_id,
+         resource,
+         action,
+         resource_id,
+         occurred_at,
+         snapshot
+       ) do
     event =
       AshIntegration.OutboundIntegrations.Info.build_event(%{
         id: event_id,
@@ -140,7 +156,7 @@ defmodule AshIntegration.Workers.OutboundDelivery do
   end
 
   defp deliver_and_log(outbound_integration, event_id, resource, action, resource_id, payload) do
-    transport = AshIntegration.Transport.module_for(outbound_integration.transport)
+    transport = AshIntegration.Transport.module_for(outbound_integration.transport_config.type)
     start_time = System.monotonic_time(:millisecond)
     result = transport.deliver(outbound_integration, event_id, payload)
     duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -266,5 +282,4 @@ defmodule AshIntegration.Workers.OutboundDelivery do
       str
     end
   end
-
 end

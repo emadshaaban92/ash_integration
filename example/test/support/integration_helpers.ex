@@ -30,8 +30,8 @@ defmodule Example.IntegrationHelpers do
       resource: "product",
       actions: ["create"],
       schema_version: 1,
-      transport: :http,
       transport_config: %{
+        type: :http,
         url: "http://localhost:9999/webhook",
         auth: %{type: "none"},
         timeout_ms: 5000

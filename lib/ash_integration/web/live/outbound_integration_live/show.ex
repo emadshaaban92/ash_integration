@@ -285,7 +285,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
 
   attr :config, :any, required: true
 
-  defp transport_config_detail(%{config: %AshIntegration.HttpConfig{}} = assigns) do
+  defp transport_config_detail(%{config: %Ash.Union{type: :http, value: value}} = assigns) do
+    assigns = Phoenix.Component.assign(assigns, :config, value)
+
     ~H"""
     <dl class="space-y-2 text-sm">
       <div class="flex justify-between">
