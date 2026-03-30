@@ -35,8 +35,10 @@ defmodule Example.AshIntegration.OrderingTest do
         })
         |> Oban.insert()
 
-      # The second job should snooze because job1 is a predecessor
-      assert {:snooze, 30} = perform_job(AshIntegration.Workers.OutboundDelivery, job2.args)
+      # Perform using the real job struct so the DB ID is used in the ordering check
+      # (perform_job/3 assigns a synthetic ID that won't match real predecessor IDs)
+      job2 = %{job2 | args: Map.new(job2.args, fn {k, v} -> {to_string(k), v} end)}
+      assert {:snooze, 30} = AshIntegration.Workers.OutboundDelivery.perform(job2)
     end
 
     test "delivery proceeds when no predecessors exist" do
