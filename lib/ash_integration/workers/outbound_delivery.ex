@@ -140,12 +140,13 @@ defmodule AshIntegration.Workers.OutboundDelivery do
   end
 
   defp deliver_and_log(outbound_integration, event_id, resource, action, resource_id, payload) do
+    transport = AshIntegration.Transport.module_for(outbound_integration.transport)
     start_time = System.monotonic_time(:millisecond)
-    result = deliver_http(outbound_integration, event_id, payload)
+    result = transport.deliver(outbound_integration, event_id, payload)
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
     case result do
-      {:ok, status, body} ->
+      {:ok, metadata} ->
         log_delivery(
           outbound_integration,
           event_id,
@@ -154,15 +155,13 @@ defmodule AshIntegration.Workers.OutboundDelivery do
           resource_id,
           payload,
           :success,
-          response_status: status,
-          response_body: truncate(body, 102_400),
-          duration_ms: duration_ms
+          metadata_to_opts(metadata) ++ [duration_ms: duration_ms]
         )
 
         record_success(outbound_integration)
         :ok
 
-      {:error, status, body} when is_integer(status) and status >= 500 ->
+      {:error, %{retryable: true} = metadata} ->
         log_delivery(
           outbound_integration,
           event_id,
@@ -171,16 +170,13 @@ defmodule AshIntegration.Workers.OutboundDelivery do
           resource_id,
           payload,
           :failed,
-          response_status: status,
-          response_body: truncate(body, 102_400),
-          duration_ms: duration_ms,
-          error_message: "HTTP #{status}"
+          metadata_to_opts(metadata) ++ [duration_ms: duration_ms]
         )
 
         record_failure(outbound_integration)
-        {:error, "HTTP #{status} - retryable"}
+        {:error, "#{metadata.error_message} - retryable"}
 
-      {:error, status, body} when is_integer(status) ->
+      {:error, metadata} ->
         log_delivery(
           outbound_integration,
           event_id,
@@ -189,109 +185,25 @@ defmodule AshIntegration.Workers.OutboundDelivery do
           resource_id,
           payload,
           :failed,
-          response_status: status,
-          response_body: truncate(body, 102_400),
-          duration_ms: duration_ms,
-          error_message: "HTTP #{status}"
+          metadata_to_opts(metadata) ++ [duration_ms: duration_ms]
         )
 
         record_failure(outbound_integration)
         :ok
-
-      {:error, reason} ->
-        log_delivery(
-          outbound_integration,
-          event_id,
-          resource,
-          action,
-          resource_id,
-          payload,
-          :failed,
-          duration_ms: duration_ms,
-          error_message: "Network error: #{inspect(reason)}"
-        )
-
-        record_failure(outbound_integration)
-        {:error, "Network error - retryable"}
     end
   end
 
-  defp deliver_http(outbound_integration, event_id, payload) do
-    config = outbound_integration.transport_config
-    json_payload = Jason.encode!(payload)
+  @metadata_log_keys [:response_status, :response_body, :error_message]
 
-    custom_headers = Enum.map(config.headers || %{}, fn {k, v} -> {k, v} end)
-
-    headers =
-      [
-        {"content-type", "application/json"},
-        {"x-event-id", event_id}
-      ] ++ auth_headers(config.auth) ++ custom_headers ++ signature_headers(config, json_payload)
-
-    req_options = Application.get_env(:ash_integration, :req_options, [])
-
-    case Req.request(
-           [
-             method: config.method || :post,
-             url: config.url,
-             body: json_payload,
-             headers: headers,
-             receive_timeout: config.timeout_ms,
-             retry: false
-           ] ++ req_options
-         ) do
-      {:ok, %Req.Response{status: status, body: body}} when status >= 200 and status < 300 ->
-        {:ok, status, body_to_string(body)}
-
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error, status, body_to_string(body)}
-
-      {:error, %Req.TransportError{reason: reason}} ->
-        {:error, inspect(reason)}
-
-      {:error, reason} ->
-        {:error, inspect(reason)}
-    end
+  defp metadata_to_opts(metadata) do
+    metadata
+    |> Map.take(@metadata_log_keys)
+    |> Map.to_list()
+    |> Enum.map(fn {k, v} -> {k, truncate_if_string(v)} end)
   end
 
-  defp auth_headers(%Ash.Union{type: :bearer_token, value: auth}) do
-    {:ok, auth} = Ash.load(auth, [:token], domain: AshIntegration.domain())
-    [{"authorization", "Bearer #{auth.token}"}]
-  end
-
-  defp auth_headers(%Ash.Union{type: :api_key, value: auth}) do
-    {:ok, auth} = Ash.load(auth, [:value], domain: AshIntegration.domain())
-    [{auth.header_name, auth.value}]
-  end
-
-  defp auth_headers(%Ash.Union{type: :basic_auth, value: auth}) do
-    {:ok, auth} = Ash.load(auth, [:password], domain: AshIntegration.domain())
-    encoded = Base.encode64("#{auth.username}:#{auth.password}")
-    [{"authorization", "Basic #{encoded}"}]
-  end
-
-  defp auth_headers(%Ash.Union{type: :none}), do: []
-
-  defp signature_headers(%{signing_secret: nil}, _body), do: []
-
-  defp signature_headers(config, body) do
-    {:ok, config} = Ash.load(config, [:signing_secret], domain: AshIntegration.domain())
-
-    case config.signing_secret do
-      secret when is_binary(secret) and secret != "" ->
-        timestamp = System.system_time(:second)
-        signed_payload = "#{timestamp}.#{body}"
-
-        signature =
-          :crypto.mac(:hmac, :sha256, secret, signed_payload)
-          |> Base.encode16(case: :lower)
-
-        [{"x-webhook-signature", "t=#{timestamp},v1=#{signature}"}]
-
-      _ ->
-        []
-    end
-  end
+  defp truncate_if_string(v) when is_binary(v), do: truncate(v, 102_400)
+  defp truncate_if_string(v), do: v
 
   defp log_delivery(
          outbound_integration,
@@ -355,12 +267,4 @@ defmodule AshIntegration.Workers.OutboundDelivery do
     end
   end
 
-  defp body_to_string(body) when is_binary(body), do: body
-
-  defp body_to_string(body) do
-    case Jason.encode(body) do
-      {:ok, json} -> json
-      {:error, _} -> inspect(body)
-    end
-  end
 end
