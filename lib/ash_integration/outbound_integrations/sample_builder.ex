@@ -15,7 +15,8 @@ defmodule AshIntegration.OutboundIntegrations.SampleBuilder do
   Builds sample event data that respects the actor's authorization.
 
   1. Calls `loader.build_sample_resource(schema_version, action)` to get a full sample struct
-  2. Recursively filters relationships based on `Ash.can?({destination, read_action}, actor)`
+  2. Recursively filters relationships using `Ash.can/3` with `alter_source?: true` to
+     inspect authorization filters — nils out relationships with impossible (`false`) filters
   3. Calls `loader.transform_event_data(filtered_struct, action, schema_version)`
   """
   def build_sample_event_data(resource_identifier, schema_version, action, actor) do
@@ -75,18 +76,45 @@ defmodule AshIntegration.OutboundIntegrations.SampleBuilder do
   defp should_filter?(%Ash.NotLoaded{}), do: false
   defp should_filter?(_), do: true
 
-  # Use the relationship's configured read_action, or fall back to
-  # the destination resource's primary read action. This matches
-  # what Ash would use when loading the relationship.
+  # Check if the actor can read this relationship's destination resource
+  # by inspecting the authorization filter Ash would apply.
+  #
+  # Uses `alter_source?: true` so Ash returns the query with auth filters
+  # baked in, instead of just true/false. Then we check if the filter is
+  # literally `false` (impossible — actor has zero access) vs anything else
+  # (conditional or full access — show the data conservatively).
+  #
+  # Passes `accessing_from` context so policies like
+  # `authorize_if accessing_from(Source, :rel_name)` resolve correctly.
   defp can_read?(rel, actor) do
-    read_action = rel.read_action || primary_read_action(rel.destination)
+    resource = rel.destination
+    read_action = rel.read_action || primary_read_action(resource)
 
-    Ash.can?({rel.destination, read_action}, actor,
+    can_opts = [
+      alter_source?: true,
       run_queries?: false,
-      reuse_values?: true,
-      maybe_is: true
-    )
+      context: %{accessing_from: %{source: rel.source, name: rel.name}}
+    ]
+
+    case Ash.can({resource, read_action}, actor, can_opts) do
+      {:ok, true, %{filter: filter}} ->
+        not impossible_filter?(filter)
+
+      {:ok, false, _} ->
+        false
+
+      {:ok, false} ->
+        false
+
+      _ ->
+        # On error or unexpected result, conservatively show the data
+        true
+    end
   end
+
+  defp impossible_filter?(nil), do: false
+  defp impossible_filter?(%{expression: false}), do: true
+  defp impossible_filter?(_), do: false
 
   defp primary_read_action(resource) do
     resource

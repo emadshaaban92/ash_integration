@@ -44,6 +44,7 @@ defmodule AshIntegration.MixProject do
       {:phoenix_live_view, "~> 1.0"},
       {:live_select, "~> 1.0"},
       {:tidewave, "~> 0.1", only: [:dev]},
+      {:simple_sat, "~> 0.1", only: [:test]},
       {:sourceror, "~> 1.7", only: [:dev, :test]},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
