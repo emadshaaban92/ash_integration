@@ -21,7 +21,7 @@ defmodule Example.SampleBuilderIntegrationTest do
     test "returns error for unknown resource" do
       user = create_user!()
 
-      assert {:error, :unable_to_build_sample} =
+      assert {:error, :no_sample_data} =
                SampleBuilder.build_sample_event_data("nonexistent", 1, "create", user)
     end
 
@@ -43,6 +43,25 @@ defmodule Example.SampleBuilderIntegrationTest do
 
       assert Map.keys(real_data) |> Enum.sort() ==
                Map.keys(sample_data) |> Enum.sort()
+    end
+
+    test "uses real record when available, falls back to synthetic when not" do
+      user = create_user!()
+
+      # No products exist yet — should fall back to synthetic sample
+      {:ok, synthetic_data} =
+        SampleBuilder.build_sample_event_data("product", 1, "create", user)
+
+      assert synthetic_data.id == "00000000-0000-0000-0000-000000000000"
+      assert synthetic_data.name == "Example Product"
+
+      # Create a real product — should now use real data
+      product = create_product!()
+
+      {:ok, real_data} =
+        SampleBuilder.build_sample_event_data("product", 1, "create", user)
+
+      assert real_data.id == product.id
     end
   end
 end

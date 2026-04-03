@@ -2,32 +2,38 @@ defmodule AshIntegration.OutboundIntegrations.Loader do
   @moduledoc """
   Behaviour for loading and transforming outbound integration event data.
 
-  Implementors provide four callbacks:
+  ## Required callbacks
 
   - `load_resource/3` — loads the Ash resource record from the database with
     the appropriate relationships for building the event payload. Called with
     `actor` for authorization.
-
-  - `build_sample_resource/2` — builds an in-memory Ash struct with realistic
-    sample data populated in all relationships. This struct is NOT persisted.
-    The library will automatically filter out relationships the actor cannot
-    access (via `Ash.can?`) before passing it to `transform_event_data/3`.
-
-    Takes `schema_version` and `action` so the sample can vary by action
-    (e.g., a `:delete` action might only populate minimal fields).
 
   - `transform_event_data/3` — pure function that transforms an Ash resource
     record (real or sample) into the event data map. This is the single source
     of truth for the event payload shape. It must handle `nil` relationships
     gracefully (e.g., when the actor cannot access related data).
 
-  - `sample_resource_id/2` — finds a real record ID for the Test action.
+  ## Optional callbacks
 
-  Loaders do NOT need to know about authorization filtering. The library
-  handles it transparently: `build_sample_resource/2` returns a full struct,
-  the library nils out unauthorized relationships, and `transform_event_data/3`
-  receives the filtered struct — exactly like it would receive a real record
-  where Ash policies blocked certain relationships.
+  - `sample_resource_id/2` — finds a real record ID to use for sample previews.
+    When implemented, the library will load a real record for the preview,
+    with Ash policies applied naturally through the actor.
+
+  - `build_sample_resource/2` — builds an in-memory Ash struct with realistic
+    sample data populated in all relationships. Used as a fallback when
+    `sample_resource_id/2` is not implemented or finds no records. The library
+    will automatically filter out relationships the actor cannot access before
+    passing it to `transform_event_data/3`.
+
+  ## Sample preview strategy
+
+  The library tries to build a sample preview in this order:
+
+  1. **Real record** — if `sample_resource_id/2` is implemented and returns an ID,
+     load it via `load_resource/3`. Ash handles authorization naturally.
+  2. **Synthetic sample** — if no real record is available and `build_sample_resource/2`
+     is implemented, build a synthetic struct and filter unauthorized relationships.
+  3. **Error** — if neither is available, return `{:error, :no_sample_data}`.
   """
 
   @doc """
@@ -47,13 +53,13 @@ defmodule AshIntegration.OutboundIntegrations.Loader do
   @doc """
   Builds an in-memory Ash struct with sample data for all relationships.
 
-  This struct should look like a fully-loaded resource record with realistic
+  Optional. Used as a fallback when `sample_resource_id/2` is not implemented
+  or finds no records.
+
+  The struct should look like a fully-loaded resource record with realistic
   fake data in ALL relationships. The library will automatically nil out
   relationships the actor cannot access before passing it to
   `transform_event_data/3`.
-
-  The struct should be the same Ash resource type as what `load_resource/3`
-  returns, with relationships populated as Ash structs (not plain maps).
 
   Takes `action` so the sample can vary by action type — for example, a
   `:delete` action might only need the resource ID and timestamps, while a
@@ -79,11 +85,14 @@ defmodule AshIntegration.OutboundIntegrations.Loader do
             ) :: map()
 
   @doc """
-  Finds a sample resource ID for the Test action.
+  Finds a real record ID to use for sample previews.
 
-  Called with the actor for authorization. Should return the ID of a real
-  record that the actor can access, or `{:error, :no_sample_resource}`.
+  Optional. When implemented, the library prefers loading a real record
+  over building a synthetic sample. Called with the actor for authorization.
+  Should return the ID of a record the actor can access, or an error tuple.
   """
   @callback sample_resource_id(actor :: term(), action :: atom()) ::
               {:ok, term()} | {:error, term()}
+
+  @optional_callbacks build_sample_resource: 2, sample_resource_id: 2
 end

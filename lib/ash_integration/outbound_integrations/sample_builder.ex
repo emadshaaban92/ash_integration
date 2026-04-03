@@ -1,23 +1,24 @@
 defmodule AshIntegration.OutboundIntegrations.SampleBuilder do
   @moduledoc """
-  Builds authorization-aware sample event data.
+  Builds sample event data for outbound integration previews.
 
-  Given a fully-populated sample Ash struct, recursively walks its
-  relationships and nils out any that the actor cannot read according
-  to Ash policies. The filtered struct is then passed through the
-  loader's transform function — which handles nil gracefully, exactly
-  as it does for real data where Ash policies blocked access.
+  Tries to load a real record first (via `sample_resource_id` + `load_resource`),
+  falling back to a synthetic sample (via `build_sample_resource` + authorization
+  filtering) if no real data is available.
   """
 
   alias AshIntegration.OutboundIntegrations.Info
+  alias AshIntegration.EventDataLoader
 
   @doc """
-  Builds sample event data that respects the actor's authorization.
+  Builds sample event data using the best available strategy.
 
-  1. Calls `loader.build_sample_resource(schema_version, action)` to get a full sample struct
-  2. Recursively filters relationships using `Ash.can/3` with `alter_source?: true` to
-     inspect authorization filters — nils out relationships with impossible (`false`) filters
-  3. Calls `loader.transform_event_data(filtered_struct, action, schema_version)`
+  1. **Real record** — if the loader implements `sample_resource_id/2` and a record
+     is found, loads it via `EventDataLoader` with full Ash authorization.
+  2. **Synthetic sample** — if no real record, and the loader implements
+     `build_sample_resource/2`, builds a synthetic struct and filters unauthorized
+     relationships.
+  3. **Error** — if neither strategy is available, returns `{:error, :no_sample_data}`.
   """
   def build_sample_event_data(resource_identifier, schema_version, action, actor) do
     with resource_module when not is_nil(resource_module) <-
@@ -25,11 +26,52 @@ defmodule AshIntegration.OutboundIntegrations.SampleBuilder do
          loader when not is_nil(loader) <- Info.loader(resource_module),
          action_atom when not is_nil(action_atom) <-
            Info.action_atom(resource_module, action) do
+      case try_real_record(
+             loader,
+             resource_identifier,
+             schema_version,
+             action,
+             action_atom,
+             actor
+           ) do
+        {:ok, _data} = success ->
+          success
+
+        _no_real_record ->
+          try_synthetic_sample(loader, schema_version, action_atom, actor)
+      end
+    else
+      _ -> {:error, :no_sample_data}
+    end
+  end
+
+  defp try_real_record(loader, resource_identifier, schema_version, action, action_atom, actor) do
+    if function_exported?(loader, :sample_resource_id, 2) do
+      case loader.sample_resource_id(actor, action_atom) do
+        {:ok, resource_id} ->
+          EventDataLoader.load_event_data(
+            resource_identifier,
+            resource_id,
+            action,
+            schema_version,
+            actor
+          )
+
+        _error ->
+          :no_real_record
+      end
+    else
+      :no_real_record
+    end
+  end
+
+  defp try_synthetic_sample(loader, schema_version, action_atom, actor) do
+    if function_exported?(loader, :build_sample_resource, 2) do
       sample_struct = loader.build_sample_resource(schema_version, action_atom)
       filtered_struct = filter_unauthorized(sample_struct, actor)
       {:ok, loader.transform_event_data(filtered_struct, action_atom, schema_version)}
     else
-      _ -> {:error, :unable_to_build_sample}
+      {:error, :no_sample_data}
     end
   end
 

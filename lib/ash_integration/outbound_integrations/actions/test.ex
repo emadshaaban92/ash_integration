@@ -83,7 +83,12 @@ defmodule AshIntegration.OutboundIntegrations.Actions.Test do
     with resource_module when not is_nil(resource_module) <-
            Info.resource_module(resource_identifier),
          loader when not is_nil(loader) <- Info.loader(resource_module) do
-      loader.sample_resource_id(owner, Info.action_atom(resource_module, action))
+      if function_exported?(loader, :sample_resource_id, 2) do
+        loader.sample_resource_id(owner, Info.action_atom(resource_module, action))
+      else
+        {:error,
+         "No sample data available — implement sample_resource_id/2 or create test records"}
+      end
     else
       _ -> {:error, "No loader configured for this resource"}
     end
