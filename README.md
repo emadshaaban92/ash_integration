@@ -202,32 +202,39 @@ To make a resource's actions trigger outbound integrations:
 
 ### 1. Implement a Loader
 
-The loader fetches the domain-specific data for outbound events. It returns only the data payload — the library automatically wraps it in an envelope with `id`, `resource`, `action`, `action_type`, `schema_version`, and `occurred_at`:
+The loader fetches and transforms domain-specific data for outbound events. It returns only the data payload — the library automatically wraps it in an envelope with `id`, `resource`, `action`, `action_type`, `schema_version`, and `occurred_at`.
+
+A loader has two required callbacks and two optional ones:
 
 ```elixir
 defmodule MyApp.Integration.Loaders.Order do
   @behaviour AshIntegration.OutboundIntegrations.Loader
 
+  # Required: load a resource record with all relationships needed for the event
   @impl true
-  def load_event_data(order_id, _action, 1 = _schema_version, actor) do
-    case Ash.get(MyApp.Orders.Order, order_id, actor: actor, load: [:customer, :lines]) do
-      {:ok, order} ->
-        {:ok, %{
-          id: order.id,
-          reference: order.reference,
-          status: to_string(order.status),
-          customer: %{
-            name: order.customer.name,
-            email: order.customer.email
-          },
-          total: Decimal.to_float(order.total)
-        }}
-
-      {:error, _} = error ->
-        error
-    end
+  def load_resource(order_id, 1 = _schema_version, actor) do
+    Ash.get(MyApp.Orders.Order, order_id, actor: actor, load: [:customer, :lines])
   end
 
+  # Required: transform a loaded record (real or sample) into the event data map.
+  # Must handle nil relationships gracefully — they indicate data the actor cannot access.
+  @impl true
+  def transform_event_data(order, _action, 1 = _schema_version) do
+    %{
+      id: order.id,
+      reference: order.reference,
+      status: to_string(order.status),
+      customer: if(order.customer, do: %{
+        name: order.customer.name,
+        email: order.customer.email
+      }),
+      total: Decimal.to_float(order.total)
+    }
+  end
+
+  # Optional: find a real record for the sample preview.
+  # When implemented, the library loads a real record for previews
+  # instead of using a synthetic sample.
   @impl true
   def sample_resource_id(actor, _action) do
     case MyApp.Orders.Order
@@ -238,8 +245,32 @@ defmodule MyApp.Integration.Loaders.Order do
       _ -> {:error, :no_sample_resource}
     end
   end
+
+  # Optional: build a synthetic sample struct as a fallback when no real
+  # records exist. The library automatically filters out relationships
+  # the actor cannot access before passing it to transform_event_data/3.
+  @impl true
+  def build_sample_resource(1 = _schema_version, _action) do
+    %MyApp.Orders.Order{
+      id: "00000000-0000-0000-0000-000000000000",
+      reference: "ORD-SAMPLE-001",
+      status: :confirmed,
+      total: Decimal.new("99.99"),
+      customer: %MyApp.Customers.Customer{
+        name: "Jane Doe",
+        email: "jane@example.com"
+      },
+      lines: []
+    }
+  end
 end
 ```
+
+The library uses these callbacks in a fallback chain for sample previews:
+
+1. **Real record** — `sample_resource_id/2` finds an ID, then `load_resource/3` loads it with full Ash authorization
+2. **Synthetic sample** — `build_sample_resource/2` builds a fake struct, the library filters unauthorized relationships
+3. **Error** — if neither callback is implemented or returns data, the preview shows an error
 
 ### 2. Add the DSL to your resource
 
@@ -336,7 +367,7 @@ The built-in dashboard provides:
 - **Integration list** — paginated table with status, failure count, and quick actions
 - **Create/Edit** — full form with resource/action selection, schema version, HTTP config, auth, and Lua script
 - **Detail view** — complete integration configuration, transport details, and recent delivery logs
-- **Test panel** — run transform scripts against sample data from the database and preview input/output
+- **Test panel** — run transform scripts against real or sample data and preview input/output
 - **Delivery logs** — browse all delivery attempts with request/response details, duration, and error messages
 
 The dashboard uses [daisyUI](https://daisyui.com) for styling (included by default in Phoenix 1.8+).
