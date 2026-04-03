@@ -1,5 +1,6 @@
 defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
   alias AshIntegration.OutboundIntegrations.Info, as: OutboundInfo
+  alias AshIntegration.OutboundIntegrations.SampleBuilder
 
   def create_form_defaults do
     resource_options = resource_options()
@@ -29,9 +30,10 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     resource_options = resource_options()
     selected_resource = selected_resource(form, resource_options)
     selected_action = selected_action(form)
+    owner = resolve_owner(form)
 
     sample_event_map =
-      sample_event_map(selected_resource, selected_version(form), selected_action)
+      sample_event_map(selected_resource, selected_version(form), selected_action, owner)
 
     script =
       Map.get(form.params || %{}, "transform_script") ||
@@ -229,23 +231,58 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     end
   end
 
-  defp sample_event_map(nil, _version, _action), do: nil
-  defp sample_event_map(_resource, nil, _action), do: nil
+  defp sample_event_map(nil, _version, _action, _actor), do: nil
+  defp sample_event_map(_resource, nil, _action, _actor), do: nil
 
-  defp sample_event_map(resource_identifier, schema_version, action) do
-    case OutboundInfo.sample_event_data(resource_identifier, schema_version) do
-      nil ->
-        nil
+  defp sample_event_map(resource_identifier, schema_version, action, actor) do
+    action = action || first_action_for_resource(resource_identifier)
 
-      data ->
+    case SampleBuilder.build_sample_event_data(
+           resource_identifier,
+           schema_version,
+           action,
+           actor
+         ) do
+      {:ok, data} ->
         OutboundInfo.build_event(%{
           id: "01970000-0000-7000-0000-000000000000",
           resource: resource_identifier,
-          action: action || "create",
+          action: action,
           schema_version: schema_version,
           occurred_at: "2024-01-15T10:30:00Z",
           data: data
         })
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  defp resolve_owner(form) do
+    # On edit, the form data has the owner loaded
+    case form.data do
+      %{owner: %{id: _} = owner} -> owner
+      _ -> resolve_owner_from_params(form)
+    end
+  end
+
+  defp resolve_owner_from_params(form) do
+    owner_id = Map.get(form.params || %{}, "owner_id")
+
+    if owner_id do
+      actor_resource = AshIntegration.actor_resource()
+
+      case Ash.get(actor_resource, owner_id, authorize?: false) do
+        {:ok, owner} -> owner
+        _ -> nil
+      end
+    end
+  end
+
+  defp first_action_for_resource(resource_identifier) do
+    case OutboundInfo.resource_module(resource_identifier) do
+      nil -> nil
+      resource -> resource |> OutboundInfo.action_names() |> List.first()
     end
   end
 
