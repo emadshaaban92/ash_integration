@@ -16,7 +16,26 @@ defmodule AshIntegration.MixProject do
       description: "Outbound integration system for Ash Framework with built-in dashboard UI",
       package: package(),
       docs: docs(),
-      source_url: @source_url
+      source_url: @source_url,
+      usage_rules: [
+        file: "CLAUDE.md",
+        usage_rules: ["usage_rules:all"],
+        skills: [
+          location: ".claude/skills",
+          build: [
+            "ash-framework": [
+              description:
+                "Use this skill when working with Ash Framework resources, actions, queries, authorization, calculations, aggregates, relationships, data layers, migrations, code interfaces, or any Ash extension (ash_postgres, ash_phoenix, ash_authentication).",
+              usage_rules: [:ash, ~r/^ash_/]
+            ],
+            "phoenix-web": [
+              description:
+                "Use this skill when working with Phoenix controllers, LiveView, routes, Ecto schemas, HTML/HEEx templates, or Phoenix web layer code.",
+              usage_rules: [:phoenix]
+            ]
+          ]
+        ]
+      ]
     ]
   end
 
@@ -46,7 +65,8 @@ defmodule AshIntegration.MixProject do
       {:tidewave, "~> 0.1", only: [:dev]},
       {:simple_sat, "~> 0.1", only: [:test]},
       {:sourceror, "~> 1.7", only: [:dev, :test]},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:usage_rules, "~> 1.0", only: [:dev]}
     ]
   end
 
