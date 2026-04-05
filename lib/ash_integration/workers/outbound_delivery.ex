@@ -158,7 +158,7 @@ defmodule AshIntegration.Workers.OutboundDelivery do
   defp deliver_and_log(outbound_integration, event_id, resource, action, resource_id, payload) do
     transport = AshIntegration.Transport.module_for(outbound_integration.transport_config.type)
     start_time = System.monotonic_time(:millisecond)
-    result = transport.deliver(outbound_integration, event_id, payload)
+    result = transport.deliver(outbound_integration, event_id, resource_id, payload)
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
     case result do
@@ -209,7 +209,13 @@ defmodule AshIntegration.Workers.OutboundDelivery do
     end
   end
 
-  @metadata_log_keys [:response_status, :response_body, :error_message]
+  @metadata_log_keys [
+    :response_status,
+    :response_body,
+    :error_message,
+    :kafka_offset,
+    :kafka_partition
+  ]
 
   defp metadata_to_opts(metadata) do
     metadata
@@ -245,6 +251,8 @@ defmodule AshIntegration.Workers.OutboundDelivery do
         response_status: Keyword.get(opts, :response_status),
         response_body: Keyword.get(opts, :response_body),
         error_message: Keyword.get(opts, :error_message),
+        kafka_offset: Keyword.get(opts, :kafka_offset),
+        kafka_partition: Keyword.get(opts, :kafka_partition),
         duration_ms: Keyword.get(opts, :duration_ms),
         status: status
       },

@@ -7,6 +7,11 @@ defmodule AshIntegration.TransportConfig do
           type: AshIntegration.HttpConfig,
           tag: :type,
           tag_value: :http
+        ],
+        kafka: [
+          type: AshIntegration.KafkaConfig,
+          tag: :type,
+          tag_value: :kafka
         ]
       ],
       storage: :map_with_tag

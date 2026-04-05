@@ -13,6 +13,7 @@ defmodule Example.Application do
       {DNSCluster, query: Application.get_env(:example, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Example.PubSub},
       Example.Vault,
+      AshIntegration.KafkaClientManager,
       {Oban, Application.fetch_env!(:example, Oban)},
       ExampleWeb.Endpoint,
       {AshAuthentication.Supervisor, [otp_app: :example]}

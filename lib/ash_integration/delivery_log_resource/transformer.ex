@@ -25,6 +25,8 @@ defmodule AshIntegration.DeliveryLogResource.Transformer do
      |> add_attribute_if_not_exists(:response_status, :integer, allow_nil?: true, public?: true)
      |> add_attribute_if_not_exists(:response_body, :string, allow_nil?: true, public?: true)
      |> add_attribute_if_not_exists(:error_message, :string, allow_nil?: true, public?: true)
+     |> add_attribute_if_not_exists(:kafka_offset, :integer, allow_nil?: true, public?: true)
+     |> add_attribute_if_not_exists(:kafka_partition, :integer, allow_nil?: true, public?: true)
      |> add_attribute_if_not_exists(:duration_ms, :integer, allow_nil?: true, public?: true)
      |> add_attribute_if_not_exists(:status, :atom,
        allow_nil?: false,
@@ -124,6 +126,8 @@ defmodule AshIntegration.DeliveryLogResource.Transformer do
             :response_status,
             :response_body,
             :error_message,
+            :kafka_offset,
+            :kafka_partition,
             :duration_ms,
             :status,
             :outbound_integration_id

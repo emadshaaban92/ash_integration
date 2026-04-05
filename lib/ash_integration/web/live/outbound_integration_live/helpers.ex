@@ -65,6 +65,23 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     end
   end
 
+  def ensure_security_subform(form) do
+    tc = form.forms[:transport_config]
+
+    cond do
+      is_nil(tc) ->
+        form
+
+      is_nil(tc.forms[:security]) ->
+        AshPhoenix.Form.add_form(form, "form[transport_config][security]",
+          params: %{"_union_type" => "none"}
+        )
+
+      true ->
+        form
+    end
+  end
+
   def owner_name(%{owner: %{display_name: dn}}) when is_binary(dn), do: dn
   def owner_name(%{owner: %{name: name}}) when is_binary(name), do: name
   def owner_name(%{owner: %{email: email}}), do: to_string(email)
@@ -166,6 +183,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
           |> Map.update("auth", %{}, fn auth when is_map(auth) ->
             Enum.reduce(@encrypted_auth_fields, auth, &maybe_drop_blank(&2, &1))
           end)
+          |> Map.update("security", %{}, fn sec when is_map(sec) ->
+            maybe_drop_blank(sec, "password")
+          end)
 
         put_in(params, ["transport_config"], tc)
 
@@ -197,13 +217,36 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
           auth: auth_secret
         }
 
+      %Ash.Union{type: :kafka, value: tc} ->
+        sasl_password =
+          case tc.security do
+            %Ash.Union{type: type, value: sec} when type in [:sasl, :sasl_tls] ->
+              sec.encrypted_password != nil
+
+            _ ->
+              false
+          end
+
+        %{
+          signing_secret: tc.encrypted_signing_secret != nil,
+          sasl_password: sasl_password,
+          auth: false
+        }
+
       _ ->
         %{signing_secret: false, auth: false}
     end
   end
 
   def inject_headers_map(params) do
-    case get_in(params, ["transport_config", "headers"]) do
+    params
+    |> inject_kv_headers(["transport_config", "headers"])
+    |> inject_kv_headers(["transport_config", "headers_kafka"])
+    |> inject_brokers_list()
+  end
+
+  defp inject_kv_headers(params, path) do
+    case get_in(params, path) do
       raw when is_map(raw) ->
         headers_map =
           raw
@@ -211,7 +254,30 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
           |> Enum.reject(fn entry -> entry["key"] == "" end)
           |> Map.new(fn entry -> {entry["key"], entry["value"] || ""} end)
 
-        put_in(params, ["transport_config", "headers"], headers_map)
+        # kafka_headers get written to the "headers" transport_config field
+        target_path =
+          case List.last(path) do
+            "headers_kafka" -> List.replace_at(path, -1, "headers")
+            _ -> path
+          end
+
+        put_in(params, target_path, headers_map)
+
+      _ ->
+        params
+    end
+  end
+
+  defp inject_brokers_list(params) do
+    case get_in(params, ["transport_config", "brokers"]) do
+      raw when is_map(raw) ->
+        brokers =
+          raw
+          |> Enum.sort_by(fn {k, _} -> k end)
+          |> Enum.map(fn {_, v} -> v end)
+          |> Enum.reject(&(&1 == ""))
+
+        put_in(params, ["transport_config", "brokers"], brokers)
 
       _ ->
         params

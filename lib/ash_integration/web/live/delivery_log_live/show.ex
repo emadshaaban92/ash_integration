@@ -94,6 +94,14 @@ defmodule AshIntegration.Web.DeliveryLogLive.Show do
                 </span>
               </dd>
             </div>
+            <div :if={@log.kafka_partition} class="flex justify-between">
+              <dt class="text-base-content/60">Kafka Partition</dt>
+              <dd>{@log.kafka_partition}</dd>
+            </div>
+            <div :if={@log.kafka_offset} class="flex justify-between">
+              <dt class="text-base-content/60">Kafka Offset</dt>
+              <dd>{@log.kafka_offset}</dd>
+            </div>
             <div :if={@log.duration_ms} class="flex justify-between">
               <dt class="text-base-content/60">Duration</dt>
               <dd>{@log.duration_ms}ms</dd>

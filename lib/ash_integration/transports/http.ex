@@ -4,7 +4,7 @@ defmodule AshIntegration.Transports.Http do
   @behaviour AshIntegration.Transport
 
   @impl true
-  def deliver(outbound_integration, event_id, payload) do
+  def deliver(outbound_integration, event_id, _resource_id, payload) do
     %Ash.Union{type: :http, value: config} = outbound_integration.transport_config
     json_payload = Jason.encode!(payload)
 

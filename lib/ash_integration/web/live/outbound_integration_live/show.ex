@@ -320,6 +320,49 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     """
   end
 
+  defp transport_config_detail(%{config: %Ash.Union{type: :kafka, value: value}} = assigns) do
+    assigns = Phoenix.Component.assign(assigns, :config, value)
+
+    ~H"""
+    <dl class="space-y-2 text-sm">
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Transport</dt>
+        <dd>Kafka</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Topic</dt>
+        <dd>{@config.topic}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Brokers</dt>
+        <dd class="truncate max-w-xs">{Enum.join(@config.brokers, ", ")}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Acknowledgements</dt>
+        <dd>{humanize(@config.acks)}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Delivery Timeout</dt>
+        <dd>{@config.delivery_timeout_ms}ms</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Security</dt>
+        <dd>{security_label(@config.security)}</dd>
+      </div>
+      <div :if={@config.headers != nil and @config.headers != %{}} class="flex justify-between">
+        <dt class="text-base-content/60">Custom Headers</dt>
+        <dd class="truncate max-w-xs">{map_size(@config.headers)} header(s)</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">HMAC Signing</dt>
+        <dd>
+          {if @config.encrypted_signing_secret, do: "Enabled", else: "Disabled"}
+        </dd>
+      </div>
+    </dl>
+    """
+  end
+
   defp transport_config_detail(assigns) do
     ~H"""
     <span class="text-base-content/50">—</span>
@@ -378,6 +421,17 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     </div>
     """
   end
+
+  defp security_label(%Ash.Union{type: :none}), do: "None"
+  defp security_label(%Ash.Union{type: :tls}), do: "TLS"
+
+  defp security_label(%Ash.Union{type: :sasl, value: v}),
+    do: "SASL (#{humanize(v.mechanism)})"
+
+  defp security_label(%Ash.Union{type: :sasl_tls, value: v}),
+    do: "SASL + TLS (#{humanize(v.mechanism)})"
+
+  defp security_label(_), do: "—"
 
   defp format_json(nil), do: "null"
   defp format_json(data) when is_map(data) or is_list(data), do: Jason.encode!(data, pretty: true)
