@@ -21,4 +21,5 @@ defmodule AshIntegration.Transport do
   @spec module_for(atom()) :: module()
   def module_for(:http), do: AshIntegration.Transports.Http
   def module_for(:kafka), do: AshIntegration.Transports.Kafka
+  def module_for(:grpc), do: AshIntegration.Transports.Grpc
 end

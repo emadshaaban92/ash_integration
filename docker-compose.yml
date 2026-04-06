@@ -86,6 +86,9 @@ services:
     depends_on:
       - redpanda
 
+  grpcbin:
+    image: kong/grpcbin:latest
+
   jaeger:
     image: jaegertracing/jaeger:latest
     ports:

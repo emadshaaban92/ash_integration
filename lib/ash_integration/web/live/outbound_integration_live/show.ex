@@ -363,6 +363,45 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     """
   end
 
+  defp transport_config_detail(%{config: %Ash.Union{type: :grpc, value: value}} = assigns) do
+    assigns = Phoenix.Component.assign(assigns, :config, value)
+
+    ~H"""
+    <dl class="space-y-2 text-sm">
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Transport</dt>
+        <dd>gRPC</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Endpoint</dt>
+        <dd class="truncate max-w-xs">{@config.endpoint}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Service / Method</dt>
+        <dd class="truncate max-w-xs">{@config.service}/{@config.method}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Timeout</dt>
+        <dd>{@config.timeout_ms}ms</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">Security</dt>
+        <dd>{grpc_security_label(@config.security)}</dd>
+      </div>
+      <div :if={@config.headers != nil and @config.headers != %{}} class="flex justify-between">
+        <dt class="text-base-content/60">Custom Metadata</dt>
+        <dd class="truncate max-w-xs">{map_size(@config.headers)} key(s)</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-base-content/60">HMAC Signing</dt>
+        <dd>
+          {if @config.encrypted_signing_secret, do: "Enabled", else: "Disabled"}
+        </dd>
+      </div>
+    </dl>
+    """
+  end
+
   defp transport_config_detail(assigns) do
     ~H"""
     <span class="text-base-content/50">—</span>
@@ -432,6 +471,12 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     do: "SASL + TLS (#{humanize(v.mechanism)})"
 
   defp security_label(_), do: "—"
+
+  defp grpc_security_label(%Ash.Union{type: :none}), do: "None (H2C)"
+  defp grpc_security_label(%Ash.Union{type: :tls}), do: "TLS"
+  defp grpc_security_label(%Ash.Union{type: :bearer_token}), do: "Bearer Token"
+  defp grpc_security_label(%Ash.Union{type: :mutual_tls}), do: "Mutual TLS"
+  defp grpc_security_label(_), do: "—"
 
   defp format_json(nil), do: "null"
   defp format_json(data) when is_map(data) or is_list(data), do: Jason.encode!(data, pretty: true)

@@ -58,6 +58,7 @@ defmodule AshIntegration.MixProject do
       {:oban, "~> 2.0"},
       {:req, "~> 0.5"},
       {:brod, "~> 4.0"},
+      {:protobuf, "~> 0.13"},
       {:lua, "~> 0.4"},
       {:jason, "~> 1.0"},
       {:phoenix, "~> 1.7"},

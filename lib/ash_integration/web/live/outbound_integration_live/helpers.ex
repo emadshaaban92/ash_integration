@@ -39,12 +39,14 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
       Map.get(form.params || %{}, "transform_script") ||
         Map.get(form.data || %{}, :transform_script)
 
+    grpc_config = extract_grpc_config(form)
+
     Phoenix.Component.assign(socket,
       resource_options: resource_options,
       action_options: action_options(selected_resource),
       schema_version_options: schema_version_options(selected_resource),
       sample_event: encode_sample(sample_event_map),
-      transform_preview: transform_preview(script, sample_event_map)
+      transform_preview: transform_preview(script, sample_event_map, grpc_config)
     )
   end
 
@@ -184,7 +186,11 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
             Enum.reduce(@encrypted_auth_fields, auth, &maybe_drop_blank(&2, &1))
           end)
           |> Map.update("security", %{}, fn sec when is_map(sec) ->
-            maybe_drop_blank(sec, "password")
+            sec
+            |> maybe_drop_blank("password")
+            |> maybe_drop_blank("token")
+            |> maybe_drop_blank("client_cert_pem")
+            |> maybe_drop_blank("client_key_pem")
           end)
 
         put_in(params, ["transport_config"], tc)
@@ -233,6 +239,22 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
           auth: false
         }
 
+      %Ash.Union{type: :grpc, value: tc} ->
+        grpc_token =
+          case tc.security do
+            %Ash.Union{type: :bearer_token, value: sec} ->
+              sec.encrypted_token != nil
+
+            _ ->
+              false
+          end
+
+        %{
+          signing_secret: tc.encrypted_signing_secret != nil,
+          grpc_token: grpc_token,
+          auth: false
+        }
+
       _ ->
         %{signing_secret: false, auth: false}
     end
@@ -242,6 +264,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
     params
     |> inject_kv_headers(["transport_config", "headers"])
     |> inject_kv_headers(["transport_config", "headers_kafka"])
+    |> inject_kv_headers(["transport_config", "headers_grpc"])
     |> inject_brokers_list()
   end
 
@@ -258,6 +281,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
         target_path =
           case List.last(path) do
             "headers_kafka" -> List.replace_at(path, -1, "headers")
+            "headers_grpc" -> List.replace_at(path, -1, "headers")
             _ -> path
           end
 
@@ -355,15 +379,54 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
   defp encode_sample(nil), do: nil
   defp encode_sample(map), do: Jason.encode!(map, pretty: true)
 
-  defp transform_preview(nil, _sample), do: nil
-  defp transform_preview(_script, nil), do: nil
-  defp transform_preview("", _sample), do: nil
+  defp transform_preview(nil, _sample, _grpc), do: nil
+  defp transform_preview(_script, nil, _grpc), do: nil
+  defp transform_preview("", _sample, _grpc), do: nil
 
-  defp transform_preview(script, sample_event_map) do
+  defp transform_preview(script, sample_event_map, grpc_config) do
     case AshIntegration.LuaSandbox.execute(script, sample_event_map) do
-      {:ok, :skip} -> {:ok, :skip}
-      {:ok, result} -> {:ok, Jason.encode!(result, pretty: true)}
-      {:error, message} -> {:error, message}
+      {:ok, :skip} ->
+        {:ok, :skip}
+
+      {:ok, result} ->
+        json = Jason.encode!(result, pretty: true)
+
+        case grpc_config do
+          %{proto_definition: proto, service: service, method: method}
+          when is_binary(proto) and proto != "" and
+                 is_binary(service) and service != "" and
+                 is_binary(method) and method != "" ->
+            {errors, warnings} =
+              AshIntegration.Transports.Grpc.ProtoValidator.validate(
+                result,
+                proto,
+                %{service: service, method: method}
+              )
+
+            {:ok, json, errors, warnings}
+
+          _ ->
+            {:ok, json}
+        end
+
+      {:error, message} ->
+        {:error, message}
+    end
+  end
+
+  defp extract_grpc_config(form) do
+    tc_params = get_in(form.params || %{}, ["transport_config"]) || %{}
+
+    case tc_params["_union_type"] do
+      "grpc" ->
+        %{
+          proto_definition: tc_params["proto_definition"],
+          service: tc_params["service"],
+          method: tc_params["method"]
+        }
+
+      _ ->
+        nil
     end
   end
 end

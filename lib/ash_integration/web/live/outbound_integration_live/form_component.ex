@@ -36,6 +36,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
       header_rows: [],
       broker_rows: [],
       kafka_header_rows: [],
+      grpc_header_rows: [],
       has_secrets: %{},
       submitted?: false,
       selected_transport: "http"
@@ -50,14 +51,14 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
 
     selected_transport = transport_type(integration.transport_config)
 
-    {header_rows, broker_rows, kafka_header_rows} =
+    {header_rows, broker_rows, kafka_header_rows, grpc_header_rows} =
       case integration.transport_config do
         %Ash.Union{type: :http, value: config} ->
           rows =
             (config.headers || %{})
             |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
 
-          {rows, [], []}
+          {rows, [], [], []}
 
         %Ash.Union{type: :kafka, value: config} ->
           brokers =
@@ -68,10 +69,17 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
             (config.headers || %{})
             |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
 
-          {[], brokers, kafka_headers}
+          {[], brokers, kafka_headers, []}
+
+        %Ash.Union{type: :grpc, value: config} ->
+          grpc_headers =
+            (config.headers || %{})
+            |> Enum.map(fn {k, v} -> {System.unique_integer([:positive]), {k, v}} end)
+
+          {[], [], [], grpc_headers}
 
         _ ->
-          {[], [], []}
+          {[], [], [], []}
       end
 
     socket
@@ -80,6 +88,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
       header_rows: header_rows,
       broker_rows: broker_rows,
       kafka_header_rows: kafka_header_rows,
+      grpc_header_rows: grpc_header_rows,
       submitted?: false,
       selected_transport: selected_transport
     )
@@ -138,6 +147,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
       case new_type do
         "http" -> Helpers.ensure_auth_subform(form)
         "kafka" -> Helpers.ensure_security_subform(form)
+        "grpc" -> Helpers.ensure_security_subform(form)
       end
 
     has_secrets = %{signing_secret: false, auth: false, sasl_password: false}
@@ -150,6 +160,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
        header_rows: [],
        broker_rows: [],
        kafka_header_rows: [],
+       grpc_header_rows: [],
        has_secrets: has_secrets
      )
      |> Helpers.assign_form_options(form)}
@@ -177,6 +188,19 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
     id = String.to_integer(id)
     rows = Enum.reject(socket.assigns.kafka_header_rows, fn {row_id, _} -> row_id == id end)
     {:noreply, assign(socket, kafka_header_rows: rows)}
+  end
+
+  def handle_event("add-grpc-header", _, socket) do
+    id = System.unique_integer([:positive])
+
+    {:noreply,
+     assign(socket, grpc_header_rows: socket.assigns.grpc_header_rows ++ [{id, {"", ""}}])}
+  end
+
+  def handle_event("remove-grpc-header", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    rows = Enum.reject(socket.assigns.grpc_header_rows, fn {row_id, _} -> row_id == id end)
+    {:noreply, assign(socket, grpc_header_rows: rows)}
   end
 
   def handle_event("security-type-changed", %{"_target" => path} = params, socket) do
@@ -247,6 +271,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
           header_rows={@header_rows}
           broker_rows={@broker_rows}
           kafka_header_rows={@kafka_header_rows}
+          grpc_header_rows={@grpc_header_rows}
           selected_transport={@selected_transport}
           myself={@myself}
         />
@@ -280,6 +305,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
   attr :header_rows, :list, default: []
   attr :broker_rows, :list, default: []
   attr :kafka_header_rows, :list, default: []
+  attr :grpc_header_rows, :list, default: []
   attr :selected_transport, :string, default: "http"
   attr :myself, :any, required: true
 
@@ -355,16 +381,43 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
           <.icon name="hero-forward-mini" />
           <span>Delivery will be skipped (result not set)</span>
         </div>
-        <div
-          :if={match?({:ok, _}, @transform_preview) and @transform_preview != {:ok, :skip}}
-          class="collapse collapse-arrow bg-base-200"
-        >
-          <input type="checkbox" checked />
-          <div class="collapse-title text-sm font-medium">Transform Result</div>
-          <div class="collapse-content">
-            <pre class="text-xs overflow-x-auto"><code>{elem(@transform_preview, 1)}</code></pre>
+        <%= if match?({:ok, _, _, _}, @transform_preview) do %>
+          <% {_, json, errors, warnings} = @transform_preview %>
+          <div class="collapse collapse-arrow bg-base-200">
+            <input type="checkbox" checked />
+            <div class="collapse-title text-sm font-medium">Transform Result</div>
+            <div class="collapse-content">
+              <pre class="text-xs overflow-x-auto"><code>{json}</code></pre>
+            </div>
           </div>
-        </div>
+          <div :if={errors != []} class="alert alert-error text-xs mt-2">
+            <div>
+              <div class="font-semibold mb-1">Proto validation errors (delivery will fail):</div>
+              <ul class="list-disc list-inside space-y-0.5">
+                <li :for={error <- errors}>{error}</li>
+              </ul>
+            </div>
+          </div>
+          <div :if={warnings != []} class="alert alert-warning text-xs mt-2">
+            <div>
+              <div class="font-semibold mb-1">Proto validation warnings:</div>
+              <ul class="list-disc list-inside space-y-0.5">
+                <li :for={warning <- warnings}>{warning}</li>
+              </ul>
+            </div>
+          </div>
+        <% else %>
+          <div
+            :if={match?({:ok, _}, @transform_preview) and @transform_preview != {:ok, :skip}}
+            class="collapse collapse-arrow bg-base-200"
+          >
+            <input type="checkbox" checked />
+            <div class="collapse-title text-sm font-medium">Transform Result</div>
+            <div class="collapse-content">
+              <pre class="text-xs overflow-x-auto"><code>{elem(@transform_preview, 1)}</code></pre>
+            </div>
+          </div>
+        <% end %>
       </div>
 
       <div class="mt-4">
@@ -373,7 +426,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
           label="Transport"
           name="transport_selector"
           value={@selected_transport}
-          options={[{"HTTP (Webhook)", "http"}, {"Kafka", "kafka"}]}
+          options={[{"HTTP (Webhook)", "http"}, {"Kafka", "kafka"}, {"gRPC", "grpc"}]}
           phx-change="transport-type-changed"
           phx-target={@myself}
         />
@@ -381,335 +434,505 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
 
       <.inputs_for :let={tc} field={@form[:transport_config]}>
         <div class="card card-border border-base-300 p-4 mt-4">
-          <%= if @selected_transport == "http" do %>
-            <h4 class="font-semibold mb-3">HTTP Configuration</h4>
-            <.input
-              field={tc[:method]}
-              type="select"
-              label="HTTP Method"
-              options={[
-                {"POST", "post"},
-                {"PUT", "put"},
-                {"PATCH", "patch"},
-                {"DELETE", "delete"}
-              ]}
-            />
-            <.input
-              field={tc[:url]}
-              type="text"
-              label="URL"
-              placeholder="https://example.com/webhook"
-              required
-              phx-debounce="blur"
-            />
-            <.input
-              field={tc[:timeout_ms]}
-              type="text"
-              label="Timeout (ms)"
-              required
-              phx-debounce="blur"
-            />
-            <label class="label">Custom Headers</label>
-            <div class="space-y-2">
-              <div :for={{id, {key, value}} <- @header_rows} class="flex gap-2 items-center">
-                <input
-                  type="text"
-                  name={tc[:headers].name <> "[#{id}][key]"}
-                  value={key}
-                  placeholder="Header name"
-                  class="input input-bordered input-sm flex-1"
-                  phx-debounce="blur"
-                />
-                <input
-                  type="text"
-                  name={tc[:headers].name <> "[#{id}][value]"}
-                  value={value}
-                  placeholder="Header value"
-                  class="input input-bordered input-sm flex-1"
-                  phx-debounce="blur"
-                />
-                <button
-                  type="button"
-                  phx-click="remove-header"
-                  phx-target={@myself}
-                  phx-value-id={id}
-                  class="btn btn-ghost btn-sm btn-square"
-                >
-                  &times;
-                </button>
-              </div>
-              <button
-                type="button"
-                phx-click="add-header"
-                phx-target={@myself}
-                class="btn btn-outline btn-xs"
-              >
-                + Add Header
-              </button>
-            </div>
-
-            <div class="divider my-2"></div>
-            <h5 class="font-semibold mb-3">Webhook Signing</h5>
-            <.input
-              field={tc[:signing_secret]}
-              type="password"
-              autocomplete="one-time-code"
-              label="HMAC Signing Secret"
-              placeholder={
-                if @has_secrets[:signing_secret],
-                  do: "Leave blank to keep current",
-                  else: "Leave blank to disable signing"
-              }
-              phx-debounce="blur"
-            />
-            <p class="text-xs text-base-content/50 mt-1">
-              When set, payloads are signed with HMAC-SHA256. The signature is sent in the
-              <code class="text-xs">x-webhook-signature</code>
-              header as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
-            </p>
-
-            <div class="divider my-2"></div>
-            <h5 class="font-semibold mb-3">Authentication</h5>
-
-            <.inputs_for :let={auth} field={tc[:auth]}>
+          <%= cond do %>
+            <% @selected_transport == "http" -> %>
+              <h4 class="font-semibold mb-3">HTTP Configuration</h4>
               <.input
-                field={auth[:_union_type]}
-                phx-change="auth-type-changed"
-                phx-target={@myself}
+                field={tc[:method]}
                 type="select"
-                label="Auth Method"
+                label="HTTP Method"
                 options={[
-                  {"No Auth", "none"},
-                  {"Bearer Token", "bearer_token"},
-                  {"API Key", "api_key"},
-                  {"Basic Auth", "basic_auth"}
+                  {"POST", "post"},
+                  {"PUT", "put"},
+                  {"PATCH", "patch"},
+                  {"DELETE", "delete"}
                 ]}
               />
-              <%= case auth.params["_union_type"] do %>
-                <% "bearer_token" -> %>
-                  <.input
-                    field={auth[:token]}
-                    type="password"
-                    autocomplete="one-time-code"
-                    label="Token"
-                    required={@action == :new}
-                    force_errors={@submitted?}
-                    placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
-                    phx-debounce="blur"
-                  />
-                <% "api_key" -> %>
-                  <.input
-                    field={auth[:header_name]}
+              <.input
+                field={tc[:url]}
+                type="text"
+                label="URL"
+                placeholder="https://example.com/webhook"
+                required
+                phx-debounce="blur"
+              />
+              <.input
+                field={tc[:timeout_ms]}
+                type="text"
+                label="Timeout (ms)"
+                required
+                phx-debounce="blur"
+              />
+              <label class="label">Custom Headers</label>
+              <div class="space-y-2">
+                <div :for={{id, {key, value}} <- @header_rows} class="flex gap-2 items-center">
+                  <input
                     type="text"
-                    label="Header Name"
-                    required
-                    force_errors={@submitted?}
+                    name={tc[:headers].name <> "[#{id}][key]"}
+                    value={key}
+                    placeholder="Header name"
+                    class="input input-bordered input-sm flex-1"
                     phx-debounce="blur"
                   />
-                  <.input
-                    field={auth[:value]}
-                    type="password"
-                    autocomplete="one-time-code"
-                    label="API Key Value"
-                    required={@action == :new}
-                    force_errors={@submitted?}
-                    placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
+                  <input
+                    type="text"
+                    name={tc[:headers].name <> "[#{id}][value]"}
+                    value={value}
+                    placeholder="Header value"
+                    class="input input-bordered input-sm flex-1"
                     phx-debounce="blur"
                   />
-                <% "basic_auth" -> %>
+                  <button
+                    type="button"
+                    phx-click="remove-header"
+                    phx-target={@myself}
+                    phx-value-id={id}
+                    class="btn btn-ghost btn-sm btn-square"
+                  >
+                    &times;
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  phx-click="add-header"
+                  phx-target={@myself}
+                  class="btn btn-outline btn-xs"
+                >
+                  + Add Header
+                </button>
+              </div>
+
+              <div class="divider my-2"></div>
+              <h5 class="font-semibold mb-3">Webhook Signing</h5>
+              <.input
+                field={tc[:signing_secret]}
+                type="password"
+                autocomplete="one-time-code"
+                label="HMAC Signing Secret"
+                placeholder={
+                  if @has_secrets[:signing_secret],
+                    do: "Leave blank to keep current",
+                    else: "Leave blank to disable signing"
+                }
+                phx-debounce="blur"
+              />
+              <p class="text-xs text-base-content/50 mt-1">
+                When set, payloads are signed with HMAC-SHA256. The signature is sent in the
+                <code class="text-xs">x-webhook-signature</code>
+                header as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
+              </p>
+
+              <div class="divider my-2"></div>
+              <h5 class="font-semibold mb-3">Authentication</h5>
+
+              <.inputs_for :let={auth} field={tc[:auth]}>
+                <.input
+                  field={auth[:_union_type]}
+                  phx-change="auth-type-changed"
+                  phx-target={@myself}
+                  type="select"
+                  label="Auth Method"
+                  options={[
+                    {"No Auth", "none"},
+                    {"Bearer Token", "bearer_token"},
+                    {"API Key", "api_key"},
+                    {"Basic Auth", "basic_auth"}
+                  ]}
+                />
+                <%= case auth.params["_union_type"] do %>
+                  <% "bearer_token" -> %>
+                    <.input
+                      field={auth[:token]}
+                      type="password"
+                      autocomplete="one-time-code"
+                      label="Token"
+                      required={@action == :new}
+                      force_errors={@submitted?}
+                      placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
+                      phx-debounce="blur"
+                    />
+                  <% "api_key" -> %>
+                    <.input
+                      field={auth[:header_name]}
+                      type="text"
+                      label="Header Name"
+                      required
+                      force_errors={@submitted?}
+                      phx-debounce="blur"
+                    />
+                    <.input
+                      field={auth[:value]}
+                      type="password"
+                      autocomplete="one-time-code"
+                      label="API Key Value"
+                      required={@action == :new}
+                      force_errors={@submitted?}
+                      placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
+                      phx-debounce="blur"
+                    />
+                  <% "basic_auth" -> %>
+                    <.input
+                      field={auth[:username]}
+                      type="text"
+                      label="Username"
+                      required
+                      force_errors={@submitted?}
+                      phx-debounce="blur"
+                    />
+                    <.input
+                      field={auth[:password]}
+                      type="password"
+                      autocomplete="one-time-code"
+                      label="Password"
+                      required={@action == :new}
+                      force_errors={@submitted?}
+                      placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
+                      phx-debounce="blur"
+                    />
+                  <% _ -> %>
+                <% end %>
+              </.inputs_for>
+            <% @selected_transport == "kafka" -> %>
+              <h4 class="font-semibold mb-3">Kafka Configuration</h4>
+
+              <.input
+                field={tc[:topic]}
+                type="text"
+                label="Topic"
+                placeholder="my-events-topic"
+                required
+                phx-debounce="blur"
+              />
+
+              <label class="label">Brokers</label>
+              <div class="space-y-2">
+                <div :for={{id, value} <- @broker_rows} class="flex gap-2 items-center">
+                  <input
+                    type="text"
+                    name={tc[:brokers].name <> "[#{id}]"}
+                    value={value}
+                    placeholder="host:port"
+                    class="input input-bordered input-sm flex-1"
+                    phx-debounce="blur"
+                  />
+                  <button
+                    type="button"
+                    phx-click="remove-broker"
+                    phx-target={@myself}
+                    phx-value-id={id}
+                    class="btn btn-ghost btn-sm btn-square"
+                  >
+                    &times;
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  phx-click="add-broker"
+                  phx-target={@myself}
+                  class="btn btn-outline btn-xs"
+                >
+                  + Add Broker
+                </button>
+              </div>
+
+              <.input
+                field={tc[:acks]}
+                type="select"
+                label="Acknowledgements"
+                options={[{"All Replicas", "all"}, {"Leader Only", "leader"}, {"None", "none"}]}
+              />
+
+              <.input
+                field={tc[:delivery_timeout_ms]}
+                type="text"
+                label="Delivery Timeout (ms)"
+                required
+                phx-debounce="blur"
+              />
+
+              <.input field={tc[:ssl]} type="checkbox" label="Use TLS" />
+
+              <label class="label mt-2">Custom Kafka Headers</label>
+              <div class="space-y-2">
+                <div
+                  :for={{id, {key, value}} <- @kafka_header_rows}
+                  class="flex gap-2 items-center"
+                >
+                  <input
+                    type="text"
+                    name={tc[:headers].name <> "_kafka[#{id}][key]"}
+                    value={key}
+                    placeholder="Header name"
+                    class="input input-bordered input-sm flex-1"
+                    phx-debounce="blur"
+                  />
+                  <input
+                    type="text"
+                    name={tc[:headers].name <> "_kafka[#{id}][value]"}
+                    value={value}
+                    placeholder="Header value"
+                    class="input input-bordered input-sm flex-1"
+                    phx-debounce="blur"
+                  />
+                  <button
+                    type="button"
+                    phx-click="remove-kafka-header"
+                    phx-target={@myself}
+                    phx-value-id={id}
+                    class="btn btn-ghost btn-sm btn-square"
+                  >
+                    &times;
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  phx-click="add-kafka-header"
+                  phx-target={@myself}
+                  class="btn btn-outline btn-xs"
+                >
+                  + Add Header
+                </button>
+              </div>
+
+              <div class="divider my-2"></div>
+              <h5 class="font-semibold mb-3">Payload Signing</h5>
+              <.input
+                field={tc[:signing_secret]}
+                type="password"
+                autocomplete="one-time-code"
+                label="HMAC Signing Secret"
+                placeholder={
+                  if @has_secrets[:signing_secret],
+                    do: "Leave blank to keep current",
+                    else: "Leave blank to disable signing"
+                }
+                phx-debounce="blur"
+              />
+              <p class="text-xs text-base-content/50 mt-1">
+                When set, payloads are signed with HMAC-SHA256. The signature is sent as a
+                <code class="text-xs">x-webhook-signature</code>
+                Kafka header as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
+              </p>
+
+              <div class="divider my-2"></div>
+              <h5 class="font-semibold mb-3">Connection Security</h5>
+
+              <.inputs_for :let={sec} field={tc[:security]}>
+                <.input
+                  field={sec[:_union_type]}
+                  phx-change="security-type-changed"
+                  phx-target={@myself}
+                  type="select"
+                  label="Security Protocol"
+                  options={[
+                    {"None", "none"},
+                    {"TLS", "tls"},
+                    {"SASL", "sasl"},
+                    {"SASL + TLS", "sasl_tls"}
+                  ]}
+                />
+                <%= if sec.params["_union_type"] in ["sasl", "sasl_tls"] do %>
                   <.input
-                    field={auth[:username]}
+                    field={sec[:mechanism]}
+                    type="select"
+                    label="SASL Mechanism"
+                    options={[
+                      {"PLAIN", "plain"},
+                      {"SCRAM-SHA-256", "scram_sha_256"},
+                      {"SCRAM-SHA-512", "scram_sha_512"}
+                    ]}
+                  />
+                  <.input
+                    field={sec[:username]}
                     type="text"
                     label="Username"
                     required
-                    force_errors={@submitted?}
                     phx-debounce="blur"
                   />
                   <.input
-                    field={auth[:password]}
+                    field={sec[:password]}
                     type="password"
                     autocomplete="one-time-code"
                     label="Password"
                     required={@action == :new}
-                    force_errors={@submitted?}
-                    placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
+                    placeholder={
+                      if @has_secrets[:sasl_password],
+                        do: "Leave blank to keep current",
+                        else: ""
+                    }
                     phx-debounce="blur"
                   />
-                <% _ -> %>
-              <% end %>
-            </.inputs_for>
-          <% else %>
-            <h4 class="font-semibold mb-3">Kafka Configuration</h4>
+                <% end %>
+              </.inputs_for>
+            <% @selected_transport == "grpc" -> %>
+              <h4 class="font-semibold mb-3">gRPC Configuration</h4>
 
-            <.input
-              field={tc[:topic]}
-              type="text"
-              label="Topic"
-              placeholder="my-events-topic"
-              required
-              phx-debounce="blur"
-            />
-
-            <label class="label">Brokers</label>
-            <div class="space-y-2">
-              <div :for={{id, value} <- @broker_rows} class="flex gap-2 items-center">
-                <input
-                  type="text"
-                  name={tc[:brokers].name <> "[#{id}]"}
-                  value={value}
-                  placeholder="host:port"
-                  class="input input-bordered input-sm flex-1"
-                  phx-debounce="blur"
-                />
-                <button
-                  type="button"
-                  phx-click="remove-broker"
-                  phx-target={@myself}
-                  phx-value-id={id}
-                  class="btn btn-ghost btn-sm btn-square"
-                >
-                  &times;
-                </button>
-              </div>
-              <button
-                type="button"
-                phx-click="add-broker"
-                phx-target={@myself}
-                class="btn btn-outline btn-xs"
-              >
-                + Add Broker
-              </button>
-            </div>
-
-            <.input
-              field={tc[:acks]}
-              type="select"
-              label="Acknowledgements"
-              options={[{"All Replicas", "all"}, {"Leader Only", "leader"}, {"None", "none"}]}
-            />
-
-            <.input
-              field={tc[:delivery_timeout_ms]}
-              type="text"
-              label="Delivery Timeout (ms)"
-              required
-              phx-debounce="blur"
-            />
-
-            <.input field={tc[:ssl]} type="checkbox" label="Use TLS" />
-
-            <label class="label mt-2">Custom Kafka Headers</label>
-            <div class="space-y-2">
-              <div
-                :for={{id, {key, value}} <- @kafka_header_rows}
-                class="flex gap-2 items-center"
-              >
-                <input
-                  type="text"
-                  name={tc[:headers].name <> "_kafka[#{id}][key]"}
-                  value={key}
-                  placeholder="Header name"
-                  class="input input-bordered input-sm flex-1"
-                  phx-debounce="blur"
-                />
-                <input
-                  type="text"
-                  name={tc[:headers].name <> "_kafka[#{id}][value]"}
-                  value={value}
-                  placeholder="Header value"
-                  class="input input-bordered input-sm flex-1"
-                  phx-debounce="blur"
-                />
-                <button
-                  type="button"
-                  phx-click="remove-kafka-header"
-                  phx-target={@myself}
-                  phx-value-id={id}
-                  class="btn btn-ghost btn-sm btn-square"
-                >
-                  &times;
-                </button>
-              </div>
-              <button
-                type="button"
-                phx-click="add-kafka-header"
-                phx-target={@myself}
-                class="btn btn-outline btn-xs"
-              >
-                + Add Header
-              </button>
-            </div>
-
-            <div class="divider my-2"></div>
-            <h5 class="font-semibold mb-3">Payload Signing</h5>
-            <.input
-              field={tc[:signing_secret]}
-              type="password"
-              autocomplete="one-time-code"
-              label="HMAC Signing Secret"
-              placeholder={
-                if @has_secrets[:signing_secret],
-                  do: "Leave blank to keep current",
-                  else: "Leave blank to disable signing"
-              }
-              phx-debounce="blur"
-            />
-            <p class="text-xs text-base-content/50 mt-1">
-              When set, payloads are signed with HMAC-SHA256. The signature is sent as a
-              <code class="text-xs">x-webhook-signature</code>
-              Kafka header as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
-            </p>
-
-            <div class="divider my-2"></div>
-            <h5 class="font-semibold mb-3">Connection Security</h5>
-
-            <.inputs_for :let={sec} field={tc[:security]}>
               <.input
-                field={sec[:_union_type]}
-                phx-change="security-type-changed"
-                phx-target={@myself}
-                type="select"
-                label="Security Protocol"
-                options={[
-                  {"None", "none"},
-                  {"TLS", "tls"},
-                  {"SASL", "sasl"},
-                  {"SASL + TLS", "sasl_tls"}
-                ]}
+                field={tc[:endpoint]}
+                type="text"
+                label="Endpoint"
+                placeholder="grpc.example.com:443"
+                required
+                phx-debounce="blur"
               />
-              <%= if sec.params["_union_type"] in ["sasl", "sasl_tls"] do %>
+              <.input
+                field={tc[:service]}
+                type="text"
+                label="Service"
+                placeholder="mypackage.EventService"
+                required
+                phx-debounce="blur"
+              />
+              <.input
+                field={tc[:method]}
+                type="text"
+                label="Method"
+                placeholder="DeliverEvent"
+                required
+                phx-debounce="blur"
+              />
+              <.input
+                field={tc[:proto_definition]}
+                type="textarea"
+                label="Proto Definition"
+                placeholder={"syntax = \"proto3\";\npackage mypackage;\n..."}
+                required
+                phx-debounce="500"
+                rows="10"
+              />
+              <p class="text-xs text-base-content/50 mt-1">
+                Paste the complete <code class="text-xs">.proto</code>
+                file content. Must be self-contained (no <code class="text-xs">import</code>
+                statements).
+              </p>
+              <.input
+                field={tc[:timeout_ms]}
+                type="text"
+                label="Timeout (ms)"
+                required
+                phx-debounce="blur"
+              />
+
+              <label class="label mt-2">Custom Metadata</label>
+              <div class="space-y-2">
+                <div
+                  :for={{id, {key, value}} <- @grpc_header_rows}
+                  class="flex gap-2 items-center"
+                >
+                  <input
+                    type="text"
+                    name={tc[:headers].name <> "_grpc[#{id}][key]"}
+                    value={key}
+                    placeholder="Metadata key"
+                    class="input input-bordered input-sm flex-1"
+                    phx-debounce="blur"
+                  />
+                  <input
+                    type="text"
+                    name={tc[:headers].name <> "_grpc[#{id}][value]"}
+                    value={value}
+                    placeholder="Metadata value"
+                    class="input input-bordered input-sm flex-1"
+                    phx-debounce="blur"
+                  />
+                  <button
+                    type="button"
+                    phx-click="remove-grpc-header"
+                    phx-target={@myself}
+                    phx-value-id={id}
+                    class="btn btn-ghost btn-sm btn-square"
+                  >
+                    &times;
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  phx-click="add-grpc-header"
+                  phx-target={@myself}
+                  class="btn btn-outline btn-xs"
+                >
+                  + Add Metadata
+                </button>
+              </div>
+
+              <div class="divider my-2"></div>
+              <h5 class="font-semibold mb-3">Payload Signing</h5>
+              <.input
+                field={tc[:signing_secret]}
+                type="password"
+                autocomplete="one-time-code"
+                label="HMAC Signing Secret"
+                placeholder={
+                  if @has_secrets[:signing_secret],
+                    do: "Leave blank to keep current",
+                    else: "Leave blank to disable signing"
+                }
+                phx-debounce="blur"
+              />
+              <p class="text-xs text-base-content/50 mt-1">
+                When set, payloads are signed with HMAC-SHA256. The signature is sent as
+                <code class="text-xs">x-webhook-signature</code>
+                metadata as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
+              </p>
+
+              <div class="divider my-2"></div>
+              <h5 class="font-semibold mb-3">Connection Security</h5>
+
+              <.inputs_for :let={sec} field={tc[:security]}>
                 <.input
-                  field={sec[:mechanism]}
+                  field={sec[:_union_type]}
+                  phx-change="security-type-changed"
+                  phx-target={@myself}
                   type="select"
-                  label="SASL Mechanism"
+                  label="Security Protocol"
                   options={[
-                    {"PLAIN", "plain"},
-                    {"SCRAM-SHA-256", "scram_sha_256"},
-                    {"SCRAM-SHA-512", "scram_sha_512"}
+                    {"None (H2C)", "none"},
+                    {"TLS", "tls"},
+                    {"Bearer Token", "bearer_token"},
+                    {"Mutual TLS", "mutual_tls"}
                   ]}
                 />
-                <.input
-                  field={sec[:username]}
-                  type="text"
-                  label="Username"
-                  required
-                  phx-debounce="blur"
-                />
-                <.input
-                  field={sec[:password]}
-                  type="password"
-                  autocomplete="one-time-code"
-                  label="Password"
-                  required={@action == :new}
-                  placeholder={
-                    if @has_secrets[:sasl_password],
-                      do: "Leave blank to keep current",
-                      else: ""
-                  }
-                  phx-debounce="blur"
-                />
-              <% end %>
-            </.inputs_for>
+                <%= case sec.params["_union_type"] do %>
+                  <% "bearer_token" -> %>
+                    <.input
+                      field={sec[:token]}
+                      type="password"
+                      autocomplete="one-time-code"
+                      label="Bearer Token"
+                      required={@action == :new}
+                      force_errors={@submitted?}
+                      placeholder={
+                        if @has_secrets[:grpc_token],
+                          do: "Leave blank to keep current",
+                          else: ""
+                      }
+                      phx-debounce="blur"
+                    />
+                  <% "mutual_tls" -> %>
+                    <.input
+                      field={sec[:client_cert_pem]}
+                      type="textarea"
+                      label="Client Certificate (PEM)"
+                      required={@action == :new}
+                      force_errors={@submitted?}
+                      rows="5"
+                      placeholder="-----BEGIN CERTIFICATE-----"
+                      phx-debounce="blur"
+                    />
+                    <.input
+                      field={sec[:client_key_pem]}
+                      type="textarea"
+                      label="Client Key (PEM)"
+                      required={@action == :new}
+                      force_errors={@submitted?}
+                      rows="5"
+                      placeholder="-----BEGIN PRIVATE KEY-----"
+                      phx-debounce="blur"
+                    />
+                  <% _ -> %>
+                <% end %>
+              </.inputs_for>
+            <% true -> %>
           <% end %>
         </div>
       </.inputs_for>

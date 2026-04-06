@@ -12,6 +12,11 @@ defmodule AshIntegration.TransportConfig do
           type: AshIntegration.KafkaConfig,
           tag: :type,
           tag_value: :kafka
+        ],
+        grpc: [
+          type: AshIntegration.GrpcConfig,
+          tag: :type,
+          tag_value: :grpc
         ]
       ],
       storage: :map_with_tag

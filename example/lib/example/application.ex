@@ -14,6 +14,8 @@ defmodule Example.Application do
       {Phoenix.PubSub, name: Example.PubSub},
       Example.Vault,
       AshIntegration.KafkaClientManager,
+      AshIntegration.Transports.Grpc.ProtoRegistry,
+      AshIntegration.Transports.Grpc.Channel,
       {Oban, Application.fetch_env!(:example, Oban)},
       ExampleWeb.Endpoint,
       {AshAuthentication.Supervisor, [otp_app: :example]}
