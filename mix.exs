@@ -82,7 +82,16 @@ defmodule AshIntegration.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md"]
+      extras: [
+        "README.md",
+        "guides/loaders.md",
+        "guides/http-transport.md",
+        "guides/kafka-transport.md",
+        "guides/grpc-transport.md"
+      ],
+      groups_for_extras: [
+        Guides: ~r/guides\/.*/
+      ]
     ]
   end
 end

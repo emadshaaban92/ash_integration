@@ -1,16 +1,17 @@
 # AshIntegration
 
-A Spark DSL extension for [Ash Framework](https://ash-hq.org) that adds outbound webhook/integration support to your Ash resources — with a built-in dashboard UI.
+A Spark DSL extension for [Ash Framework](https://ash-hq.org) that adds outbound integration support to your Ash resources — with a built-in dashboard UI.
 
-Declare which resource actions trigger outbound events, write Lua transform scripts, and deliver JSON payloads to external HTTP endpoints. Includes automatic retries, failure tracking, auto-deactivation, delivery logging, and a full management UI.
+Declare which resource actions trigger outbound events, write Lua transform scripts, and deliver payloads to external systems via HTTP, Kafka, or gRPC. Includes automatic retries, failure tracking, auto-deactivation, delivery logging, and a full management UI.
 
 ## Features
 
 - **Declarative DSL** — add `outbound_integrations` to any Ash resource to declare publishable actions
+- **Multi-transport** — deliver via [HTTP](guides/http-transport.md), [Kafka](guides/kafka-transport.md), or [gRPC](guides/grpc-transport.md)
 - **Schema versioning** — pin integrations to specific payload versions for safe consumer upgrades
 - **Lua transform scripts** — sandboxed Lua execution to reshape event data before delivery
-- **HTTP delivery** — with configurable timeouts and auth (Bearer, API Key, Basic Auth, or none)
-- **Secret encryption** — auth credentials encrypted at rest via AshCloak
+- **Payload signing** — HMAC-SHA256 signatures across all transports
+- **Secret encryption** — credentials encrypted at rest via AshCloak
 - **Failure tracking** — consecutive failure counting with configurable auto-deactivation threshold
 - **Delivery ordering** — per-resource-id ordering guarantees within an integration
 - **Delivery logs** — full request/response logging with configurable retention
@@ -62,7 +63,9 @@ config :ash_integration,
 config :ash_integration,
   # ...required settings above
   auto_deactivation_threshold: 50,         # Consecutive failures before auto-deactivate (default: 50)
-  delivery_log_retention_days: 90          # Days to keep delivery logs (default: 90)
+  delivery_log_retention_days: 90,         # Days to keep delivery logs (default: 90)
+  kafka_idle_timeout_ms: 300_000,          # Kafka client idle teardown (default: 5 min)
+  grpc_idle_timeout_ms: 300_000            # gRPC connection idle teardown (default: 5 min)
 ```
 
 ### Oban queues
@@ -152,7 +155,7 @@ end
 
 ### 3. Create a Vault module
 
-AshIntegration uses [AshCloak](https://hex.pm/packages/ash_cloak) to encrypt auth credentials. Create a Vault if you don't already have one:
+AshIntegration uses [AshCloak](https://hex.pm/packages/ash_cloak) to encrypt credentials. The vault **must** be configured before compilation — `compile_env!` will raise if it's missing. Create a Vault if you don't already have one:
 
 ```elixir
 defmodule MyApp.Vault do
@@ -162,13 +165,27 @@ end
 
 See the [Cloak documentation](https://hexdocs.pm/cloak/readme.html) for key configuration.
 
-### 4. Generate migrations
+### 4. Add the supervisor
+
+Add `AshIntegration.Supervisor` to your application's supervision tree. This starts all runtime processes (Kafka client manager, gRPC proto registry, gRPC channel supervisor):
+
+```elixir
+# lib/my_app/application.ex
+children = [
+  # ...your other children
+  MyApp.Vault,
+  AshIntegration.Supervisor,
+  {Oban, Application.fetch_env!(:my_app, Oban)}
+]
+```
+
+### 5. Generate migrations
 
 ```bash
 mix ash.codegen create_integration_tables
 ```
 
-### 5. Mount the dashboard
+### 6. Mount the dashboard
 
 Add the dashboard routes to your router inside an authenticated `live_session`:
 
@@ -188,9 +205,7 @@ scope "/", MyAppWeb do
 end
 ```
 
-The dashboard renders inside your app's layout — you control the navigation chrome, authentication, and authorization through your `live_session` configuration.
-
-### 6. Run migrations
+### 7. Run migrations
 
 ```bash
 mix ecto.migrate
@@ -204,20 +219,15 @@ To make a resource's actions trigger outbound integrations:
 
 The loader fetches and transforms domain-specific data for outbound events. It returns only the data payload — the library automatically wraps it in an envelope with `id`, `resource`, `action`, `action_type`, `schema_version`, and `occurred_at`.
 
-A loader has two required callbacks and two optional ones:
-
 ```elixir
 defmodule MyApp.Integration.Loaders.Order do
   @behaviour AshIntegration.OutboundIntegrations.Loader
 
-  # Required: load a resource record with all relationships needed for the event
   @impl true
   def load_resource(order_id, 1 = _schema_version, actor) do
     Ash.get(MyApp.Orders.Order, order_id, actor: actor, load: [:customer, :lines])
   end
 
-  # Required: transform a loaded record (real or sample) into the event data map.
-  # Must handle nil relationships gracefully — they indicate data the actor cannot access.
   @impl true
   def transform_event_data(order, _action, 1 = _schema_version) do
     %{
@@ -231,46 +241,10 @@ defmodule MyApp.Integration.Loaders.Order do
       total: Decimal.to_float(order.total)
     }
   end
-
-  # Optional: find a real record for the sample preview.
-  # When implemented, the library loads a real record for previews
-  # instead of using a synthetic sample.
-  @impl true
-  def sample_resource_id(actor, _action) do
-    case MyApp.Orders.Order
-         |> Ash.Query.sort(id: :desc)
-         |> Ash.Query.limit(1)
-         |> Ash.read(actor: actor) do
-      {:ok, [order | _]} -> {:ok, order.id}
-      _ -> {:error, :no_sample_resource}
-    end
-  end
-
-  # Optional: build a synthetic sample struct as a fallback when no real
-  # records exist. The library automatically filters out relationships
-  # the actor cannot access before passing it to transform_event_data/3.
-  @impl true
-  def build_sample_resource(1 = _schema_version, _action) do
-    %MyApp.Orders.Order{
-      id: "00000000-0000-0000-0000-000000000000",
-      reference: "ORD-SAMPLE-001",
-      status: :confirmed,
-      total: Decimal.new("99.99"),
-      customer: %MyApp.Customers.Customer{
-        name: "Jane Doe",
-        email: "jane@example.com"
-      },
-      lines: []
-    }
-  end
 end
 ```
 
-The library uses these callbacks in a fallback chain for sample previews:
-
-1. **Real record** — `sample_resource_id/2` finds an ID, then `load_resource/3` loads it with full Ash authorization
-2. **Synthetic sample** — `build_sample_resource/2` builds a fake struct, the library filters unauthorized relationships
-3. **Error** — if neither callback is implemented or returns data, the preview shows an error
+The loader also supports optional `sample_resource_id/2` and `build_sample_resource/2` callbacks for the dashboard's test panel preview. See the [Loaders guide](guides/loaders.md) for the full callback reference, schema versioning, and sample preview strategy.
 
 ### 2. Add the DSL to your resource
 
@@ -294,115 +268,62 @@ defmodule MyApp.Orders.Order do
 end
 ```
 
-The `AshIntegration` extension automatically injects a change that publishes events to Oban whenever a declared action is performed.
+## Transports
+
+AshIntegration supports three transport types. Each has its own configuration, security options, and behavior:
+
+- **[HTTP Transport](guides/http-transport.md)** — JSON payloads over HTTP with Bearer, API Key, or Basic Auth
+- **[Kafka Transport](guides/kafka-transport.md)** — Kafka messages with SASL/TLS security and partition-based ordering
+- **[gRPC Transport](guides/grpc-transport.md)** — Protobuf-encoded unary RPCs over HTTP/2 with TLS/mTLS support
+
+All transports support HMAC-SHA256 payload signing via the `signing_secret` config field.
 
 ## Lua Transform Scripts
 
 Each integration has a Lua transform script that receives the event data and can reshape it before delivery. The script has access to an `event` global table and must set a `result` global to produce output.
 
-### Basic passthrough
-
 ```lua
+-- Passthrough
 result = event
-```
 
-### Reshape the payload
-
-```lua
+-- Reshape
 result = {
   event_type = event.action,
   order_id = event.data.id,
-  customer_email = event.data.customer.email,
   timestamp = event.occurred_at
 }
-```
 
-### Skip an event
-
-If `result` is not set (or set to `nil`), the event is skipped and not delivered:
-
-```lua
--- Only deliver "ship" events
+-- Skip (don't set result)
 if event.action == "ship" then
   result = event
 end
 ```
 
-### Security
-
-Scripts run in a sandboxed Lua environment with:
-
-- **No I/O** — `io`, `file`, `os.execute`, `os.exit`, `os.getenv`, `require`, `load`, `loadfile`, `dofile`, `loadstring` are all disabled
-- **Size limit** — scripts are limited to 10,240 bytes
-- **Timeout** — execution is killed after 5 seconds
+Scripts run in a sandboxed environment with no I/O, a 10KB size limit, and a 5-second timeout.
 
 ## Architecture
 
 ```
 Source Resource Action
-        │
-        ▼
+        |
+        v
   PublishEvent Change (injected by AshIntegration extension)
-        │
-        ▼
+        |
+        v
   EventDispatcher (Oban: integration_dispatch queue)
-    │ Finds matching active integrations
-    │ Loads event data via resource Loader
-        │
-        ▼
+    | Finds matching active integrations
+    | Loads event data via resource Loader
+        |
+        v
   OutboundDelivery (Oban: integration_delivery queue)
-    │ Runs Lua transform
-    │ Delivers HTTP request
-    │ Logs result to DeliveryLog
-    │ Tracks success/failure
-        │
-        ▼
+    | Runs Lua transform
+    | Delivers via HTTP, Kafka, or gRPC
+    | Logs result to DeliveryLog
+    | Tracks success/failure
+        |
+        v
   Auto-deactivation (after N consecutive failures)
 ```
-
-## Dashboard
-
-The built-in dashboard provides:
-
-- **Integration list** — paginated table with status, failure count, and quick actions
-- **Create/Edit** — full form with resource/action selection, schema version, HTTP config, auth, and Lua script
-- **Detail view** — complete integration configuration, transport details, and recent delivery logs
-- **Test panel** — run transform scripts against real or sample data and preview input/output
-- **Delivery logs** — browse all delivery attempts with request/response details, duration, and error messages
-
-The dashboard uses [daisyUI](https://daisyui.com) for styling (included by default in Phoenix 1.8+).
-
-## Injected Actions
-
-The resource extensions inject these actions automatically. You can override any of them by defining an action with the same name in your resource.
-
-### OutboundIntegration
-
-| Action | Type | Description |
-|--------|------|-------------|
-| `create` | create | Create with standard fields |
-| `update` | update | Update with standard fields |
-| `read` | read | Default read |
-| `destroy` | destroy | Default destroy |
-| `by_id` | read | Get by ID |
-| `index` | read | Paginated list sorted by newest first |
-| `activate` | update | Set `active` to `true` |
-| `deactivate` | update | Set `active` to `false` |
-| `record_success` | update | Reset consecutive failures to 0 |
-| `record_failure` | update | Increment consecutive failures, auto-deactivate if threshold reached |
-| `auto_deactivate` | update | Deactivate with reason `:delivery_failures` |
-| `test` | action | Run transform script against sample data |
-
-### DeliveryLog
-
-| Action | Type | Description |
-|--------|------|-------------|
-| `create` | create | Create with all log fields |
-| `read` | read | Default read |
-| `destroy` | destroy | Default destroy |
-| `index` | read | Paginated list sorted by newest first |
-| `for_outbound_integration` | read | Paginated logs filtered by integration ID |
-| `older_than` | read | Logs older than N days (used by cleanup worker) |
 
 ## License
 
