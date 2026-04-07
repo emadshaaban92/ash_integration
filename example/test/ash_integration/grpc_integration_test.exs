@@ -80,7 +80,6 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       {:ok, %{status: 0, body: body}} =
         Channel.unary_call(
           channel,
-          "echo-test",
           "/grpcbin.GRPCBin/DummyUnary",
           encoded,
           [],
@@ -109,7 +108,7 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       {:ok, channel} = Channel.get_or_connect("sum-test", config)
 
       {:ok, %{status: 0, body: body}} =
-        Channel.unary_call(channel, "sum-test", "/addsvc.Add/Sum", encoded, [], 10_000)
+        Channel.unary_call(channel, "/addsvc.Add/Sum", encoded, [], 10_000)
 
       # Response should be SumReply{v: 42} = field 1 varint 42 = <<0x08, 0x2A>>
       assert body == <<0x08, 0x2A>>
@@ -135,7 +134,6 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       {:ok, %{status: 0}} =
         Channel.unary_call(
           channel,
-          "headers-test",
           "/grpcbin.GRPCBin/DummyUnary",
           encoded,
           metadata,
@@ -163,7 +161,6 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
         {:ok, %{status: 0}} =
           Channel.unary_call(
             channel,
-            "reuse-test",
             "/grpcbin.GRPCBin/DummyUnary",
             encoded,
             [],

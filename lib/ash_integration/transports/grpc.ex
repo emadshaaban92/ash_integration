@@ -27,7 +27,7 @@ defmodule AshIntegration.Transports.Grpc do
           auth_metadata(config) ++
           AshIntegration.PayloadSigning.signature_headers(config, json_payload)
 
-      case Channel.unary_call(channel, integration_id, path, encoded, metadata, config.timeout_ms) do
+      case Channel.unary_call(channel, path, encoded, metadata, config.timeout_ms) do
         {:ok, %{status: 0, body: body}} ->
           {:ok, %{response_status: 200, response_body: inspect(body, limit: 200)}}
 

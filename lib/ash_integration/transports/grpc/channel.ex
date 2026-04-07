@@ -1,22 +1,23 @@
 defmodule AshIntegration.Transports.Grpc.Channel do
   @moduledoc """
-  Manages persistent HTTP/2 connections for gRPC transport.
+  Manages a persistent HTTP/2 connection for a single gRPC integration.
 
-  One Mint.HTTP2 connection is maintained per outbound integration, keyed by
-  integration ID. Connections are established on first use and torn down after
-  an idle timeout.
+  One process per outbound integration, started on demand via
+  `ChannelSupervisor` and registered in `ChannelRegistry`. The process
+  terminates itself after an idle timeout.
   """
 
   use GenServer
 
   require Logger
 
+  alias AshIntegration.Transports.Grpc.ChannelSupervisor
+
   @idle_timeout_ms Application.compile_env(
                      :ash_integration,
                      :grpc_idle_timeout_ms,
                      300_000
                    )
-  @check_interval_ms div(@idle_timeout_ms, 2)
 
   @default_recv_timeout_ms 30_000
 
@@ -24,32 +25,23 @@ defmodule AshIntegration.Transports.Grpc.Channel do
   # Public API
   # ---------------------------------------------------------------------------
 
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
   @doc """
-  Returns `{:ok, pid}` for the channel GenServer after ensuring a connection
-  exists for `integration_id`. Creates a new connection when one does not
-  already exist or the previous one has been closed.
-
-  `config` is a map with at least:
-    - `:endpoint` — `"host:port"` string
-    - `:security` — one of the `AshIntegration.GrpcSecurity.*` structs
+  Returns `{:ok, pid}` for the channel process for this integration,
+  starting one if it doesn't exist yet.
   """
   @spec get_or_connect(String.t(), map()) :: {:ok, pid()} | {:error, term()}
   def get_or_connect(integration_id, config) do
-    case GenServer.call(__MODULE__, {:get_or_connect, integration_id, config}) do
-      :ok -> {:ok, Process.whereis(__MODULE__)}
-      {:error, reason} -> {:error, reason}
+    case lookup(integration_id) do
+      {:ok, pid} ->
+        {:ok, pid}
+
+      :not_found ->
+        start_channel(integration_id, config)
     end
   end
 
   @doc """
-  Performs a gRPC unary call over the managed HTTP/2 connection for the given
-  integration.
-
-  `metadata` is a list of `{key, value}` header tuples.
+  Performs a gRPC unary call over the managed HTTP/2 connection.
 
   Returns `{:ok, %{status: integer, message: binary, body: binary}}` on
   success or `{:error, reason}` on failure.
@@ -57,26 +49,50 @@ defmodule AshIntegration.Transports.Grpc.Channel do
   @spec unary_call(
           pid(),
           String.t(),
-          String.t(),
           binary(),
           [{binary(), binary()}],
           non_neg_integer()
         ) ::
           {:ok, %{status: non_neg_integer(), message: binary(), body: binary()}}
           | {:error, term()}
-  def unary_call(
-        pid,
-        integration_id,
-        path,
-        encoded_body,
-        metadata \\ [],
-        timeout_ms \\ @default_recv_timeout_ms
-      ) do
+  def unary_call(pid, path, encoded_body, metadata \\ [], timeout_ms \\ @default_recv_timeout_ms) do
     GenServer.call(
       pid,
-      {:unary_call, integration_id, path, encoded_body, metadata, timeout_ms},
+      {:unary_call, path, encoded_body, metadata, timeout_ms},
       timeout_ms + 5_000
     )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Start / Registry
+  # ---------------------------------------------------------------------------
+
+  def start_link({integration_id, config}) do
+    GenServer.start_link(__MODULE__, {integration_id, config}, name: via(integration_id))
+  end
+
+  defp via(integration_id) do
+    {:via, Registry, {ChannelSupervisor.registry(), integration_id}}
+  end
+
+  defp lookup(integration_id) do
+    case Registry.lookup(ChannelSupervisor.registry(), integration_id) do
+      [{pid, _}] when is_pid(pid) ->
+        if Process.alive?(pid), do: {:ok, pid}, else: :not_found
+
+      [] ->
+        :not_found
+    end
+  end
+
+  defp start_channel(integration_id, config) do
+    spec = {__MODULE__, {integration_id, config}}
+
+    case DynamicSupervisor.start_child(ChannelSupervisor.dynamic_supervisor(), spec) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -84,139 +100,118 @@ defmodule AshIntegration.Transports.Grpc.Channel do
   # ---------------------------------------------------------------------------
 
   @impl true
-  def init(_opts) do
-    schedule_cleanup()
-    {:ok, %{connections: %{}}}
+  def init({integration_id, config}) do
+    case do_connect(config) do
+      {:ok, conn} ->
+        state = %{
+          integration_id: integration_id,
+          config: config,
+          conn: conn,
+          last_activity: now()
+        }
+
+        schedule_idle_check()
+        {:ok, state}
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
   end
 
   @impl true
-  def handle_call({:get_or_connect, integration_id, config}, _from, state) do
-    case Map.get(state.connections, integration_id) do
-      %{conn: conn} = entry when not is_nil(conn) ->
-        if Mint.HTTP2.open?(conn) do
-          entry = %{entry | last_activity: now()}
-          state = put_in(state, [:connections, integration_id], entry)
-          {:reply, :ok, state}
-        else
-          case do_connect(config) do
-            {:ok, conn} ->
-              entry = %{conn: conn, last_activity: now()}
-              state = put_in(state, [:connections, integration_id], entry)
-              {:reply, :ok, state}
+  def handle_call({:unary_call, path, encoded_body, metadata, timeout_ms}, _from, state) do
+    state = ensure_connected(state)
 
-            {:error, reason} ->
-              state = %{state | connections: Map.delete(state.connections, integration_id)}
-              {:reply, {:error, reason}, state}
-          end
-        end
+    case state.conn do
+      nil ->
+        {:reply, {:error, :connection_failed}, state}
 
-      _ ->
-        case do_connect(config) do
-          {:ok, conn} ->
-            entry = %{conn: conn, last_activity: now()}
-            state = put_in(state, [:connections, integration_id], entry)
-            {:reply, :ok, state}
+      conn ->
+        grpc_frame = <<0::8, byte_size(encoded_body)::32>> <> encoded_body
 
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
+        headers =
+          [
+            {"content-type", "application/grpc+proto"},
+            {"te", "trailers"}
+          ] ++ metadata
+
+        case Mint.HTTP2.request(conn, "POST", path, headers, grpc_frame) do
+          {:ok, conn, request_ref} ->
+            state = %{state | conn: conn, last_activity: now()}
+
+            case recv_response(conn, request_ref, timeout_ms) do
+              {:ok, conn, response} ->
+                {:reply, {:ok, response}, %{state | conn: conn}}
+
+              {:error, conn, reason} ->
+                {:reply, {:error, reason}, %{state | conn: conn}}
+            end
+
+          {:error, conn, reason} ->
+            {:reply, {:error, reason}, %{state | conn: conn}}
         end
     end
   end
 
-  def handle_call(
-        {:unary_call, integration_id, path, encoded_body, metadata, timeout_ms},
-        _from,
-        state
-      ) do
-    entry = Map.get(state.connections, integration_id)
+  @impl true
+  def handle_info(:idle_check, state) do
+    idle_ms = now() - state.last_activity
 
-    if is_nil(entry) do
-      {:reply, {:error, :no_connection}, state}
+    if idle_ms >= @idle_timeout_ms do
+      Logger.info("Closing idle gRPC connection for integration #{state.integration_id}")
+
+      if state.conn, do: Mint.HTTP2.close(state.conn)
+      {:stop, :normal, state}
     else
-      grpc_frame = <<0::8, byte_size(encoded_body)::32>> <> encoded_body
-
-      # Mint adds :method, :path, :scheme, :authority pseudo-headers automatically
-      headers =
-        [
-          {"content-type", "application/grpc+proto"},
-          {"te", "trailers"}
-        ] ++ metadata
-
-      case Mint.HTTP2.request(entry.conn, "POST", path, headers, grpc_frame) do
-        {:ok, conn, request_ref} ->
-          entry = %{entry | conn: conn, last_activity: now()}
-          state = put_in(state, [:connections, integration_id], entry)
-
-          case recv_response(conn, request_ref, timeout_ms) do
-            {:ok, conn, response} ->
-              entry = %{entry | conn: conn}
-              state = put_in(state, [:connections, integration_id], entry)
-              {:reply, {:ok, response}, state}
-
-            {:error, conn, reason} ->
-              entry = %{entry | conn: conn}
-              state = put_in(state, [:connections, integration_id], entry)
-              {:reply, {:error, reason}, state}
-          end
-
-        {:error, conn, reason} ->
-          entry = %{entry | conn: conn}
-          state = put_in(state, [:connections, integration_id], entry)
-          {:reply, {:error, reason}, state}
-      end
+      schedule_idle_check()
+      {:noreply, state}
     end
-  end
-
-  @impl true
-  def handle_info(:cleanup, state) do
-    cutoff = now() - @idle_timeout_ms
-
-    {expired, active} =
-      Enum.split_with(state.connections, fn {_id, entry} ->
-        entry.last_activity < cutoff
-      end)
-
-    for {integration_id, entry} <- expired do
-      Logger.info("Closing idle gRPC connection for integration #{integration_id}")
-      Mint.HTTP2.close(entry.conn)
-    end
-
-    schedule_cleanup()
-    {:noreply, %{state | connections: Map.new(active)}}
   end
 
   def handle_info(message, state) do
-    # In passive mode, we shouldn't receive TCP/SSL messages normally.
-    # Log unexpected messages for debugging.
-    Logger.debug("gRPC Channel received unexpected message: #{inspect(message)}")
+    Logger.debug(
+      "gRPC Channel #{state.integration_id} received unexpected message: #{inspect(message)}"
+    )
+
     {:noreply, state}
   end
 
   # ---------------------------------------------------------------------------
-  # Connection establishment
+  # Connection management
   # ---------------------------------------------------------------------------
+
+  defp ensure_connected(%{conn: conn} = state) when not is_nil(conn) do
+    if Mint.HTTP2.open?(conn) do
+      state
+    else
+      reconnect(state)
+    end
+  end
+
+  defp ensure_connected(state), do: reconnect(state)
+
+  defp reconnect(state) do
+    case do_connect(state.config) do
+      {:ok, conn} -> %{state | conn: conn}
+      {:error, _} -> %{state | conn: nil}
+    end
+  end
 
   defp do_connect(config) do
     {host, port, scheme} = parse_endpoint(config)
 
-    result =
-      case scheme do
-        :http ->
-          Mint.HTTP2.connect(:http, host, port, mode: :passive)
+    case scheme do
+      :http ->
+        Mint.HTTP2.connect(:http, host, port, mode: :passive)
 
-        :https ->
-          transport_opts = build_transport_opts(Map.get(config, :security))
+      :https ->
+        transport_opts = build_transport_opts(Map.get(config, :security))
 
-          opts =
-            [mode: :passive] ++
-              if(transport_opts == [], do: [], else: [transport_opts: transport_opts])
+        opts =
+          [mode: :passive] ++
+            if(transport_opts == [], do: [], else: [transport_opts: transport_opts])
 
-          Mint.HTTP2.connect(:https, host, port, opts)
-      end
-
-    case result do
-      {:ok, conn} -> {:ok, conn}
-      {:error, reason} -> {:error, reason}
+        Mint.HTTP2.connect(:https, host, port, opts)
     end
   end
 
@@ -246,7 +241,6 @@ defmodule AshIntegration.Transports.Grpc.Channel do
     {host, port, scheme}
   end
 
-  # Security is wrapped in Ash.Union: %Ash.Union{type: :none, value: %GrpcSecurity.None{}}
   defp connection_scheme(%Ash.Union{type: :none}), do: :http
   defp connection_scheme(%Ash.Union{type: :tls}), do: :https
   defp connection_scheme(%Ash.Union{type: :bearer_token}), do: :https
@@ -271,7 +265,6 @@ defmodule AshIntegration.Transports.Grpc.Channel do
     [entry | _] = :public_key.pem_decode(pem_string)
     decoded = :public_key.pem_entry_decode(entry)
 
-    # Return in the format Mint/ssl expects: {:type, der_binary}
     case entry do
       {type, der_bytes, :not_encrypted} -> {ssl_key_type(type), der_bytes}
       _ -> decoded
@@ -302,7 +295,6 @@ defmodule AshIntegration.Transports.Grpc.Channel do
 
       case Mint.HTTP2.recv(conn, 0, recv_timeout) do
         {:ok, conn, []} ->
-          # No data yet, keep waiting
           do_recv_response(conn, request_ref, deadline, acc)
 
         {:ok, conn, responses} ->
@@ -315,7 +307,6 @@ defmodule AshIntegration.Transports.Grpc.Channel do
           end
 
         {:error, conn, %Mint.TransportError{reason: :timeout}, _responses} ->
-          # Recv timeout, keep waiting if we have time left
           do_recv_response(conn, request_ref, deadline, acc)
 
         {:error, conn, reason, _responses} ->
@@ -330,7 +321,6 @@ defmodule AshIntegration.Transports.Grpc.Channel do
         {conn, acc, done?}
 
       {:headers, ^request_ref, headers}, {conn, acc, done?} ->
-        # Could be initial headers or trailers. We accumulate both.
         if acc.data == <<>> and acc.trailers == [] do
           {conn, %{acc | headers: acc.headers ++ headers}, done?}
         else
@@ -363,7 +353,6 @@ defmodule AshIntegration.Transports.Grpc.Channel do
         nil -> ""
       end
 
-    # Strip the 5-byte gRPC frame prefix from response body
     body =
       case acc.data do
         <<_compressed::8, _length::32, payload::binary>> -> payload
@@ -377,8 +366,8 @@ defmodule AshIntegration.Transports.Grpc.Channel do
   # Helpers
   # ---------------------------------------------------------------------------
 
-  defp schedule_cleanup do
-    Process.send_after(self(), :cleanup, @check_interval_ms)
+  defp schedule_idle_check do
+    Process.send_after(self(), :idle_check, div(@idle_timeout_ms, 2))
   end
 
   defp now, do: System.monotonic_time(:millisecond)
