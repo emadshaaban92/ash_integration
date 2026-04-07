@@ -801,9 +801,9 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
                 rows="10"
               />
               <p class="text-xs text-base-content/50 mt-1">
-                Paste the complete <code class="text-xs">.proto</code>
-                file content. Must be self-contained (no <code class="text-xs">import</code>
-                statements).
+                Paste the <code class="text-xs">.proto</code> file content. Google well-known types
+                (<code class="text-xs">Timestamp</code>, <code class="text-xs">Struct</code>, etc.)
+                may be imported.
               </p>
               <.input
                 field={tc[:timeout_ms]}

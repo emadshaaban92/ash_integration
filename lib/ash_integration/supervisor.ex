@@ -19,8 +19,7 @@ defmodule AshIntegration.Supervisor do
   @impl true
   def init(_opts) do
     children = [
-      AshIntegration.KafkaClientManager,
-      AshIntegration.Transports.Grpc.ProtoRegistry
+      AshIntegration.KafkaClientManager
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

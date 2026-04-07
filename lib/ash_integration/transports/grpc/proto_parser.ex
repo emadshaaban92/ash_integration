@@ -1,46 +1,16 @@
-defmodule AshIntegration.Transports.Grpc.ProtoRegistry do
+defmodule AshIntegration.Transports.Grpc.ProtoParser do
   @moduledoc """
-  Manages parsing and caching of proto definitions for gRPC integrations.
+  Parses proto definitions via `protoc` and resolves service/method/message types.
 
-  Parsed `FileDescriptorSet` structs are cached in ETS keyed by
-  `{integration_id, sha256(proto_content)}`. Entries are evicted when
-  the proto content changes.
+  Used by `ProtoValidator` to validate transform output against proto schemas.
   """
-
-  use GenServer
-
-  @table __MODULE__
-
-  # --- Public API ---
-
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
 
   @doc """
-  Returns a cached parsed `FileDescriptorSet` or parses the proto definition
-  via `protoc` and caches the result.
+  Parses a proto definition via `protoc` and returns a `FileDescriptorSet`.
   """
-  @spec get_or_parse(String.t(), String.t()) ::
-          {:ok, Google.Protobuf.FileDescriptorSet.t()} | {:error, String.t()}
-  def get_or_parse(integration_id, proto_definition) do
-    hash = :crypto.hash(:sha256, proto_definition)
-    cache_key = {integration_id, hash}
-
-    try do
-      case :ets.lookup(@table, cache_key) do
-        [{^cache_key, descriptor_set}] ->
-          {:ok, descriptor_set}
-
-        [] ->
-          evict(integration_id)
-          parse_and_cache(cache_key, proto_definition)
-      end
-    rescue
-      ArgumentError ->
-        # ETS table not yet created (GenServer not started) — parse without caching
-        parse_proto(proto_definition)
-    end
+  @spec parse(String.t()) :: {:ok, Google.Protobuf.FileDescriptorSet.t()} | {:error, String.t()}
+  def parse(proto_definition) do
+    run_protoc(proto_definition)
   end
 
   @doc """
@@ -57,53 +27,14 @@ defmodule AshIntegration.Transports.Grpc.ProtoRegistry do
     end
   end
 
-  @doc """
-  Evicts all cached entries for a given integration.
-  """
-  @spec evict(String.t()) :: :ok
-  def evict(integration_id) do
-    :ets.match_delete(@table, {{integration_id, :_}, :_})
-    :ok
-  rescue
-    ArgumentError -> :ok
-  end
-
-  # --- GenServer callbacks ---
-
-  @impl true
-  def init(_opts) do
-    :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
-    {:ok, %{}}
-  end
-
   # --- Private ---
-
-  defp parse_and_cache(cache_key, proto_definition) do
-    case parse_proto(proto_definition) do
-      {:ok, descriptor_set} ->
-        :ets.insert(@table, {cache_key, descriptor_set})
-        {:ok, descriptor_set}
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  defp parse_proto(proto_definition) do
-    if Regex.match?(~r/^\s*import\s/m, proto_definition) do
-      {:error,
-       "Proto definition must be self-contained (no import statements). " <>
-         "Inline all message types directly in the proto file."}
-    else
-      run_protoc(proto_definition)
-    end
-  end
 
   defp run_protoc(proto_definition) do
     case System.find_executable("protoc") do
       nil ->
         {:error,
-         "protoc (Protocol Buffer compiler) is not available on PATH. Install protoc v3+ to use gRPC transport."}
+         "protoc (Protocol Buffer compiler) is not available on PATH. " <>
+           "Install protoc v3+ for proto field validation."}
 
       _protoc_path ->
         do_run_protoc(proto_definition)
@@ -138,7 +69,6 @@ defmodule AshIntegration.Transports.Grpc.ProtoRegistry do
   end
 
   defp find_service(%Google.Protobuf.FileDescriptorSet{file: files}, service_name) do
-    # Strip leading dot and package prefix for matching
     bare_name = service_name |> String.split(".") |> List.last()
 
     Enum.find_value(
@@ -170,7 +100,6 @@ defmodule AshIntegration.Transports.Grpc.ProtoRegistry do
   end
 
   defp find_message(%Google.Protobuf.FileDescriptorSet{file: files}, type_name) do
-    # type_name is fully qualified like ".package.MessageName"
     bare_name = type_name |> String.trim_leading(".")
 
     Enum.find_value(

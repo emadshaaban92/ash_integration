@@ -1,7 +1,7 @@
 defmodule AshIntegration.Transports.Grpc.ProtoValidatorTest do
   use ExUnit.Case, async: false
 
-  alias AshIntegration.Transports.Grpc.{ProtoValidator, ProtoRegistry}
+  alias AshIntegration.Transports.Grpc.ProtoValidator
 
   @simple_proto """
   syntax = "proto3";
@@ -98,16 +98,7 @@ defmodule AshIntegration.Transports.Grpc.ProtoValidatorTest do
 
   @grpc_config %{service: "test.TestService", method: "SendEvent"}
 
-  setup_all do
-    # ProtoRegistry may already be started by the application supervisor.
-    # Only start it if it's not already running.
-    case GenServer.whereis(ProtoRegistry) do
-      nil -> start_supervised!(ProtoRegistry)
-      _pid -> :ok
-    end
-
-    :ok
-  end
+  # ProtoRegistry is now a plain module (no GenServer), no setup needed.
 
   describe "clean output" do
     test "returns no errors or warnings when all fields present with correct types" do

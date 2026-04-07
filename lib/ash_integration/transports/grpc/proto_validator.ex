@@ -7,7 +7,7 @@ defmodule AshIntegration.Transports.Grpc.ProtoValidator do
   """
 
   alias Google.Protobuf.{DescriptorProto, FieldDescriptorProto, FileDescriptorSet}
-  alias AshIntegration.Transports.Grpc.ProtoRegistry
+  alias AshIntegration.Transports.Grpc.ProtoParser
 
   @type result :: {errors :: [String.t()], warnings :: [String.t()]}
 
@@ -28,13 +28,13 @@ defmodule AshIntegration.Transports.Grpc.ProtoValidator do
 
   @doc """
   Validates `output` against the input message type for the given service/method.
-  Uses ProtoRegistry to parse the proto definition and resolve the input type.
+  Uses ProtoParser to parse the proto definition and resolve the input type.
   """
   @spec validate(map(), String.t(), map()) :: result
   def validate(output, proto_definition, %{service: service, method: method} = _grpc_config) do
-    with {:ok, descriptor_set} <- ProtoRegistry.get_or_parse("_validation", proto_definition),
+    with {:ok, descriptor_set} <- ProtoParser.parse(proto_definition),
          {:ok, {input_desc, file_desc_set}} <-
-           ProtoRegistry.resolve_input_type(descriptor_set, service, method) do
+           ProtoParser.resolve_input_type(descriptor_set, service, method) do
       validate_message(output, input_desc, file_desc_set, [])
     else
       {:error, reason} -> {["Proto parsing error: #{reason}"], []}
