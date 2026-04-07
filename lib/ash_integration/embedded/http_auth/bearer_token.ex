@@ -1,5 +1,5 @@
 defmodule AshIntegration.HttpAuth.BearerToken do
-  @vault Application.compile_env(:ash_integration, :vault)
+  @vault Application.compile_env!(:ash_integration, :vault)
 
   use Ash.Resource,
     data_layer: :embedded,
