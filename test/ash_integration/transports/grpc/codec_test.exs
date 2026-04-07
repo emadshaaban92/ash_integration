@@ -231,16 +231,4 @@ defmodule AshIntegration.Transports.Grpc.CodecTest do
       assert message =~ "Protobuf encoding failed"
     end
   end
-
-  describe "atom keys in payload" do
-    test "encodes payload with atom keys" do
-      context = resolve_input(@scalar_proto, "TestService", "SendScalar")
-
-      payload = %{name: "AtomKey", age: 25}
-
-      assert {:ok, binary} = Codec.encode(payload, context)
-      assert is_binary(binary)
-      assert String.contains?(binary, "AtomKey")
-    end
-  end
 end

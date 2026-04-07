@@ -44,7 +44,7 @@ defmodule AshIntegration.Transports.Grpc.Codec do
 
     for field <- fields, reduce: [] do
       acc ->
-        value = lookup_value(payload, field.name)
+        value = Map.get(payload, field.name)
 
         if value == nil do
           acc
@@ -156,12 +156,6 @@ defmodule AshIntegration.Transports.Grpc.Codec do
   defp coerce_value(:sfixed32, v) when is_float(v), do: trunc(v)
   defp coerce_value(:sfixed64, v) when is_float(v), do: trunc(v)
   defp coerce_value(_type, v), do: v
-
-  defp lookup_value(payload, field_name) do
-    Map.get(payload, field_name) || Map.get(payload, String.to_existing_atom(field_name))
-  rescue
-    ArgumentError -> nil
-  end
 
   # Map fields in proto3 are represented as nested message types with
   # options.map_entry == true. The field type_name references the entry type.

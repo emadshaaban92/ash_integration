@@ -70,7 +70,7 @@ defmodule AshIntegration.Transports.Grpc.ProtoValidator do
     {field_errors, field_warnings} =
       descriptor.field
       |> Enum.reduce({[], []}, fn field, {errs, warns} ->
-        value = lookup_value(output, field.name)
+        value = Map.get(output, field.name)
 
         if value == nil do
           {errs, warns}
@@ -282,12 +282,6 @@ defmodule AshIntegration.Transports.Grpc.ProtoValidator do
   defp default_value_text(%FieldDescriptorProto{type: :TYPE_ENUM}), do: "0 (first enum value)"
   defp default_value_text(%FieldDescriptorProto{type: :TYPE_MESSAGE}), do: "nil"
   defp default_value_text(_), do: "default"
-
-  defp lookup_value(payload, field_name) do
-    Map.get(payload, field_name) || Map.get(payload, String.to_existing_atom(field_name))
-  rescue
-    ArgumentError -> nil
-  end
 
   defp map_field_names(%DescriptorProto{nested_type: nested}) do
     for nt <- nested,
