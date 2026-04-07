@@ -23,7 +23,7 @@ defmodule AshIntegration.Transports.Kafka do
     headers =
       [{"event_id", event_id}, {"integration_id", to_string(outbound_integration.id)}] ++
         custom_headers ++
-        signature_headers(config, json_payload)
+        AshIntegration.PayloadSigning.signature_headers(config, json_payload)
 
     message = %{
       key: partition_key,
@@ -95,27 +95,6 @@ defmodule AshIntegration.Transports.Kafka do
 
   defp partition_for(key, count) do
     :erlang.phash2(key, count)
-  end
-
-  defp signature_headers(%{signing_secret: nil}, _body), do: []
-
-  defp signature_headers(config, body) do
-    {:ok, config} = Ash.load(config, [:signing_secret], domain: AshIntegration.domain())
-
-    case config.signing_secret do
-      secret when is_binary(secret) and secret != "" ->
-        timestamp = System.system_time(:second)
-        signed_payload = "#{timestamp}.#{body}"
-
-        signature =
-          :crypto.mac(:hmac, :sha256, secret, signed_payload)
-          |> Base.encode16(case: :lower)
-
-        [{"x-webhook-signature", "t=#{timestamp},v1=#{signature}"}]
-
-      _ ->
-        []
-    end
   end
 
   defp retryable_error?(:leader_not_available), do: true

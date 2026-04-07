@@ -5,7 +5,7 @@ defmodule Example.AshIntegration.WebhookSigningTest do
   import Example.IntegrationHelpers
 
   describe "HMAC signing" do
-    test "signed request includes x-webhook-signature header with valid HMAC" do
+    test "signed request includes x-payload-signature header with valid HMAC" do
       secret = "test-signing-secret-12345"
 
       stub_webhook_capture(self())
@@ -27,9 +27,9 @@ defmodule Example.AshIntegration.WebhookSigningTest do
 
       sig_header =
         request.headers
-        |> Enum.find_value(fn {k, v} -> if k == "x-webhook-signature", do: v end)
+        |> Enum.find_value(fn {k, v} -> if k == "x-payload-signature", do: v end)
 
-      assert sig_header != nil, "Expected x-webhook-signature header"
+      assert sig_header != nil, "Expected x-payload-signature header"
 
       # Parse t= and v1= from header
       [t_part, v1_part] = String.split(sig_header, ",")
@@ -46,7 +46,7 @@ defmodule Example.AshIntegration.WebhookSigningTest do
       assert signature == expected_signature
     end
 
-    test "unsigned request has no x-webhook-signature header" do
+    test "unsigned request has no x-payload-signature header" do
       stub_webhook_capture(self())
 
       create_outbound_integration!(%{
@@ -65,9 +65,9 @@ defmodule Example.AshIntegration.WebhookSigningTest do
 
       sig_header =
         request.headers
-        |> Enum.find_value(fn {k, v} -> if k == "x-webhook-signature", do: v end)
+        |> Enum.find_value(fn {k, v} -> if k == "x-payload-signature", do: v end)
 
-      assert sig_header == nil, "Expected no x-webhook-signature header"
+      assert sig_header == nil, "Expected no x-payload-signature header"
     end
   end
 end

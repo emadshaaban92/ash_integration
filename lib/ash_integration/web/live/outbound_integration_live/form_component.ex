@@ -503,7 +503,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
               </div>
 
               <div class="divider my-2"></div>
-              <h5 class="font-semibold mb-3">Webhook Signing</h5>
+              <h5 class="font-semibold mb-3">Payload Signing</h5>
               <.input
                 field={tc[:signing_secret]}
                 type="password"
@@ -518,7 +518,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
               />
               <p class="text-xs text-base-content/50 mt-1">
                 When set, payloads are signed with HMAC-SHA256. The signature is sent in the
-                <code class="text-xs">x-webhook-signature</code>
+                <code class="text-xs">x-payload-signature</code>
                 header as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
               </p>
 
@@ -710,7 +710,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
               />
               <p class="text-xs text-base-content/50 mt-1">
                 When set, payloads are signed with HMAC-SHA256. The signature is sent as a
-                <code class="text-xs">x-webhook-signature</code>
+                <code class="text-xs">x-payload-signature</code>
                 Kafka header as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
               </p>
 
@@ -871,7 +871,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
               />
               <p class="text-xs text-base-content/50 mt-1">
                 When set, payloads are signed with HMAC-SHA256. The signature is sent as
-                <code class="text-xs">x-webhook-signature</code>
+                <code class="text-xs">x-payload-signature</code>
                 metadata as <code class="text-xs">t=timestamp,v1=hex_digest</code>.
               </p>
 

@@ -137,7 +137,7 @@ defmodule Example.AshIntegration.KafkaIntegrationTest do
       assert headers_map["x-env"] == "ci"
     end
 
-    test "signing secret produces x-webhook-signature header", %{
+    test "signing secret produces x-payload-signature Kafka header", %{
       start_offsets: start_offsets
     } do
       integration =
@@ -162,7 +162,7 @@ defmodule Example.AshIntegration.KafkaIntegrationTest do
         fetch_message(log.kafka_partition, start_offsets[log.kafka_partition], log.kafka_offset)
 
       headers_map = Map.new(headers)
-      assert sig = headers_map["x-webhook-signature"]
+      assert sig = headers_map["x-payload-signature"]
       assert sig =~ ~r/^t=\d+,v1=[0-9a-f]+$/
 
       # Verify the signature is correct

@@ -259,7 +259,7 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       assert log.status == :success
     end
 
-    test "signing secret produces x-webhook-signature metadata" do
+    test "signing secret produces x-payload-signature gRPC metadata" do
       integration =
         create_outbound_integration!(%{
           transport_config: %{
