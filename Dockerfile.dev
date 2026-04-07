@@ -32,6 +32,12 @@ RUN curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v$PRO
     && unzip protoc-$PROTOC_VERSION-linux-x86_64.zip -d usr/local \
     && rm protoc-$PROTOC_VERSION-linux-x86_64.zip
 
+ARG GRPCURL_VERSION=1.9.3
+
+RUN curl -LO https://github.com/fullstorydev/grpcurl/releases/download/v$GRPCURL_VERSION/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz \
+    && tar -xzf grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz -C /usr/local/bin \
+    && rm grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz
+
 RUN mkdir /app
 RUN chown $USERNAME /app
 

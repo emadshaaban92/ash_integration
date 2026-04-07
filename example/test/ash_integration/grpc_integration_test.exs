@@ -60,116 +60,38 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
     end
   end
 
-  describe "low-level gRPC pipeline" do
+  describe "low-level grpcurl pipeline" do
     test "DummyUnary echoes back the same message" do
-      alias AshIntegration.Transports.Grpc.{ProtoRegistry, Channel, Codec}
+      payload = Jason.encode!(%{"fString" => "integration test", "fInt32" => 99, "fBool" => true})
 
-      {:ok, desc} = ProtoRegistry.get_or_parse("echo-test", @dummy_proto)
-      {:ok, input_ctx} = ProtoRegistry.resolve_input_type(desc, "grpcbin.GRPCBin", "DummyUnary")
+      {output, exit_code} = grpcurl_call(@dummy_proto, "grpcbin.GRPCBin/DummyUnary", payload)
 
-      payload = %{"f_string" => "integration test", "f_int32" => 99, "f_bool" => true}
-      {:ok, encoded} = Codec.encode(payload, input_ctx)
-
-      config = %{
-        endpoint: @grpcbin_endpoint,
-        security: %Ash.Union{type: :none, value: %AshIntegration.GrpcSecurity.None{}}
-      }
-
-      {:ok, channel} = Channel.get_or_connect("echo-test", config)
-
-      {:ok, %{status: 0, body: body}} =
-        Channel.unary_call(
-          channel,
-          "/grpcbin.GRPCBin/DummyUnary",
-          encoded,
-          [],
-          10_000
-        )
-
-      # DummyUnary echoes back the same message, so response body should match request
-      assert byte_size(body) > 0
-      assert body == encoded
+      assert exit_code == 0, "grpcurl failed: #{output}"
+      {:ok, response} = Jason.decode(output)
+      assert response["fString"] == "integration test"
+      assert response["fInt32"] == 99
+      assert response["fBool"] == true
     end
 
     test "addsvc Sum returns correct result" do
-      alias AshIntegration.Transports.Grpc.{ProtoRegistry, Channel, Codec}
+      payload = Jason.encode!(%{"a" => "17", "b" => "25"})
 
-      {:ok, desc} = ProtoRegistry.get_or_parse("sum-test", @addsvc_proto)
-      {:ok, input_ctx} = ProtoRegistry.resolve_input_type(desc, "addsvc.Add", "Sum")
+      {output, exit_code} = grpcurl_call(@addsvc_proto, "addsvc.Add/Sum", payload)
 
-      payload = %{"a" => 17, "b" => 25}
-      {:ok, encoded} = Codec.encode(payload, input_ctx)
-
-      config = %{
-        endpoint: @grpcbin_endpoint,
-        security: %Ash.Union{type: :none, value: %AshIntegration.GrpcSecurity.None{}}
-      }
-
-      {:ok, channel} = Channel.get_or_connect("sum-test", config)
-
-      {:ok, %{status: 0, body: body}} =
-        Channel.unary_call(channel, "/addsvc.Add/Sum", encoded, [], 10_000)
-
-      # Response should be SumReply{v: 42} = field 1 varint 42 = <<0x08, 0x2A>>
-      assert body == <<0x08, 0x2A>>
+      assert exit_code == 0, "grpcurl failed: #{output}"
+      {:ok, response} = Jason.decode(output)
+      assert response["v"] == "42"
     end
 
     test "custom metadata is sent to the server" do
-      alias AshIntegration.Transports.Grpc.{ProtoRegistry, Channel, Codec}
+      payload = Jason.encode!(%{"fString" => "hello"})
 
-      {:ok, desc} = ProtoRegistry.get_or_parse("headers-test", @dummy_proto)
-      {:ok, input_ctx} = ProtoRegistry.resolve_input_type(desc, "grpcbin.GRPCBin", "DummyUnary")
-
-      {:ok, encoded} = Codec.encode(%{"f_string" => "hello"}, input_ctx)
-
-      config = %{
-        endpoint: @grpcbin_endpoint,
-        security: %Ash.Union{type: :none, value: %AshIntegration.GrpcSecurity.None{}}
-      }
-
-      {:ok, channel} = Channel.get_or_connect("headers-test", config)
-
-      metadata = [{"x-custom-header", "test-value"}, {"x-another", "123"}]
-
-      {:ok, %{status: 0}} =
-        Channel.unary_call(
-          channel,
-          "/grpcbin.GRPCBin/DummyUnary",
-          encoded,
-          metadata,
-          10_000
+      {output, exit_code} =
+        grpcurl_call(@dummy_proto, "grpcbin.GRPCBin/DummyUnary", payload,
+          headers: [{"x-custom-header", "test-value"}, {"x-another", "123"}]
         )
-    end
 
-    test "connection is reused across multiple calls" do
-      alias AshIntegration.Transports.Grpc.{ProtoRegistry, Channel, Codec}
-
-      {:ok, desc} = ProtoRegistry.get_or_parse("reuse-test", @dummy_proto)
-      {:ok, input_ctx} = ProtoRegistry.resolve_input_type(desc, "grpcbin.GRPCBin", "DummyUnary")
-
-      {:ok, encoded} = Codec.encode(%{"f_string" => "call"}, input_ctx)
-
-      config = %{
-        endpoint: @grpcbin_endpoint,
-        security: %Ash.Union{type: :none, value: %AshIntegration.GrpcSecurity.None{}}
-      }
-
-      {:ok, channel} = Channel.get_or_connect("reuse-test", config)
-
-      # Make 3 calls on the same connection
-      for _i <- 1..3 do
-        {:ok, %{status: 0}} =
-          Channel.unary_call(
-            channel,
-            "/grpcbin.GRPCBin/DummyUnary",
-            encoded,
-            [],
-            10_000
-          )
-      end
-
-      # Second get_or_connect should reuse the same connection
-      {:ok, ^channel} = Channel.get_or_connect("reuse-test", config)
+      assert exit_code == 0, "grpcurl failed: #{output}"
     end
   end
 
@@ -308,7 +230,39 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
 
       [log] = get_delivery_logs(integration.id)
       assert log.status == :failed
-      assert log.error_message =~ "gRPC status 12" or log.error_message =~ "UNIMPLEMENTED"
+      assert log.error_message =~ "Unimplemented" or log.error_message =~ "unknown service"
+    end
+  end
+
+  # Helper to call grpcurl directly for low-level tests
+  defp grpcurl_call(proto_content, service_method, json_payload, opts \\ []) do
+    tmp_dir = System.tmp_dir!()
+    proto_filename = "test_grpc_#{:erlang.unique_integer([:positive])}.proto"
+    proto_path = Path.join(tmp_dir, proto_filename)
+
+    try do
+      File.write!(proto_path, proto_content)
+
+      header_args =
+        (opts[:headers] || [])
+        |> Enum.flat_map(fn {k, v} -> ["-H", "#{k}: #{v}"] end)
+
+      args =
+        [
+          "-import-path",
+          tmp_dir,
+          "-proto",
+          proto_filename,
+          "-plaintext",
+          "-max-time",
+          "10",
+          "-d",
+          json_payload
+        ] ++ header_args ++ [@grpcbin_endpoint, service_method]
+
+      System.cmd("grpcurl", args, stderr_to_stdout: true)
+    after
+      File.rm(proto_path)
     end
   end
 end
