@@ -58,14 +58,15 @@ defmodule AshIntegration.Transports.Grpc do
 
   defp auth_metadata(_), do: []
 
-  defp grpc_status_to_http(0), do: 200
-  defp grpc_status_to_http(4), do: 504
-  defp grpc_status_to_http(8), do: 429
-  defp grpc_status_to_http(14), do: 503
-  defp grpc_status_to_http(3), do: 400
-  defp grpc_status_to_http(5), do: 404
-  defp grpc_status_to_http(7), do: 403
-  defp grpc_status_to_http(12), do: 501
-  defp grpc_status_to_http(16), do: 401
-  defp grpc_status_to_http(_), do: 500
+  @doc false
+  def grpc_status_to_http(0), do: 200
+  def grpc_status_to_http(4), do: 504
+  def grpc_status_to_http(8), do: 429
+  def grpc_status_to_http(14), do: 503
+  def grpc_status_to_http(3), do: 400
+  def grpc_status_to_http(5), do: 404
+  def grpc_status_to_http(7), do: 403
+  def grpc_status_to_http(12), do: 501
+  def grpc_status_to_http(16), do: 401
+  def grpc_status_to_http(_), do: 500
 end

@@ -68,9 +68,11 @@ defmodule AshIntegration.Transports.Http do
 
   defp auth_headers(%Ash.Union{type: :none}), do: []
 
-  defp body_to_string(body) when is_binary(body), do: body
+  @doc false
+  def body_to_string(body) when is_binary(body), do: body
 
-  defp body_to_string(body) do
+  @doc false
+  def body_to_string(body) do
     case Jason.encode(body) do
       {:ok, json} -> json
       {:error, _} -> inspect(body)

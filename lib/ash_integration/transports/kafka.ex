@@ -54,7 +54,8 @@ defmodule AshIntegration.Transports.Kafka do
     end
   end
 
-  defp parse_brokers(brokers) do
+  @doc false
+  def parse_brokers(brokers) do
     Enum.map(brokers, fn broker ->
       case String.split(broker, ":", parts: 2) do
         [host, port] -> {String.to_charlist(host), String.to_integer(port)}
@@ -91,17 +92,20 @@ defmodule AshIntegration.Transports.Kafka do
     end
   end
 
-  defp partition_for(_key, 1), do: 0
+  @doc false
+  def partition_for(_key, 1), do: 0
 
-  defp partition_for(key, count) do
+  @doc false
+  def partition_for(key, count) do
     :erlang.phash2(key, count)
   end
 
-  defp retryable_error?(:leader_not_available), do: true
-  defp retryable_error?(:not_leader_for_partition), do: true
-  defp retryable_error?(:request_timed_out), do: true
-  defp retryable_error?(:not_enough_replicas), do: true
-  defp retryable_error?({:connect_error, _}), do: true
-  defp retryable_error?(:timeout), do: true
-  defp retryable_error?(_), do: false
+  @doc false
+  def retryable_error?(:leader_not_available), do: true
+  def retryable_error?(:not_leader_for_partition), do: true
+  def retryable_error?(:request_timed_out), do: true
+  def retryable_error?(:not_enough_replicas), do: true
+  def retryable_error?({:connect_error, _}), do: true
+  def retryable_error?(:timeout), do: true
+  def retryable_error?(_), do: false
 end
