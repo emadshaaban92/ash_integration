@@ -1,17 +1,23 @@
 # gRPC Transport
 
-The gRPC transport delivers events as protobuf-encoded unary RPC calls over HTTP/2.
+The gRPC transport delivers events as unary RPC calls using [grpcurl](https://github.com/fullstorydev/grpcurl).
 
 ## Prerequisites
 
-The gRPC transport requires `protoc` (Protocol Buffer compiler v3+) installed on the system PATH. It is used at runtime to parse proto definitions into descriptors.
+The gRPC transport requires `grpcurl` installed on the system PATH for delivering events and validating proto definitions.
+
+`protoc` (Protocol Buffer compiler v3+) is optional — it enables field-level type validation in the dashboard's test panel when previewing gRPC integrations.
 
 ```bash
-# Ubuntu/Debian
-apt install protobuf-compiler
+# grpcurl (required)
+# https://github.com/fullstorydev/grpcurl/releases
+curl -LO https://github.com/fullstorydev/grpcurl/releases/download/v<VERSION>/grpcurl_<VERSION>_linux_x86_64.tar.gz \
+  && tar -xzf grpcurl_<VERSION>_linux_x86_64.tar.gz -C /usr/local/bin
 
-# macOS
-brew install protobuf
+# protoc (optional, for field-level validation in the test panel)
+# https://github.com/protocolbuffers/protobuf/releases
+curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v<VERSION>/protoc-<VERSION>-linux-x86_64.zip \
+  && unzip protoc-<VERSION>-linux-x86_64.zip -d /usr/local
 ```
 
 ## Configuration
@@ -49,9 +55,9 @@ Set `transport_config.type` to `:grpc`:
 
 ### Proto Definitions
 
-Proto definitions must be **self-contained** (no `import` statements). All message types must be defined inline. Parsed descriptors are cached in ETS and invalidated when the proto content changes.
+Proto definitions are passed to `grpcurl` which handles parsing and encoding. Google well-known types (`Timestamp`, `Struct`, etc.) may be imported. Field names in the Lua transform output must match the proto field names.
 
-The Lua transform script output is dynamically encoded against the proto's input message type. Field names in the transform output must match the proto field names as strings.
+The Lua transform output is JSON-encoded and sent to `grpcurl`, which handles protobuf encoding against the proto's input message type.
 
 ## Security
 
@@ -93,14 +99,17 @@ security: %{type: "mutual_tls", client_cert_pem: "...", client_key_pem: "..."}
 
 When `signing_secret` is set, an `x-payload-signature` gRPC metadata entry is added with the same HMAC-SHA256 format used by the HTTP transport. See [HTTP Transport](http-transport.md#payload-signing) for verification details.
 
-## Connection Management
+## How It Works
 
-gRPC connections are managed per-integration:
+Each delivery spawns a `grpcurl` process that:
 
-- Each integration gets its own `Channel` GenServer with a dedicated HTTP/2 connection (via [Mint](https://hex.pm/packages/mint))
-- Connections are established on first delivery and reused for subsequent calls
-- Idle connections are closed after 5 minutes (configurable via `:grpc_idle_timeout_ms`)
-- Connections automatically reconnect if the underlying HTTP/2 connection drops
+1. Writes the proto definition to a temporary file
+2. JSON-encodes the Lua transform output
+3. Calls `grpcurl` with the proto file, JSON payload, headers, and security flags
+4. Parses the exit code and output for success/failure classification
+5. Cleans up temporary files
+
+There are no persistent connections — each delivery is an independent call. This trades a small amount of connection setup latency (~50ms) for correct HTTP/2 handling (flow control, GOAWAY, compression) and zero connection lifecycle management.
 
 ## gRPC Status Mapping
 
@@ -114,14 +123,14 @@ gRPC status codes are mapped to HTTP equivalents for retry decisions:
 | NOT_FOUND | 5 | 404 | No |
 | PERMISSION_DENIED | 7 | 403 | No |
 | RESOURCE_EXHAUSTED | 8 | 429 | No |
-| UNIMPLEMENTED | 12 | 501 | Yes |
+| UNIMPLEMENTED | 12 | 501 | No |
 | UNAVAILABLE | 14 | 503 | Yes |
 | UNAUTHENTICATED | 16 | 401 | No |
 | Other | * | 500 | Yes |
 
 ## Proto Validation
 
-The library includes `AshIntegration.Transports.Grpc.ProtoValidator` which validates a Lua transform output against the proto definition before encoding. It reports:
+The library includes `AshIntegration.Transports.Grpc.ProtoValidator` which validates a Lua transform output against the proto definition. It reports:
 
 - **Errors**: Type mismatches that will fail at encoding (e.g., string where int32 is expected)
 - **Warnings**: Missing fields (will use proto3 defaults) and extra fields (will be dropped)

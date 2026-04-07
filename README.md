@@ -64,8 +64,7 @@ config :ash_integration,
   # ...required settings above
   auto_deactivation_threshold: 50,         # Consecutive failures before auto-deactivate (default: 50)
   delivery_log_retention_days: 90,         # Days to keep delivery logs (default: 90)
-  kafka_idle_timeout_ms: 300_000,          # Kafka client idle teardown (default: 5 min)
-  grpc_idle_timeout_ms: 300_000            # gRPC connection idle teardown (default: 5 min)
+  kafka_idle_timeout_ms: 300_000           # Kafka client idle teardown (default: 5 min)
 ```
 
 ### Oban queues
@@ -167,7 +166,7 @@ See the [Cloak documentation](https://hexdocs.pm/cloak/readme.html) for key conf
 
 ### 4. Add the supervisor
 
-Add `AshIntegration.Supervisor` to your application's supervision tree. This starts all runtime processes (Kafka client manager, gRPC proto registry, gRPC channel supervisor):
+Add `AshIntegration.Supervisor` to your application's supervision tree. This starts runtime processes (Kafka client manager):
 
 ```elixir
 # lib/my_app/application.ex

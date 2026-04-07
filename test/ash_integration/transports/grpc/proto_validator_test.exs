@@ -98,7 +98,7 @@ defmodule AshIntegration.Transports.Grpc.ProtoValidatorTest do
 
   @grpc_config %{service: "test.TestService", method: "SendEvent"}
 
-  # ProtoRegistry is now a plain module (no GenServer), no setup needed.
+  # ProtoParser is a plain module, no setup needed.
 
   describe "clean output" do
     test "returns no errors or warnings when all fields present with correct types" do
