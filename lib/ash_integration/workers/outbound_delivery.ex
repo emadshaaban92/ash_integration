@@ -1,12 +1,24 @@
 defmodule AshIntegration.Workers.OutboundDelivery do
+  @max_attempts 20
+
   use Oban.Worker,
     queue: :integration_delivery,
-    max_attempts: 20,
+    max_attempts: @max_attempts,
     unique: [keys: [:event_id, :outbound_integration_id]]
 
   require Logger
 
   alias AshIntegration.LuaSandbox
+
+  # Snoozing increments both `attempt` and `max_attempts`, which inflates
+  # the backoff calculation on real failures. This corrects for that by
+  # computing the actual number of real attempts (excluding snoozes).
+  # See: https://hexdocs.pm/oban/Oban.Worker.html#module-snoozing-jobs
+  @impl Oban.Worker
+  def backoff(%Oban.Job{} = job) do
+    corrected_attempt = @max_attempts - (job.max_attempts - job.attempt)
+    Oban.Worker.backoff(%{job | attempt: corrected_attempt})
+  end
 
   @impl Oban.Worker
   def perform(%Oban.Job{
