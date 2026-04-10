@@ -1,6 +1,8 @@
 defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
   use AshIntegration.Web, :live_view
 
+  require Ash.Query
+
   alias AshIntegration.Web.OutboundIntegrationLive.{Helpers, FormComponent}
 
   @impl true
@@ -13,7 +15,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
         {:ok,
          socket
          |> assign(integration: integration)
-         |> assign(page_title: integration.name)}
+         |> assign(page_title: integration.name)
+         |> assign_event_counts(integration)}
 
       {:error, _} ->
         {:ok,
@@ -95,6 +98,71 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     {:noreply, load_delivery_logs(socket, Helpers.parse_int(offset, 0))}
   end
 
+  def handle_event("suspend", _params, socket) do
+    actor = socket.assigns.current_user
+    integration = socket.assigns.integration
+
+    case integration
+         |> Ash.Changeset.for_update(:suspend, %{reason: "Manual suspension"})
+         |> Ash.update(actor: actor) do
+      {:ok, updated} ->
+        updated = Ash.load!(updated, [:owner], actor: actor)
+
+        {:noreply,
+         socket
+         |> assign(integration: updated)
+         |> assign_event_counts(updated)
+         |> put_flash(:info, "Integration suspended")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to suspend integration")}
+    end
+  end
+
+  def handle_event("unsuspend", _params, socket) do
+    actor = socket.assigns.current_user
+    integration = socket.assigns.integration
+
+    case integration
+         |> Ash.Changeset.for_update(:unsuspend, %{})
+         |> Ash.update(actor: actor) do
+      {:ok, updated} ->
+        updated = Ash.load!(updated, [:owner], actor: actor)
+        AshIntegration.EventScheduler.notify()
+
+        {:noreply,
+         socket
+         |> assign(integration: updated)
+         |> assign_event_counts(updated)
+         |> put_flash(:info, "Integration unsuspended — backlog will begin draining")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to unsuspend integration")}
+    end
+  end
+
+  def handle_event("bulk_reprocess", _params, socket) do
+    actor = socket.assigns.current_user
+    integration = socket.assigns.integration
+    resource = AshIntegration.outbound_integration_resource()
+
+    case resource
+         |> Ash.ActionInput.for_action(:bulk_reprocess, %{integration: integration})
+         |> Ash.run_action(actor: actor) do
+      {:ok, %{reprocessed: reprocessed, failed: failed}} ->
+        updated = Ash.load!(integration, [:owner], actor: actor)
+
+        {:noreply,
+         socket
+         |> assign(integration: updated)
+         |> assign_event_counts(updated)
+         |> put_flash(:info, "Reprocessed #{reprocessed} event(s), #{failed} still failed")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to run bulk reprocess")}
+    end
+  end
+
   @impl true
   def handle_info({FormComponent, {:saved, updated}}, socket) do
     integration = Ash.load!(updated, [:owner], actor: socket.assigns.current_user)
@@ -140,6 +208,34 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     end
   end
 
+  defp assign_event_counts(socket, integration) do
+    actor = socket.assigns.current_user
+    event_resource = AshIntegration.outbound_integration_event_resource()
+
+    pending_count =
+      event_resource
+      |> Ash.Query.filter(outbound_integration_id == ^integration.id and state == :pending)
+      |> Ash.count!(actor: actor)
+
+    scheduled_count =
+      event_resource
+      |> Ash.Query.filter(outbound_integration_id == ^integration.id and state == :scheduled)
+      |> Ash.count!(actor: actor)
+
+    stuck_count =
+      event_resource
+      |> Ash.Query.filter(
+        outbound_integration_id == ^integration.id and state == :pending and is_nil(payload)
+      )
+      |> Ash.count!(actor: actor)
+
+    assign(socket,
+      pending_event_count: pending_count,
+      scheduled_event_count: scheduled_count,
+      stuck_event_count: stuck_count
+    )
+  end
+
   defp base_path, do: AshIntegration.Web.base_path()
 
   @impl true
@@ -153,6 +249,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
         <:subtitle>
           <.resource_badge value={@integration.resource} />
           <.active_badge active={@integration.active} />
+          <span :if={@integration.suspended} class="badge badge-error">Suspended</span>
         </:subtitle>
         <:actions>
           <div class="flex gap-2">
@@ -170,6 +267,21 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
             >
               Deactivate
             </button>
+            <button
+              :if={@integration.suspended}
+              class="btn btn-info btn-sm"
+              phx-click="unsuspend"
+            >
+              Unsuspend
+            </button>
+            <button
+              :if={!@integration.suspended && @integration.active}
+              class="btn btn-outline btn-sm"
+              phx-click="suspend"
+              data-confirm="Suspend this integration? Delivery will stop but events will keep accumulating."
+            >
+              Suspend
+            </button>
             <.link patch={"#{base_path()}/#{@integration.id}/edit"} class="btn btn-ghost btn-sm">
               <.icon name="hero-pencil-square-mini" /> Edit
             </.link>
@@ -186,6 +298,52 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
           </div>
         </:actions>
       </.page_header>
+
+      <div :if={@integration.suspended} class="alert alert-error mb-4">
+        <.icon name="hero-pause-circle-mini" />
+        <div>
+          <p class="font-bold">Integration Suspended</p>
+          <p :if={@integration.suspension_reason} class="text-sm">
+            {@integration.suspension_reason}
+          </p>
+          <p :if={@integration.suspended_at} class="text-sm text-base-content/60">
+            Since {Helpers.format_datetime(@integration.suspended_at, :long)}
+          </p>
+        </div>
+      </div>
+
+      <div class="stats shadow mb-4">
+        <div class="stat">
+          <div class="stat-title">Pending</div>
+          <div class="stat-value text-warning">{@pending_event_count}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Scheduled</div>
+          <div class="stat-value text-info">{@scheduled_event_count}</div>
+        </div>
+        <div :if={@stuck_event_count > 0} class="stat">
+          <div class="stat-title">Stuck (no payload)</div>
+          <div class="stat-value text-error">{@stuck_event_count}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-desc mt-2">
+            <.link
+              navigate={"#{base_path()}/#{@integration.id}/events"}
+              class="btn btn-sm btn-outline"
+            >
+              View Events
+            </.link>
+            <button
+              :if={@stuck_event_count > 0}
+              class="btn btn-sm btn-warning ml-2"
+              phx-click="bulk_reprocess"
+              data-confirm={"Reprocess #{@stuck_event_count} stuck event(s)?"}
+            >
+              Reprocess All Failed
+            </button>
+          </div>
+        </div>
+      </div>
 
       <%= case @live_action do %>
         <% :show -> %>
@@ -251,10 +409,6 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
           <div class="flex justify-between">
             <dt class="text-base-content/60">Status</dt>
             <dd><.active_badge active={@integration.active} /></dd>
-          </div>
-          <div :if={@integration.deactivation_reason} class="flex justify-between">
-            <dt class="text-base-content/60">Deactivation Reason</dt>
-            <dd>{humanize(@integration.deactivation_reason)}</dd>
           </div>
           <div class="flex justify-between">
             <dt class="text-base-content/60">Consecutive Failures</dt>

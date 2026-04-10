@@ -21,35 +21,20 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "name",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
       "source": "resource",
       "type": "text"
     },
     {
       "allow_nil?": false,
-      "default": "[]",
+      "default": "nil",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "actions",
-      "type": [
-        "array",
-        "text"
-      ]
+      "source": "action",
+      "type": "text"
     },
     {
       "allow_nil?": false,
@@ -60,8 +45,8 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "schema_version",
-      "type": "bigint"
+      "source": "resource_id",
+      "type": "text"
     },
     {
       "allow_nil?": false,
@@ -72,20 +57,68 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "transport_config",
+      "source": "occurred_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "snapshot",
+      "type": "map"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "payload",
       "type": "map"
     },
     {
       "allow_nil?": false,
-      "default": "\"result = event\"",
+      "default": "\"pending\"",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "transform_script",
+      "source": "state",
       "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "last_error",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "delivery_metadata",
+      "type": "map"
     },
     {
       "allow_nil?": false,
@@ -96,32 +129,8 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "consecutive_failures",
+      "source": "attempts",
       "type": "bigint"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "deactivation_reason",
-      "type": "text"
-    },
-    {
-      "allow_nil?": true,
-      "default": "true",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "active",
-      "type": "boolean"
     },
     {
       "allow_nil?": false,
@@ -166,16 +175,16 @@
           "global": null,
           "strategy": null
         },
-        "name": "outbound_integrations_owner_id_fkey",
-        "on_delete": "restrict",
+        "name": "outbound_integration_events_outbound_integration_id_fkey",
+        "on_delete": "delete",
         "on_update": "restrict",
         "primary_key?": true,
         "schema": "public",
-        "table": "users"
+        "table": "outbound_integrations"
       },
       "scale": null,
       "size": null,
-      "source": "owner_id",
+      "source": "outbound_integration_id",
       "type": "uuid"
     }
   ],
@@ -187,17 +196,17 @@
       "all_tenants?": false,
       "concurrently": false,
       "error_fields": [
-        "resource",
-        "active"
+        "outbound_integration_id",
+        "state"
       ],
       "fields": [
         {
           "type": "atom",
-          "value": "resource"
+          "value": "outbound_integration_id"
         },
         {
           "type": "atom",
-          "value": "active"
+          "value": "state"
         }
       ],
       "include": null,
@@ -214,12 +223,22 @@
       "all_tenants?": false,
       "concurrently": false,
       "error_fields": [
-        "owner_id"
+        "outbound_integration_id",
+        "resource_id",
+        "state"
       ],
       "fields": [
         {
           "type": "atom",
-          "value": "owner_id"
+          "value": "outbound_integration_id"
+        },
+        {
+          "type": "atom",
+          "value": "resource_id"
+        },
+        {
+          "type": "atom",
+          "value": "state"
         }
       ],
       "include": null,
@@ -231,27 +250,88 @@
       "unique": false,
       "using": null,
       "where": null
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "state",
+        "updated_at"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "state"
+        },
+        {
+          "type": "atom",
+          "value": "updated_at"
+        }
+      ],
+      "include": null,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "outbound_integration_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "outbound_integration_id"
+        }
+      ],
+      "include": null,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "outbound_integration_id",
+        "resource_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "outbound_integration_id"
+        },
+        {
+          "type": "atom",
+          "value": "resource_id"
+        }
+      ],
+      "include": null,
+      "message": null,
+      "name": "idx_one_scheduled_per_integration_resource",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": "state = 'scheduled'"
     }
   ],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "038E3CEB334E14FA2680F088E3B30841A33EEF3805F48BFA414B08B70F3B02DE",
-  "identities": [
-    {
-      "all_tenants?": false,
-      "base_filter": null,
-      "index_name": "outbound_integrations_name_index",
-      "keys": [
-        {
-          "type": "atom",
-          "value": "name"
-        }
-      ],
-      "name": "name",
-      "nils_distinct?": true,
-      "where": null
-    }
-  ],
+  "hash": "5CE69F42B64C8C2BD28EA7EB7C147CD2A8C4E6B0660764277DCE6805D0EB9C5F",
+  "identities": [],
   "multitenancy": {
     "attribute": null,
     "global": null,
@@ -259,5 +339,5 @@
   },
   "repo": "Elixir.Example.Repo",
   "schema": null,
-  "table": "outbound_integrations"
+  "table": "outbound_integration_events"
 }

@@ -17,23 +17,30 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
       )
     end
 
-    test "full pipeline: product create → dispatch → deliver → success log" do
+    test "full pipeline: product create → dispatch → schedule → deliver → success" do
       stub_webhook_success()
       integration = create_outbound_integration!()
 
       product = create_product!()
 
-      {_dispatcher_job, [delivery_job], [:ok]} = execute_pipeline!(product)
+      {_dispatcher_job, _all_events, _all_results} = execute_pipeline!(product)
 
-      assert delivery_job.args["outbound_integration_id"] == integration.id
-      assert delivery_job.args["resource_id"] == product.id
+      # Filter to events for our test integration
+      [event] = get_events(integration.id)
+      assert event.resource_id == product.id
+      assert event.resource == "product"
+      assert event.action == "create"
+      assert event.payload != nil
+
+      # Event should now be delivered
+      event = reload_event!(event)
+      assert event.state == :delivered
 
       # Verify delivery log created with success status
       [log] = get_delivery_logs(integration.id)
       assert log.status == :success
       assert log.resource == "product"
       assert log.action == "create"
-      assert log.resource_id == product.id
 
       # Integration should have 0 consecutive failures
       integration = reload_integration!(integration)
@@ -47,8 +54,7 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
       integration = create_outbound_integration!()
       product = create_product!()
 
-      {_, _, [result]} = execute_pipeline!(product)
-      assert {:error, _} = result
+      execute_pipeline!(product)
 
       [log] = get_delivery_logs(integration.id)
       assert log.status == :failed
@@ -56,6 +62,12 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
 
       integration = reload_integration!(integration)
       assert integration.consecutive_failures == 1
+
+      # Event should still be in scheduled state (Oban retries)
+      [event] = get_events(integration.id)
+      assert event.state == :scheduled
+      assert event.attempts == 1
+      assert event.last_error != nil
     end
   end
 
@@ -65,7 +77,7 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
       integration = create_outbound_integration!()
       product = create_product!()
 
-      {_, _, [:ok]} = execute_pipeline!(product)
+      execute_pipeline!(product)
 
       [log] = get_delivery_logs(integration.id)
       assert log.status == :failed
@@ -76,11 +88,11 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
     end
   end
 
-  describe "auto-deactivation" do
-    test "integration is deactivated after reaching failure threshold" do
+  describe "auto-suspension" do
+    test "integration is auto-suspended after reaching failure threshold" do
       stub_webhook_failure(500)
 
-      threshold = AshIntegration.auto_deactivation_threshold()
+      threshold = AshIntegration.auto_suspension_threshold()
 
       integration = create_outbound_integration!()
 
@@ -96,13 +108,16 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
       execute_pipeline!(product)
 
       integration = reload_integration!(integration)
-      assert integration.active == false
+      assert integration.suspended == true
       assert integration.consecutive_failures >= threshold
+      assert integration.suspension_reason =~ "Auto-suspended"
+      # Integration should still be active (not deactivated)
+      assert integration.active == true
     end
   end
 
   describe "Lua transform" do
-    test "script returning nil skips delivery" do
+    test "script returning nil creates cancelled event for audit trail" do
       stub_webhook_success()
 
       integration =
@@ -110,14 +125,18 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
           transform_script: "-- no result set"
         })
 
-      product = create_product!()
-      {_, _, [:ok]} = execute_pipeline!(product)
+      _product = create_product!()
 
-      [log] = get_delivery_logs(integration.id)
-      assert log.status == :skipped
+      run_latest_dispatcher!()
+
+      # Script returning nil creates a cancelled event (audit trail)
+      [event] = get_events(integration.id)
+      assert event.state == :cancelled
+      assert event.payload == nil
+      assert event.last_error == "Skipped by Lua transform"
     end
 
-    test "broken script records failure" do
+    test "broken script creates event with nil payload and last_error set" do
       stub_webhook_success()
 
       integration =
@@ -125,17 +144,19 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
           transform_script: "result = {"
         })
 
-      product = create_product!()
-      {_, _, [:ok]} = execute_pipeline!(product)
+      _product = create_product!()
 
-      [log] = get_delivery_logs(integration.id)
-      assert log.status == :failed
-      assert log.error_message =~ "Lua error"
+      run_latest_dispatcher!()
+
+      [event] = get_events(integration.id)
+      assert event.state == :pending
+      assert event.payload == nil
+      assert event.last_error =~ "Lua error"
     end
   end
 
   describe "inactive integration" do
-    test "inactive integration does not receive deliveries" do
+    test "inactive integration does not receive events" do
       stub_webhook_success()
 
       integration = create_outbound_integration!()
@@ -143,17 +164,38 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
 
       _product = create_product!()
 
-      [dispatcher_job] = all_enqueued(worker: AshIntegration.Workers.EventDispatcher)
-      :ok = perform_job(AshIntegration.Workers.EventDispatcher, dispatcher_job.args)
+      run_latest_dispatcher!()
 
-      # No delivery jobs should be enqueued for inactive integrations
-      delivery_jobs =
-        Oban.Job
-        |> Ecto.Query.where(worker: "AshIntegration.Workers.OutboundDelivery")
-        |> Ecto.Query.where([j], j.state == "available")
-        |> Example.Repo.all()
+      # No events should be created for inactive integrations
+      events = get_events(integration.id)
+      assert events == []
+    end
+  end
 
-      assert delivery_jobs == []
+  describe "suspended integration" do
+    test "suspended integration still creates events but doesn't schedule delivery" do
+      stub_webhook_success()
+
+      integration = create_outbound_integration!()
+
+      # Suspend the integration
+      integration
+      |> Ash.Changeset.for_update(:suspend, %{reason: "Test suspension"}, authorize?: false)
+      |> Ash.update!(authorize?: false)
+
+      _product = create_product!()
+
+      # Run dispatcher — events should be created
+      run_latest_dispatcher!()
+
+      # Events should exist with payload cached
+      [event] = get_events(integration.id)
+      assert event.state == :pending
+      assert event.payload != nil
+
+      # EventScheduler should skip suspended integrations
+      ready_pairs = AshIntegration.EventScheduler.find_ready_pairs(100)
+      assert ready_pairs == []
     end
   end
 end

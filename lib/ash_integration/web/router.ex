@@ -12,6 +12,8 @@ defmodule AshIntegration.Web.Router do
         live "/:id", AshIntegration.Web.OutboundIntegrationLive.Show, :show
         live "/:id/edit", AshIntegration.Web.OutboundIntegrationLive.Show, :edit
         live "/:id/test", AshIntegration.Web.OutboundIntegrationLive.Show, :test
+        live "/:id/events", AshIntegration.Web.OutboundIntegrationEventLive.Index, :index
+        live "/events/:event_id", AshIntegration.Web.OutboundIntegrationEventLive.Show, :show
         live "/logs/all", AshIntegration.Web.DeliveryLogLive.Index, :index
         live "/logs/:id", AshIntegration.Web.DeliveryLogLive.Show, :show
       end

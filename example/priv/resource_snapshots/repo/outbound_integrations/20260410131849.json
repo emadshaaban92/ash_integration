@@ -65,18 +65,6 @@
     },
     {
       "allow_nil?": false,
-      "default": "\"http\"",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "transport",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
       "default": "nil",
       "generated?": false,
       "precision": null,
@@ -89,7 +77,7 @@
     },
     {
       "allow_nil?": false,
-      "default": "nil",
+      "default": "\"result = event\"",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
@@ -113,18 +101,6 @@
     },
     {
       "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "deactivation_reason",
-      "type": "text"
-    },
-    {
-      "allow_nil?": true,
       "default": "true",
       "generated?": false,
       "precision": null,
@@ -134,6 +110,42 @@
       "size": null,
       "source": "active",
       "type": "boolean"
+    },
+    {
+      "allow_nil?": true,
+      "default": "false",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "suspended",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "suspended_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "suspension_reason",
+      "type": "text"
     },
     {
       "allow_nil?": false,
@@ -247,7 +259,7 @@
   ],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "FDABCD4DACF9C0379459C3DA2818FC1367F57BA403A723E762B85CE8971327E6",
+  "hash": "4482B4723EE8CF3C3182A673EE7EC67CDB167DEDF05D9EA377C68A5259A0619B",
   "identities": [
     {
       "all_tenants?": false,

@@ -1,5 +1,5 @@
 defmodule Example.SampleBuilderIntegrationTest do
-  use Example.DataCase, async: true
+  use Example.DataCase, async: false
 
   import Example.IntegrationHelpers
 
@@ -48,7 +48,11 @@ defmodule Example.SampleBuilderIntegrationTest do
     test "uses real record when available, falls back to synthetic when not" do
       user = create_user!()
 
-      # No products exist yet — should fall back to synthetic sample
+      # Delete all products so the loader falls back to synthetic
+      Example.Catalog.Product
+      |> Ash.read!(authorize?: false)
+      |> Enum.each(&Ash.destroy!(&1, action: :destroy, authorize?: false))
+
       {:ok, synthetic_data} =
         SampleBuilder.build_sample_event_data("product", 1, "create", user)
 

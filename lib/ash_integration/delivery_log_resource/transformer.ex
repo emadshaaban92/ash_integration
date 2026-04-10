@@ -35,6 +35,7 @@ defmodule AshIntegration.DeliveryLogResource.Transformer do
      )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_relationship_if_not_exists()
+     |> add_event_relationship_if_not_exists()
      |> add_default_accept_if_not_set()
      |> add_defaults_if_not_set()
      |> add_create_action_if_not_exists()
@@ -108,30 +109,52 @@ defmodule AshIntegration.DeliveryLogResource.Transformer do
     end
   end
 
+  defp add_event_relationship_if_not_exists(dsl_state) do
+    if Info.relationship(dsl_state, :outbound_integration_event) do
+      dsl_state
+    else
+      event_resource = AshIntegration.outbound_integration_event_resource()
+
+      {:ok, relationship} =
+        Transformer.build_entity(Dsl, [:relationships], :belongs_to,
+          name: :outbound_integration_event,
+          destination: event_resource,
+          domain: AshIntegration.domain(),
+          allow_nil?: true,
+          public?: true
+        )
+
+      Transformer.add_entity(dsl_state, [:relationships], relationship, type: :append)
+    end
+  end
+
   defp add_create_action_if_not_exists(dsl_state) do
     if Info.action(dsl_state, :create) do
       dsl_state
     else
+      accept = [
+        :event_id,
+        :resource,
+        :action,
+        :schema_version,
+        :resource_id,
+        :request_payload,
+        :response_status,
+        :response_body,
+        :error_message,
+        :kafka_offset,
+        :kafka_partition,
+        :duration_ms,
+        :status,
+        :outbound_integration_id,
+        :outbound_integration_event_id
+      ]
+
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :create,
           name: :create,
           primary?: true,
-          accept: [
-            :event_id,
-            :resource,
-            :action,
-            :schema_version,
-            :resource_id,
-            :request_payload,
-            :response_status,
-            :response_body,
-            :error_message,
-            :kafka_offset,
-            :kafka_partition,
-            :duration_ms,
-            :status,
-            :outbound_integration_id
-          ]
+          accept: accept
         )
 
       Transformer.add_entity(dsl_state, [:actions], action, type: :append)

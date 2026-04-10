@@ -61,12 +61,13 @@ defmodule Example.Repo.Migrations.AddTables do
       add :resource, :text, null: false
       add :actions, {:array, :text}, null: false, default: []
       add :schema_version, :bigint, null: false
-      add :transport, :text, null: false, default: "http"
       add :transport_config, :map, null: false
-      add :transform_script, :text, null: false
+      add :transform_script, :text, null: false, default: "result = event"
       add :consecutive_failures, :bigint, null: false, default: 0
-      add :deactivation_reason, :text
       add :active, :boolean, default: true
+      add :suspended, :boolean, default: false
+      add :suspended_at, :utc_datetime_usec
+      add :suspension_reason, :text
 
       add :created_at, :utc_datetime_usec,
         null: false,
@@ -94,6 +95,53 @@ defmodule Example.Repo.Migrations.AddTables do
 
     create unique_index(:outbound_integrations, [:name], name: "outbound_integrations_name_index")
 
+    create table(:outbound_integration_events, primary_key: false) do
+      add :id, :uuid, null: false, default: fragment("uuid_generate_v7()"), primary_key: true
+      add :resource, :text, null: false
+      add :action, :text, null: false
+      add :resource_id, :text, null: false
+      add :occurred_at, :utc_datetime_usec, null: false
+      add :snapshot, :map, null: false
+      add :payload, :map
+      add :state, :text, null: false, default: "pending"
+      add :last_error, :text
+      add :delivery_metadata, :map
+      add :attempts, :bigint, null: false, default: 0
+
+      add :created_at, :utc_datetime_usec,
+        null: false,
+        default: fragment("(now() AT TIME ZONE 'utc')")
+
+      add :updated_at, :utc_datetime_usec,
+        null: false,
+        default: fragment("(now() AT TIME ZONE 'utc')")
+
+      add :outbound_integration_id,
+          references(:outbound_integrations,
+            column: :id,
+            name: "outbound_integration_events_outbound_integration_id_fkey",
+            type: :uuid,
+            prefix: "public",
+            on_delete: :delete_all,
+            on_update: :restrict
+          ),
+          null: false
+    end
+
+    create index(:outbound_integration_events, [:outbound_integration_id, :resource_id],
+             name: "idx_one_scheduled_per_integration_resource",
+             unique: true,
+             where: "state = 'scheduled'"
+           )
+
+    create index(:outbound_integration_events, [:outbound_integration_id])
+
+    create index(:outbound_integration_events, [:state, :updated_at])
+
+    create index(:outbound_integration_events, [:outbound_integration_id, :resource_id, :state])
+
+    create index(:outbound_integration_events, [:outbound_integration_id, :state])
+
     create table(:integration_delivery_logs, primary_key: false) do
       add :id, :uuid, null: false, default: fragment("uuid_generate_v7()"), primary_key: true
       add :event_id, :uuid, null: false
@@ -105,6 +153,8 @@ defmodule Example.Repo.Migrations.AddTables do
       add :response_status, :bigint
       add :response_body, :text
       add :error_message, :text
+      add :kafka_offset, :bigint
+      add :kafka_partition, :bigint
       add :duration_ms, :bigint
       add :status, :text, null: false
 
@@ -122,6 +172,14 @@ defmodule Example.Repo.Migrations.AddTables do
             on_update: :restrict
           ),
           null: false
+
+      add :outbound_integration_event_id,
+          references(:outbound_integration_events,
+            column: :id,
+            name: "integration_delivery_logs_outbound_integration_event_id_fkey",
+            type: :uuid,
+            prefix: "public"
+          )
     end
 
     create index(:integration_delivery_logs, [:outbound_integration_id, :resource_id, :created_at])
@@ -139,6 +197,11 @@ defmodule Example.Repo.Migrations.AddTables do
            "integration_delivery_logs_outbound_integration_id_fkey"
          )
 
+    drop constraint(
+           :integration_delivery_logs,
+           "integration_delivery_logs_outbound_integration_event_id_fkey"
+         )
+
     drop_if_exists index(:integration_delivery_logs, [:outbound_integration_id])
 
     drop_if_exists index(:integration_delivery_logs, [:event_id])
@@ -152,6 +215,29 @@ defmodule Example.Repo.Migrations.AddTables do
                    ])
 
     drop table(:integration_delivery_logs)
+
+    drop constraint(
+           :outbound_integration_events,
+           "outbound_integration_events_outbound_integration_id_fkey"
+         )
+
+    drop_if_exists index(:outbound_integration_events, [:outbound_integration_id, :state])
+
+    drop_if_exists index(:outbound_integration_events, [
+                     :outbound_integration_id,
+                     :resource_id,
+                     :state
+                   ])
+
+    drop_if_exists index(:outbound_integration_events, [:state, :updated_at])
+
+    drop_if_exists index(:outbound_integration_events, [:outbound_integration_id])
+
+    drop_if_exists index(:outbound_integration_events, [:outbound_integration_id, :resource_id],
+                     name: "idx_one_scheduled_per_integration_resource"
+                   )
+
+    drop table(:outbound_integration_events)
 
     drop_if_exists unique_index(:outbound_integrations, [:name],
                      name: "outbound_integrations_name_index"

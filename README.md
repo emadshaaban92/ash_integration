@@ -2,7 +2,7 @@
 
 A Spark DSL extension for [Ash Framework](https://ash-hq.org) that adds outbound integration support to your Ash resources — with a built-in dashboard UI.
 
-Declare which resource actions trigger outbound events, write Lua transform scripts, and deliver payloads to external systems via HTTP, Kafka, or gRPC. Includes automatic retries, failure tracking, auto-deactivation, delivery logging, and a full management UI.
+Declare which resource actions trigger outbound events, write Lua transform scripts, and deliver payloads to external systems via HTTP, Kafka, or gRPC. Includes event-driven delivery with at-least-once semantics, automatic retries, integration suspension, delivery logging, and a full management UI.
 
 ## Features
 
@@ -12,10 +12,13 @@ Declare which resource actions trigger outbound events, write Lua transform scri
 - **Lua transform scripts** — sandboxed Lua execution to reshape event data before delivery
 - **Payload signing** — HMAC-SHA256 signatures across all transports
 - **Secret encryption** — credentials encrypted at rest via AshCloak
-- **Failure tracking** — consecutive failure counting with configurable auto-deactivation threshold
-- **Delivery ordering** — per-resource-id ordering guarantees within an integration
+- **Event-driven delivery** — durable `OutboundIntegrationEvent` records own the full lifecycle; Oban jobs are disposable execution mechanisms
+- **At-least-once semantics** — events are never lost, even if Oban jobs are discarded or nodes crash
+- **Ordering guarantees** — per-resource-id ordering enforced by a partial unique index (database-level correctness)
+- **Integration suspension** — auto-suspend after consecutive failures (events keep accumulating, no data loss)
+- **Bulk reprocess** — re-run Lua transforms across all stuck events in one action after fixing a script
 - **Delivery logs** — full request/response logging with configurable retention
-- **Built-in dashboard** — LiveView UI for managing integrations, browsing logs, and testing transforms
+- **Built-in dashboard** — LiveView UI for managing integrations, browsing events and logs, and testing transforms
 - **Powered by Oban** — reliable background job processing for event dispatch and delivery
 
 ## Installation
@@ -51,6 +54,7 @@ config :ash_integration,
   otp_app: :my_app,
   outbound_integration_resource: MyApp.Integration.OutboundIntegration,
   delivery_log_resource: MyApp.Integration.DeliveryLog,
+  outbound_integration_event_resource: MyApp.Integration.OutboundIntegrationEvent,
   domain: MyApp.Integration,
   repo: MyApp.Repo,
   actor_resource: MyApp.Accounts.User,
@@ -62,8 +66,8 @@ config :ash_integration,
 ```elixir
 config :ash_integration,
   # ...required settings above
-  auto_deactivation_threshold: 50,         # Consecutive failures before auto-deactivate (default: 50)
-  delivery_log_retention_days: 90,         # Days to keep delivery logs (default: 90)
+  auto_suspension_threshold: 50,           # Consecutive failures before auto-suspend (default: 50)
+  delivery_log_retention_days: 90,         # Days to keep delivery logs and old events (default: 90)
   kafka_idle_timeout_ms: 300_000           # Kafka client idle teardown (default: 5 min)
 ```
 
@@ -81,7 +85,7 @@ config :my_app, Oban,
   ]
 ```
 
-To enable automatic delivery log cleanup, add a cron schedule:
+To enable automatic cleanup of old delivery logs and delivered/cancelled events, add a cron schedule:
 
 ```elixir
 config :my_app, Oban,
@@ -139,6 +143,27 @@ defmodule MyApp.Integration.DeliveryLog do
 end
 ```
 
+Create an `OutboundIntegrationEvent` resource to track the delivery lifecycle:
+
+```elixir
+defmodule MyApp.Integration.OutboundIntegrationEvent do
+  use Ash.Resource,
+    domain: MyApp.Integration,
+    data_layer: AshPostgres.DataLayer,
+    extensions: [AshIntegration.OutboundIntegrationEventResource],
+    authorizers: [Ash.Policy.Authorizer]
+
+  postgres do
+    table "outbound_integration_events"
+    repo MyApp.Repo
+  end
+
+  policies do
+    # Add your authorization rules
+  end
+end
+```
+
 ### 2. Create the domain
 
 ```elixir
@@ -148,6 +173,7 @@ defmodule MyApp.Integration do
   resources do
     resource MyApp.Integration.OutboundIntegration
     resource MyApp.Integration.DeliveryLog
+    resource MyApp.Integration.OutboundIntegrationEvent
   end
 end
 ```
@@ -166,7 +192,7 @@ See the [Cloak documentation](https://hexdocs.pm/cloak/readme.html) for key conf
 
 ### 4. Add the supervisor
 
-Add `AshIntegration.Supervisor` to your application's supervision tree. This starts runtime processes (Kafka client manager):
+Add `AshIntegration.Supervisor` to your application's supervision tree. This starts runtime processes (EventScheduler, DeliveryGuardian, Kafka client manager):
 
 ```elixir
 # lib/my_app/application.ex
@@ -302,27 +328,57 @@ Scripts run in a sandboxed environment with no I/O, a 10KB size limit, and a 5-s
 
 ## Architecture
 
+AshIntegration uses an **event-driven state machine** with **at-least-once** delivery semantics. Events are the durable source of truth; Oban jobs are disposable execution mechanisms.
+
 ```
 Source Resource Action
-        |
-        v
+        │
+        ▼
   PublishEvent Change (injected by AshIntegration extension)
-        |
-        v
+        │  Creates EventDispatcher Oban job
+        ▼
   EventDispatcher (Oban: integration_dispatch queue)
-    | Finds matching active integrations
-    | Loads event data via resource Loader
-        |
-        v
+        │  Finds matching integrations (including suspended ones)
+        │  Loads event data via resource Loader
+        │  Runs Lua transform inline → caches payload
+        │  Creates OutboundIntegrationEvent records (state: pending)
+        ▼
+  EventScheduler (GenServer, adaptive: ~1s when busy, 10s idle)
+        │  Skips suspended integrations
+        │  Finds oldest pending event per (integration, resource_id)
+        │  Creates OutboundDelivery Oban job (state → scheduled)
+        ▼
   OutboundDelivery (Oban: integration_delivery queue)
-    | Runs Lua transform
-    | Delivers via HTTP, Kafka, or gRPC
-    | Logs result to DeliveryLog
-    | Tracks success/failure
-        |
-        v
-  Auto-deactivation (after N consecutive failures)
+        │  Delivers via HTTP, Kafka, or gRPC
+        │  On success: state → delivered, resets consecutive_failures
+        │  On failure: records error, increments consecutive_failures
+        │  Auto-suspends integration if failure threshold reached
+        ▼
+  EventScheduler picks up next pending event for that resource_id
 ```
+
+### Event States
+
+| State       | Meaning                                              |
+|-------------|------------------------------------------------------|
+| `pending`   | Created with payload cached, ready to schedule       |
+| `scheduled` | Oban delivery job exists for this event              |
+| `delivered` | Successfully delivered to target system              |
+| `cancelled` | Manually cancelled, will not be delivered            |
+
+### Ordering Guarantee
+
+Events are ordered per `(integration_id, resource_id)`. A **partial unique index** ensures at most one event per resource chain can be in `scheduled` state at a time (database-enforced). Different resource IDs within the same integration run in parallel.
+
+### Integration Suspension
+
+When a target system fails persistently, the integration is **auto-suspended** (not deactivated). Suspended integrations continue to accumulate events in `pending` state — no data is lost. When the operator fixes the issue and un-suspends, the backlog drains in order.
+
+### Resilience
+
+- **Oban job lost/discarded**: DeliveryGuardian detects orphaned `scheduled` events and moves them back to `pending` for re-scheduling
+- **Node crash during delivery**: Oban's Lifeline plugin rescues executing jobs; guardian catches anything missed
+- **Lua script bug**: Events are created with `payload: nil` and `last_error` set; use bulk reprocess after fixing the script
 
 ## License
 

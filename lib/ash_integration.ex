@@ -33,6 +33,10 @@ defmodule AshIntegration do
     Keyword.fetch!(config(), :delivery_log_resource)
   end
 
+  def outbound_integration_event_resource do
+    Keyword.fetch!(config(), :outbound_integration_event_resource)
+  end
+
   def domain do
     Keyword.fetch!(config(), :domain)
   end
@@ -49,8 +53,8 @@ defmodule AshIntegration do
     Keyword.fetch!(config(), :vault)
   end
 
-  def auto_deactivation_threshold do
-    Keyword.get(config(), :auto_deactivation_threshold, 50)
+  def auto_suspension_threshold do
+    Keyword.get(config(), :auto_suspension_threshold, 50)
   end
 
   def delivery_log_retention_days do

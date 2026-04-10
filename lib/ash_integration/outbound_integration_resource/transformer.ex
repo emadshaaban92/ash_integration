@@ -42,26 +42,36 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
        public?: true,
        default: 0
      )
-     |> add_attribute_if_not_exists(:deactivation_reason, :atom,
-       allow_nil?: true,
-       public?: true,
-       constraints: [one_of: [:manual, :delivery_failures]]
-     )
      |> add_attribute_if_not_exists(:active, :boolean,
        default: true,
        public?: true,
        always_select?: true
      )
+     |> add_attribute_if_not_exists(:suspended, :boolean,
+       default: false,
+       public?: true,
+       always_select?: true
+     )
+     |> add_attribute_if_not_exists(:suspended_at, :utc_datetime_usec,
+       allow_nil?: true,
+       public?: true
+     )
+     |> add_attribute_if_not_exists(:suspension_reason, :string,
+       allow_nil?: true,
+       public?: true
+     )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_delivery_logs_relationship_if_not_exists()
+     |> add_outbound_integration_events_relationship_if_not_exists()
      |> add_owner_relationship_if_not_exists()
      |> add_identity_if_not_exists(:name, [:name])
      |> add_activate_action_if_not_exists()
      |> add_deactivate_action_if_not_exists()
      |> add_record_success_action_if_not_exists()
-     |> add_record_failure_action_if_not_exists()
-     |> add_auto_deactivate_action_if_not_exists()
+     |> add_suspend_action_if_not_exists()
+     |> add_unsuspend_action_if_not_exists()
+     |> add_bulk_reprocess_action_if_not_exists()
      |> add_outbound_config_validation_if_not_exists()
      |> add_test_action_if_not_exists()
      |> add_default_accept_if_not_set()
@@ -137,6 +147,23 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
         Transformer.build_entity(Dsl, [:relationships], :has_many,
           name: :delivery_logs,
           destination: delivery_log_resource,
+          domain: AshIntegration.domain()
+        )
+
+      Transformer.add_entity(dsl_state, [:relationships], relationship, type: :append)
+    end
+  end
+
+  defp add_outbound_integration_events_relationship_if_not_exists(dsl_state) do
+    if Info.relationship(dsl_state, :outbound_integration_events) do
+      dsl_state
+    else
+      event_resource = AshIntegration.outbound_integration_event_resource()
+
+      {:ok, relationship} =
+        Transformer.build_entity(Dsl, [:relationships], :has_many,
+          name: :outbound_integration_events,
+          destination: event_resource,
           domain: AshIntegration.domain()
         )
 
@@ -241,25 +268,29 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
     end
   end
 
-  defp add_record_failure_action_if_not_exists(dsl_state) do
-    if Info.action(dsl_state, :record_failure) do
+  defp add_suspend_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :suspend) do
       dsl_state
     else
-      import Ash.Expr
+      reason_arg =
+        Transformer.build_entity!(Dsl, [:actions, :update], :argument,
+          name: :reason,
+          type: :string,
+          allow_nil?: true
+        )
 
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :update,
-          name: :record_failure,
+          name: :suspend,
           accept: [],
           require_atomic?: false,
+          arguments: [reason_arg],
           changes: [
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
-              change:
-                {Change.Atomic,
-                 [attribute: :consecutive_failures, expr: expr(consecutive_failures + 1)]}
+              change: {Change.SetAttribute, [attribute: :suspended, value: true]}
             ),
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
-              change: AshIntegration.Changes.AutoDeactivateOnFailures
+              change: AshIntegration.Changes.SetSuspensionDetails
             )
           ]
         )
@@ -268,25 +299,52 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
     end
   end
 
-  defp add_auto_deactivate_action_if_not_exists(dsl_state) do
-    if Info.action(dsl_state, :auto_deactivate) do
+  defp add_unsuspend_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :unsuspend) do
       dsl_state
     else
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :update,
-          name: :auto_deactivate,
+          name: :unsuspend,
           accept: [],
           require_atomic?: false,
           changes: [
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
-              change: {Change.SetAttribute, [attribute: :active, value: false]}
+              change: {Change.SetAttribute, [attribute: :suspended, value: false]}
             ),
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
-              change:
-                {Change.SetAttribute,
-                 [attribute: :deactivation_reason, value: :delivery_failures]}
+              change: {Change.SetAttribute, [attribute: :suspended_at, value: nil]}
+            ),
+            Transformer.build_entity!(Dsl, [:actions, :update], :change,
+              change: {Change.SetAttribute, [attribute: :suspension_reason, value: nil]}
+            ),
+            Transformer.build_entity!(Dsl, [:actions, :update], :change,
+              change: {Change.SetAttribute, [attribute: :consecutive_failures, value: 0]}
             )
           ]
+        )
+
+      Transformer.add_entity(dsl_state, [:actions], action, type: :append)
+    end
+  end
+
+  defp add_bulk_reprocess_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :bulk_reprocess) do
+      dsl_state
+    else
+      integration_arg =
+        Transformer.build_entity!(Dsl, [:actions, :action], :argument,
+          name: :integration,
+          type: :struct,
+          allow_nil?: false
+        )
+
+      {:ok, action} =
+        Transformer.build_entity(Dsl, [:actions], :action,
+          name: :bulk_reprocess,
+          returns: :map,
+          arguments: [integration_arg],
+          run: AshIntegration.Actions.BulkReprocess
         )
 
       Transformer.add_entity(dsl_state, [:actions], action, type: :append)
@@ -504,8 +562,9 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
         {:activate, [action: :activate]},
         {:deactivate, [action: :deactivate]},
         {:record_success, [action: :record_success]},
-        {:record_failure, [action: :record_failure]},
-        {:auto_deactivate, [action: :auto_deactivate]},
+        {:suspend, [action: :suspend]},
+        {:unsuspend, [action: :unsuspend]},
+        {:bulk_reprocess, [action: :bulk_reprocess, args: [:integration]]},
         {:test, [action: :test, args: [:outbound_integration_id]]}
       ]
 

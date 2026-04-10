@@ -72,10 +72,12 @@ To verify on the receiving end:
 
 | Response | Behavior |
 |----------|----------|
-| 2xx | Success, logged as `:success` |
-| 5xx | Retried (up to 20 attempts with Oban backoff) |
+| 2xx | Success — event state → `delivered`, logged as `:success` |
+| 5xx | Retried (up to 20 attempts with exponential backoff) |
 | 4xx | Not retried, logged as `:failed` |
 | Network error | Retried |
+
+After enough consecutive failures across all events for an integration, the integration is **auto-suspended** — delivery stops but events continue accumulating safely until an operator investigates and un-suspends.
 
 ## Req Options
 
