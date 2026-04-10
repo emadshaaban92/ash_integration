@@ -6,7 +6,7 @@ defmodule AshIntegration.OutboundIntegrations.Actions.Test do
 
   @impl true
   def run(input, _opts, context) do
-    outbound_integration_id = Ash.ActionInput.get_argument(input, :outbound_integration_id)
+    outbound_integration_id = Ash.ActionInput.get_argument(input, :integration_id)
     action_arg = Ash.ActionInput.get_argument(input, :action)
 
     with {:ok, outbound_integration} <-

@@ -12,8 +12,8 @@ defmodule AshIntegration.Changes.OnDeliverySuccess do
   @impl true
   def change(changeset, _opts, _context) do
     Ash.Changeset.after_action(changeset, fn _changeset, record ->
-      record = Ash.load!(record, :outbound_integration)
-      integration = record.outbound_integration
+      record = Ash.load!(record, :integration)
+      integration = record.integration
 
       # Create delivery log
       create_delivery_log(record, :success)
@@ -41,7 +41,6 @@ defmodule AshIntegration.Changes.OnDeliverySuccess do
     |> Ash.Changeset.for_create(
       :create,
       %{
-        event_id: event.id,
         resource: event.resource,
         action: event.action,
         resource_id: event.resource_id,
@@ -51,8 +50,8 @@ defmodule AshIntegration.Changes.OnDeliverySuccess do
         kafka_offset: metadata["kafka_offset"],
         kafka_partition: metadata["kafka_partition"],
         status: status,
-        outbound_integration_id: event.outbound_integration_id,
-        outbound_integration_event_id: event.id
+        integration_id: event.integration_id,
+        event_id: event.id
       },
       authorize?: false
     )

@@ -10,7 +10,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     resource = AshIntegration.outbound_integration_resource()
     actor = socket.assigns.current_user
 
-    case Ash.get(resource, id, actor: actor, load: [:owner, :outbound_integration_logs]) do
+    case Ash.get(resource, id, actor: actor, load: [:owner, :logs]) do
       {:ok, integration} ->
         {:ok,
          socket
@@ -80,7 +80,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
 
     case resource
          |> Ash.ActionInput.for_action(:test, %{
-           outbound_integration_id: integration.id,
+           integration_id: integration.id,
            action: action
          })
          |> Ash.run_action(actor: actor) do
@@ -192,8 +192,8 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
 
     case log_resource
          |> Ash.Query.for_read(
-           :for_outbound_integration,
-           %{outbound_integration_id: integration.id},
+           :for_integration,
+           %{integration_id: integration.id},
            actor: actor
          )
          |> Ash.read(actor: actor, page: [limit: 10, offset: offset, count: true]) do
@@ -214,18 +214,18 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
 
     pending_count =
       event_resource
-      |> Ash.Query.filter(outbound_integration_id == ^integration.id and state == :pending)
+      |> Ash.Query.filter(integration_id == ^integration.id and state == :pending)
       |> Ash.count!(actor: actor)
 
     scheduled_count =
       event_resource
-      |> Ash.Query.filter(outbound_integration_id == ^integration.id and state == :scheduled)
+      |> Ash.Query.filter(integration_id == ^integration.id and state == :scheduled)
       |> Ash.count!(actor: actor)
 
     stuck_count =
       event_resource
       |> Ash.Query.filter(
-        outbound_integration_id == ^integration.id and state == :pending and is_nil(payload)
+        integration_id == ^integration.id and state == :pending and is_nil(payload)
       )
       |> Ash.count!(actor: actor)
 

@@ -175,7 +175,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "outbound_integration_events_outbound_integration_id_fkey",
+        "name": "outbound_integration_events_integration_id_fkey",
         "on_delete": "delete",
         "on_update": "restrict",
         "primary_key?": true,
@@ -184,7 +184,7 @@
       },
       "scale": null,
       "size": null,
-      "source": "outbound_integration_id",
+      "source": "integration_id",
       "type": "uuid"
     }
   ],
@@ -196,13 +196,13 @@
       "all_tenants?": false,
       "concurrently": false,
       "error_fields": [
-        "outbound_integration_id",
+        "integration_id",
         "state"
       ],
       "fields": [
         {
           "type": "atom",
-          "value": "outbound_integration_id"
+          "value": "integration_id"
         },
         {
           "type": "atom",
@@ -223,14 +223,14 @@
       "all_tenants?": false,
       "concurrently": false,
       "error_fields": [
-        "outbound_integration_id",
+        "integration_id",
         "resource_id",
         "state"
       ],
       "fields": [
         {
           "type": "atom",
-          "value": "outbound_integration_id"
+          "value": "integration_id"
         },
         {
           "type": "atom",
@@ -282,12 +282,12 @@
       "all_tenants?": false,
       "concurrently": false,
       "error_fields": [
-        "outbound_integration_id"
+        "integration_id"
       ],
       "fields": [
         {
           "type": "atom",
-          "value": "outbound_integration_id"
+          "value": "integration_id"
         }
       ],
       "include": null,
@@ -304,13 +304,13 @@
       "all_tenants?": false,
       "concurrently": false,
       "error_fields": [
-        "outbound_integration_id",
+        "integration_id",
         "resource_id"
       ],
       "fields": [
         {
           "type": "atom",
-          "value": "outbound_integration_id"
+          "value": "integration_id"
         },
         {
           "type": "atom",

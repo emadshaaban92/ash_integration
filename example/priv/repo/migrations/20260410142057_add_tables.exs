@@ -95,8 +95,62 @@ defmodule Example.Repo.Migrations.AddTables do
 
     create unique_index(:outbound_integrations, [:name], name: "outbound_integrations_name_index")
 
+    create table(:outbound_integration_logs, primary_key: false) do
+      add :id, :uuid, null: false, default: fragment("uuid_generate_v7()"), primary_key: true
+      add :resource, :text, null: false
+      add :action, :text, null: false
+      add :schema_version, :bigint
+      add :resource_id, :uuid, null: false
+      add :request_payload, :map
+      add :response_status, :bigint
+      add :response_body, :text
+      add :error_message, :text
+      add :kafka_offset, :bigint
+      add :kafka_partition, :bigint
+      add :duration_ms, :bigint
+      add :status, :text, null: false
+
+      add :created_at, :utc_datetime_usec,
+        null: false,
+        default: fragment("(now() AT TIME ZONE 'utc')")
+
+      add :integration_id,
+          references(:outbound_integrations,
+            column: :id,
+            name: "outbound_integration_logs_integration_id_fkey",
+            type: :uuid,
+            prefix: "public",
+            on_delete: :delete_all,
+            on_update: :restrict
+          ),
+          null: false
+
+      add :event_id, :uuid
+    end
+
+    create index(:outbound_integration_logs, [:integration_id, :resource_id, :created_at])
+
+    create index(:outbound_integration_logs, [:created_at])
+
+    create index(:outbound_integration_logs, [:event_id])
+
+    create index(:outbound_integration_logs, [:integration_id])
+
     create table(:outbound_integration_events, primary_key: false) do
       add :id, :uuid, null: false, default: fragment("uuid_generate_v7()"), primary_key: true
+    end
+
+    alter table(:outbound_integration_logs) do
+      modify :event_id,
+             references(:outbound_integration_events,
+               column: :id,
+               name: "outbound_integration_logs_event_id_fkey",
+               type: :uuid,
+               prefix: "public"
+             )
+    end
+
+    alter table(:outbound_integration_events) do
       add :resource, :text, null: false
       add :action, :text, null: false
       add :resource_id, :text, null: false
@@ -116,10 +170,10 @@ defmodule Example.Repo.Migrations.AddTables do
         null: false,
         default: fragment("(now() AT TIME ZONE 'utc')")
 
-      add :outbound_integration_id,
+      add :integration_id,
           references(:outbound_integrations,
             column: :id,
-            name: "outbound_integration_events_outbound_integration_id_fkey",
+            name: "outbound_integration_events_integration_id_fkey",
             type: :uuid,
             prefix: "public",
             on_delete: :delete_all,
@@ -128,116 +182,74 @@ defmodule Example.Repo.Migrations.AddTables do
           null: false
     end
 
-    create index(:outbound_integration_events, [:outbound_integration_id, :resource_id],
+    create index(:outbound_integration_events, [:integration_id, :resource_id],
              name: "idx_one_scheduled_per_integration_resource",
              unique: true,
              where: "state = 'scheduled'"
            )
 
-    create index(:outbound_integration_events, [:outbound_integration_id])
+    create index(:outbound_integration_events, [:integration_id])
 
     create index(:outbound_integration_events, [:state, :updated_at])
 
-    create index(:outbound_integration_events, [:outbound_integration_id, :resource_id, :state])
+    create index(:outbound_integration_events, [:integration_id, :resource_id, :state])
 
-    create index(:outbound_integration_events, [:outbound_integration_id, :state])
-
-    create table(:integration_delivery_logs, primary_key: false) do
-      add :id, :uuid, null: false, default: fragment("uuid_generate_v7()"), primary_key: true
-      add :event_id, :uuid, null: false
-      add :resource, :text, null: false
-      add :action, :text, null: false
-      add :schema_version, :bigint
-      add :resource_id, :uuid, null: false
-      add :request_payload, :map
-      add :response_status, :bigint
-      add :response_body, :text
-      add :error_message, :text
-      add :kafka_offset, :bigint
-      add :kafka_partition, :bigint
-      add :duration_ms, :bigint
-      add :status, :text, null: false
-
-      add :created_at, :utc_datetime_usec,
-        null: false,
-        default: fragment("(now() AT TIME ZONE 'utc')")
-
-      add :outbound_integration_id,
-          references(:outbound_integrations,
-            column: :id,
-            name: "integration_delivery_logs_outbound_integration_id_fkey",
-            type: :uuid,
-            prefix: "public",
-            on_delete: :delete_all,
-            on_update: :restrict
-          ),
-          null: false
-
-      add :outbound_integration_event_id,
-          references(:outbound_integration_events,
-            column: :id,
-            name: "integration_delivery_logs_outbound_integration_event_id_fkey",
-            type: :uuid,
-            prefix: "public"
-          )
-    end
-
-    create index(:integration_delivery_logs, [:outbound_integration_id, :resource_id, :created_at])
-
-    create index(:integration_delivery_logs, [:created_at])
-
-    create index(:integration_delivery_logs, [:event_id])
-
-    create index(:integration_delivery_logs, [:outbound_integration_id])
+    create index(:outbound_integration_events, [:integration_id, :state])
   end
 
   def down do
     drop constraint(
-           :integration_delivery_logs,
-           "integration_delivery_logs_outbound_integration_id_fkey"
-         )
-
-    drop constraint(
-           :integration_delivery_logs,
-           "integration_delivery_logs_outbound_integration_event_id_fkey"
-         )
-
-    drop_if_exists index(:integration_delivery_logs, [:outbound_integration_id])
-
-    drop_if_exists index(:integration_delivery_logs, [:event_id])
-
-    drop_if_exists index(:integration_delivery_logs, [:created_at])
-
-    drop_if_exists index(:integration_delivery_logs, [
-                     :outbound_integration_id,
-                     :resource_id,
-                     :created_at
-                   ])
-
-    drop table(:integration_delivery_logs)
-
-    drop constraint(
            :outbound_integration_events,
-           "outbound_integration_events_outbound_integration_id_fkey"
+           "outbound_integration_events_integration_id_fkey"
          )
 
-    drop_if_exists index(:outbound_integration_events, [:outbound_integration_id, :state])
+    drop_if_exists index(:outbound_integration_events, [:integration_id, :state])
 
-    drop_if_exists index(:outbound_integration_events, [
-                     :outbound_integration_id,
-                     :resource_id,
-                     :state
-                   ])
+    drop_if_exists index(:outbound_integration_events, [:integration_id, :resource_id, :state])
 
     drop_if_exists index(:outbound_integration_events, [:state, :updated_at])
 
-    drop_if_exists index(:outbound_integration_events, [:outbound_integration_id])
+    drop_if_exists index(:outbound_integration_events, [:integration_id])
 
-    drop_if_exists index(:outbound_integration_events, [:outbound_integration_id, :resource_id],
+    drop_if_exists index(:outbound_integration_events, [:integration_id, :resource_id],
                      name: "idx_one_scheduled_per_integration_resource"
                    )
 
+    alter table(:outbound_integration_events) do
+      remove :integration_id
+      remove :updated_at
+      remove :created_at
+      remove :attempts
+      remove :delivery_metadata
+      remove :last_error
+      remove :state
+      remove :payload
+      remove :snapshot
+      remove :occurred_at
+      remove :resource_id
+      remove :action
+      remove :resource
+    end
+
+    drop constraint(:outbound_integration_logs, "outbound_integration_logs_event_id_fkey")
+
+    alter table(:outbound_integration_logs) do
+      modify :event_id, :uuid
+    end
+
     drop table(:outbound_integration_events)
+
+    drop constraint(:outbound_integration_logs, "outbound_integration_logs_integration_id_fkey")
+
+    drop_if_exists index(:outbound_integration_logs, [:integration_id])
+
+    drop_if_exists index(:outbound_integration_logs, [:event_id])
+
+    drop_if_exists index(:outbound_integration_logs, [:created_at])
+
+    drop_if_exists index(:outbound_integration_logs, [:integration_id, :resource_id, :created_at])
+
+    drop table(:outbound_integration_logs)
 
     drop_if_exists unique_index(:outbound_integrations, [:name],
                      name: "outbound_integrations_name_index"

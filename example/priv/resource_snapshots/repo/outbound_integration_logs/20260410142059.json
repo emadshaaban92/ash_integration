@@ -21,18 +21,6 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "event_id",
-      "type": "uuid"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
       "source": "resource",
       "type": "text"
     },
@@ -199,7 +187,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "outbound_integration_logs_outbound_integration_id_fkey",
+        "name": "outbound_integration_logs_integration_id_fkey",
         "on_delete": "delete",
         "on_update": "restrict",
         "primary_key?": true,
@@ -208,7 +196,7 @@
       },
       "scale": null,
       "size": null,
-      "source": "outbound_integration_id",
+      "source": "integration_id",
       "type": "uuid"
     },
     {
@@ -230,7 +218,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "outbound_integration_logs_outbound_integration_event_id_fkey",
+        "name": "outbound_integration_logs_event_id_fkey",
         "on_delete": null,
         "on_update": null,
         "primary_key?": true,
@@ -239,7 +227,7 @@
       },
       "scale": null,
       "size": null,
-      "source": "outbound_integration_event_id",
+      "source": "event_id",
       "type": "uuid"
     }
   ],
@@ -251,12 +239,12 @@
       "all_tenants?": false,
       "concurrently": false,
       "error_fields": [
-        "outbound_integration_id"
+        "integration_id"
       ],
       "fields": [
         {
           "type": "atom",
-          "value": "outbound_integration_id"
+          "value": "integration_id"
         }
       ],
       "include": null,
@@ -317,14 +305,14 @@
       "all_tenants?": false,
       "concurrently": false,
       "error_fields": [
-        "outbound_integration_id",
+        "integration_id",
         "resource_id",
         "created_at"
       ],
       "fields": [
         {
           "type": "atom",
-          "value": "outbound_integration_id"
+          "value": "integration_id"
         },
         {
           "type": "atom",
@@ -348,7 +336,7 @@
   ],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "E95D96317383B8B120E31AE06FD9C0C0831C48EE7FD9E3BCB35AA5A84047DC82",
+  "hash": "6C973888B3BFAFD81995FE4D6BF3296C54FC6FC700277D4AEE62CEA54412B40F",
   "identities": [],
   "multitenancy": {
     "attribute": null,

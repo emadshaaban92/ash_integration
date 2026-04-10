@@ -57,14 +57,14 @@ defmodule Example.IntegrationHelpers do
 
   def get_outbound_integration_logs(outbound_integration_id) do
     AshIntegration.outbound_integration_log_resource()
-    |> Ash.Query.filter(outbound_integration_id == ^outbound_integration_id)
+    |> Ash.Query.filter(integration_id == ^outbound_integration_id)
     |> Ash.Query.sort(created_at: :desc)
     |> Ash.read!(authorize?: false)
   end
 
   def get_events(outbound_integration_id) do
     AshIntegration.outbound_integration_event_resource()
-    |> Ash.Query.filter(outbound_integration_id == ^outbound_integration_id)
+    |> Ash.Query.filter(integration_id == ^outbound_integration_id)
     |> Ash.Query.sort(id: :asc)
     |> Ash.read!(authorize?: false)
   end
@@ -194,7 +194,7 @@ defmodule Example.IntegrationHelpers do
     for {integration_id, resource_id} <- ready_pairs do
       case event_resource
            |> Ash.Query.for_read(:next_pending, %{
-             outbound_integration_id: integration_id,
+             integration_id: integration_id,
              resource_id: resource_id
            })
            |> Ash.read(authorize?: false) do

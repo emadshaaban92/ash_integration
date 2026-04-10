@@ -20,7 +20,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLogLive.Index do
 
     case resource
          |> Ash.Query.for_read(:index, %{}, actor: actor)
-         |> Ash.Query.load(:outbound_integration)
+         |> Ash.Query.load(:integration)
          |> Ash.read(actor: actor, page: [limit: 20, offset: offset, count: true]) do
       {:ok, page} ->
         assign(socket,
@@ -51,7 +51,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLogLive.Index do
 
   defp base_path, do: AshIntegration.Web.base_path()
 
-  defp integration_name(%{outbound_integration: %{name: name}}) when is_binary(name), do: name
+  defp integration_name(%{integration: %{name: name}}) when is_binary(name), do: name
   defp integration_name(_), do: "—"
 
   @impl true

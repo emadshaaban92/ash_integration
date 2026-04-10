@@ -40,13 +40,13 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
      )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
-     |> add_outbound_integration_relationship_if_not_exists()
-     |> add_outbound_integration_logs_relationship_if_not_exists()
+     |> add_integration_relationship_if_not_exists()
+     |> add_logs_relationship_if_not_exists()
      |> add_default_accept_if_not_set()
      |> add_defaults_if_not_set()
      |> add_create_action_if_not_exists()
      |> add_next_pending_action_if_not_exists()
-     |> add_for_outbound_integration_action_if_not_exists()
+     |> add_for_integration_action_if_not_exists()
      |> add_index_action_if_not_exists()
      |> add_older_than_action_if_not_exists()
      |> add_stale_pending_action_if_not_exists()
@@ -57,14 +57,14 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
      |> add_reprocess_action_if_not_exists()
      |> add_reset_to_pending_action_if_not_exists()
      |> add_code_interface_if_not_exists()
-     |> add_reference_if_not_exists(:outbound_integration,
+     |> add_reference_if_not_exists(:integration,
        on_delete: :delete,
        on_update: :restrict
      )
-     |> add_index_if_not_exists([:outbound_integration_id, :state])
-     |> add_index_if_not_exists([:outbound_integration_id, :resource_id, :state])
+     |> add_index_if_not_exists([:integration_id, :state])
+     |> add_index_if_not_exists([:integration_id, :resource_id, :state])
      |> add_index_if_not_exists([:state, :updated_at])
-     |> add_index_if_not_exists([:outbound_integration_id])
+     |> add_index_if_not_exists([:integration_id])
      |> add_partial_unique_index_if_not_exists()}
   end
 
@@ -123,15 +123,15 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
 
   # ── Relationships ───────────────────────────────────────────────────────
 
-  defp add_outbound_integration_relationship_if_not_exists(dsl_state) do
-    if Info.relationship(dsl_state, :outbound_integration) do
+  defp add_integration_relationship_if_not_exists(dsl_state) do
+    if Info.relationship(dsl_state, :integration) do
       dsl_state
     else
       outbound_integration_resource = AshIntegration.outbound_integration_resource()
 
       {:ok, relationship} =
         Transformer.build_entity(Dsl, [:relationships], :belongs_to,
-          name: :outbound_integration,
+          name: :integration,
           destination: outbound_integration_resource,
           domain: AshIntegration.domain(),
           allow_nil?: false,
@@ -142,17 +142,17 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
     end
   end
 
-  defp add_outbound_integration_logs_relationship_if_not_exists(dsl_state) do
-    if Info.relationship(dsl_state, :outbound_integration_logs) do
+  defp add_logs_relationship_if_not_exists(dsl_state) do
+    if Info.relationship(dsl_state, :logs) do
       dsl_state
     else
       log_resource = AshIntegration.outbound_integration_log_resource()
 
       {:ok, relationship} =
         Transformer.build_entity(Dsl, [:relationships], :has_many,
-          name: :outbound_integration_logs,
+          name: :logs,
           destination: log_resource,
-          destination_attribute: :outbound_integration_event_id,
+          destination_attribute: :event_id,
           domain: AshIntegration.domain()
         )
 
@@ -227,7 +227,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
             :payload,
             :state,
             :last_error,
-            :outbound_integration_id
+            :integration_id
           ]
         )
 
@@ -245,7 +245,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
 
       integration_id_arg =
         Transformer.build_entity!(Dsl, [:actions, :read], :argument,
-          name: :outbound_integration_id,
+          name: :integration_id,
           type: :uuid,
           allow_nil?: false
         )
@@ -261,7 +261,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
         Transformer.build_entity!(Dsl, [:actions, :read], :filter,
           filter:
             expr(
-              outbound_integration_id == ^arg(:outbound_integration_id) and
+              integration_id == ^arg(:integration_id) and
                 resource_id == ^arg(:resource_id) and
                 state == :pending
             )
@@ -284,15 +284,15 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
     end
   end
 
-  defp add_for_outbound_integration_action_if_not_exists(dsl_state) do
-    if Info.action(dsl_state, :for_outbound_integration) do
+  defp add_for_integration_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :for_integration) do
       dsl_state
     else
       import Ash.Expr
 
       argument =
         Transformer.build_entity!(Dsl, [:actions, :read], :argument,
-          name: :outbound_integration_id,
+          name: :integration_id,
           type: :uuid,
           allow_nil?: false
         )
@@ -307,7 +307,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
 
       filter =
         Transformer.build_entity!(Dsl, [:actions, :read], :filter,
-          filter: expr(outbound_integration_id == ^arg(:outbound_integration_id))
+          filter: expr(integration_id == ^arg(:integration_id))
         )
 
       prepare =
@@ -325,7 +325,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
 
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :read,
-          name: :for_outbound_integration,
+          name: :for_integration,
           arguments: [argument, state_arg],
           filters: [filter],
           preparations: [prepare],
@@ -406,7 +406,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
 
       argument =
         Transformer.build_entity!(Dsl, [:actions, :read], :argument,
-          name: :outbound_integration_id,
+          name: :integration_id,
           type: :uuid,
           allow_nil?: false
         )
@@ -415,7 +415,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
         Transformer.build_entity!(Dsl, [:actions, :read], :filter,
           filter:
             expr(
-              outbound_integration_id == ^arg(:outbound_integration_id) and
+              integration_id == ^arg(:integration_id) and
                 state == :pending and
                 is_nil(payload)
             )
@@ -590,7 +590,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
       defines = [
         {:create, [action: :create]},
         {:read_all, [action: :read]},
-        {:next_pending, [action: :next_pending, args: [:outbound_integration_id, :resource_id]]},
+        {:next_pending, [action: :next_pending, args: [:integration_id, :resource_id]]},
         {:schedule, [action: :schedule]},
         {:deliver, [action: :deliver]},
         {:record_attempt_error, [action: :record_attempt_error]},
@@ -674,7 +674,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
           [:postgres, :custom_indexes],
           :index,
           name: index_name,
-          fields: [:outbound_integration_id, :resource_id],
+          fields: [:integration_id, :resource_id],
           unique: true,
           where: "state = 'scheduled'"
         )

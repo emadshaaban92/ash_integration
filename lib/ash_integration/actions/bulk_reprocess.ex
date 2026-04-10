@@ -19,7 +19,7 @@ defmodule AshIntegration.Actions.BulkReprocess do
 
     {reprocessed, failed} =
       event_resource
-      |> Ash.Query.for_read(:stale_pending, %{outbound_integration_id: integration.id})
+      |> Ash.Query.for_read(:stale_pending, %{integration_id: integration.id})
       |> Ash.stream!(authorize?: false)
       |> Enum.reduce({0, 0}, fn event, {ok_count, err_count} ->
         case reprocess_event(integration, event) do

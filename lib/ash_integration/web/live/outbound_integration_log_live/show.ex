@@ -8,7 +8,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLogLive.Show do
     resource = AshIntegration.outbound_integration_log_resource()
     actor = socket.assigns.current_user
 
-    case Ash.get(resource, id, actor: actor, load: [:outbound_integration]) do
+    case Ash.get(resource, id, actor: actor, load: [:integration]) do
       {:ok, log} ->
         {:ok,
          socket
@@ -30,7 +30,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLogLive.Show do
 
   defp base_path, do: AshIntegration.Web.base_path()
 
-  defp integration_name(%{outbound_integration: %{name: name}}) when is_binary(name), do: name
+  defp integration_name(%{integration: %{name: name}}) when is_binary(name), do: name
   defp integration_name(_), do: "—"
 
   @impl true

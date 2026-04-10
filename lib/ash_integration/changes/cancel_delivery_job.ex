@@ -32,7 +32,7 @@ defmodule AshIntegration.Changes.CancelDeliveryJob do
       from(j in Oban.Job,
         where: j.queue == "integration_delivery",
         where: j.state in ["available", "scheduled", "retryable"],
-        where: fragment("?->>'outbound_integration_event_id' = ?", j.args, ^event_id_str)
+        where: fragment("?->>'event_id' = ?", j.args, ^event_id_str)
       )
 
     case AshIntegration.repo().one(query) do

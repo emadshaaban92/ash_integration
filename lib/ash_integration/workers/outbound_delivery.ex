@@ -17,7 +17,7 @@ defmodule AshIntegration.Workers.OutboundDelivery do
   require Logger
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"outbound_integration_event_id" => event_id}}) do
+  def perform(%Oban.Job{args: %{"event_id" => event_id}}) do
     event_resource = AshIntegration.outbound_integration_event_resource()
 
     case Ash.get(event_resource, event_id, authorize?: false) do
@@ -28,13 +28,15 @@ defmodule AshIntegration.Workers.OutboundDelivery do
         else
           case Ash.get(
                  AshIntegration.outbound_integration_resource(),
-                 event.outbound_integration_id, authorize?: false) do
+                 event.integration_id,
+                 authorize?: false
+               ) do
             {:ok, integration} ->
               deliver(integration, event)
 
             {:error, _} ->
               Logger.warning(
-                "Integration #{event.outbound_integration_id} not found for event #{event_id}, skipping"
+                "Integration #{event.integration_id} not found for event #{event_id}, skipping"
               )
 
               :ok

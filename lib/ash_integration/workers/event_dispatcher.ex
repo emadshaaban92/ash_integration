@@ -146,7 +146,7 @@ defmodule AshIntegration.Workers.EventDispatcher do
             payload: nil,
             state: :cancelled,
             last_error: "Skipped by Lua transform",
-            outbound_integration_id: outbound_integration.id
+            integration_id: outbound_integration.id
           },
           authorize?: false
         )
@@ -167,7 +167,7 @@ defmodule AshIntegration.Workers.EventDispatcher do
             payload: payload,
             state: :pending,
             last_error: last_error,
-            outbound_integration_id: outbound_integration.id
+            integration_id: outbound_integration.id
           },
           authorize?: false
         )

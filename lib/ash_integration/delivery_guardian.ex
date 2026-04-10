@@ -99,7 +99,7 @@ defmodule AshIntegration.DeliveryGuardian do
     query = """
     SELECT e.id
     FROM #{event_table} e
-    JOIN #{integration_table} i ON i.id = e.outbound_integration_id
+    JOIN #{integration_table} i ON i.id = e.integration_id
     WHERE e.state = 'scheduled'
       AND e.updated_at < $1
       AND i.suspended = false
@@ -107,7 +107,7 @@ defmodule AshIntegration.DeliveryGuardian do
         SELECT 1 FROM oban_jobs j
         WHERE j.queue = 'integration_delivery'
           AND j.state IN ('available', 'scheduled', 'executing', 'retryable')
-          AND j.args->>'outbound_integration_event_id' = e.id::text
+          AND j.args->>'event_id' = e.id::text
       )
     LIMIT 100
     """

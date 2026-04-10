@@ -10,7 +10,7 @@ defmodule AshIntegration.Changes.InsertDeliveryJob do
   @impl true
   def change(changeset, _opts, _context) do
     Ash.Changeset.after_action(changeset, fn _changeset, record ->
-      %{outbound_integration_event_id: record.id}
+      %{event_id: record.id}
       |> AshIntegration.Workers.OutboundDelivery.new()
       |> Oban.insert!()
 

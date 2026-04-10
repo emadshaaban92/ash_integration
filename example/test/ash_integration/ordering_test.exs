@@ -27,7 +27,7 @@ defmodule Example.AshIntegration.OrderingTest do
             snapshot: %{id: product.id},
             payload: %{data: "first"},
             state: :pending,
-            outbound_integration_id: integration.id
+            integration_id: integration.id
           },
           authorize?: false
         )
@@ -45,7 +45,7 @@ defmodule Example.AshIntegration.OrderingTest do
             snapshot: %{id: product.id},
             payload: %{data: "second"},
             state: :pending,
-            outbound_integration_id: integration.id
+            integration_id: integration.id
           },
           authorize?: false
         )
@@ -87,7 +87,7 @@ defmodule Example.AshIntegration.OrderingTest do
             snapshot: %{id: product.id},
             payload: %{data: "test"},
             state: :pending,
-            outbound_integration_id: integration.id
+            integration_id: integration.id
           },
           authorize?: false
         )
@@ -133,7 +133,7 @@ defmodule Example.AshIntegration.OrderingTest do
             snapshot: %{id: product.id},
             payload: %{data: "test"},
             state: :pending,
-            outbound_integration_id: integration.id
+            integration_id: integration.id
           },
           authorize?: false
         )
@@ -173,7 +173,7 @@ defmodule Example.AshIntegration.OrderingTest do
             snapshot: %{id: product.id},
             payload: %{data: "first"},
             state: :pending,
-            outbound_integration_id: integration.id
+            integration_id: integration.id
           },
           authorize?: false
         )
@@ -197,7 +197,7 @@ defmodule Example.AshIntegration.OrderingTest do
             snapshot: %{id: product.id},
             payload: %{data: "second"},
             state: :pending,
-            outbound_integration_id: integration.id
+            integration_id: integration.id
           },
           authorize?: false
         )
@@ -232,7 +232,7 @@ defmodule Example.AshIntegration.OrderingTest do
             payload: nil,
             state: :pending,
             last_error: "Lua error: test",
-            outbound_integration_id: integration.id
+            integration_id: integration.id
           },
           authorize?: false
         )
@@ -251,7 +251,7 @@ defmodule Example.AshIntegration.OrderingTest do
             snapshot: %{id: product.id},
             payload: %{data: "second"},
             state: :pending,
-            outbound_integration_id: integration.id
+            integration_id: integration.id
           },
           authorize?: false
         )
@@ -272,7 +272,7 @@ defmodule Example.AshIntegration.OrderingTest do
       [oldest | _] =
         event_resource
         |> Ash.Query.filter(
-          outbound_integration_id == ^integration.id and
+          integration_id == ^integration.id and
             resource_id == ^product.id and
             state == :pending
         )

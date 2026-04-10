@@ -39,8 +39,8 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Index do
 
     query =
       resource
-      |> Ash.Query.for_read(:for_outbound_integration, %{
-        outbound_integration_id: integration.id
+      |> Ash.Query.for_read(:for_integration, %{
+        integration_id: integration.id
       })
 
     query =

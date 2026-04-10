@@ -10,7 +10,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
 
     case Ash.get(event_resource, event_id,
            actor: actor,
-           load: [:outbound_integration, :outbound_integration_logs]
+           load: [:integration, :logs]
          ) do
       {:ok, event} ->
         {:ok,
@@ -42,7 +42,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
          |> Ash.update(actor: actor) do
       {:ok, updated} ->
         updated =
-          Ash.load!(updated, [:outbound_integration, :outbound_integration_logs], actor: actor)
+          Ash.load!(updated, [:integration, :logs], actor: actor)
 
         {:noreply,
          socket
@@ -58,7 +58,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
   def handle_event("reprocess", _params, socket) do
     actor = socket.assigns.current_user
     event = socket.assigns.event
-    integration = event.outbound_integration
+    integration = event.integration
 
     # Re-run Lua inline
     event_for_lua =
@@ -86,7 +86,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
          |> Ash.update(actor: actor) do
       {:ok, updated} ->
         updated =
-          Ash.load!(updated, [:outbound_integration, :outbound_integration_logs], actor: actor)
+          Ash.load!(updated, [:integration, :logs], actor: actor)
 
         AshIntegration.EventScheduler.notify()
 
@@ -127,7 +127,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
     ~H"""
     <div class="p-4 sm:p-6">
       <.back_link
-        navigate={"#{base_path()}/#{@event.outbound_integration_id}/events"}
+        navigate={"#{base_path()}/#{@event.integration_id}/events"}
         label="Back to Events"
       />
 
@@ -164,10 +164,10 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
               <dt class="text-base-content/60">Integration</dt>
               <dd>
                 <.link
-                  navigate={"#{base_path()}/#{@event.outbound_integration_id}"}
+                  navigate={"#{base_path()}/#{@event.integration_id}"}
                   class="link link-primary"
                 >
-                  {@event.outbound_integration.name}
+                  {@event.integration.name}
                 </.link>
               </dd>
 
@@ -233,7 +233,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
         </div>
       </div>
 
-      <div :if={@event.outbound_integration_logs != []} class="mt-6">
+      <div :if={@event.logs != []} class="mt-6">
         <h3 class="text-lg font-semibold mb-3">Integration Logs</h3>
         <div class="overflow-x-auto">
           <table class="table table-zebra table-sm">
@@ -248,7 +248,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
               </tr>
             </thead>
             <tbody>
-              <tr :for={log <- @event.outbound_integration_logs} id={"log-#{log.id}"}>
+              <tr :for={log <- @event.logs} id={"log-#{log.id}"}>
                 <td><.status_badge status={log.status} /></td>
                 <td>
                   <span :if={log.response_status} class="badge badge-sm">

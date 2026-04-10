@@ -84,7 +84,7 @@ defmodule AshIntegration.EventScheduler do
     for {integration_id, resource_id} <- ready_pairs do
       case event_resource
            |> Ash.Query.for_read(:next_pending, %{
-             outbound_integration_id: integration_id,
+             integration_id: integration_id,
              resource_id: resource_id
            })
            |> Ash.read(authorize?: false) do
@@ -127,14 +127,14 @@ defmodule AshIntegration.EventScheduler do
     integration_table = AshPostgres.DataLayer.Info.table(integration_resource)
 
     query = """
-    SELECT DISTINCT e.outbound_integration_id::text, e.resource_id
+    SELECT DISTINCT e.integration_id::text, e.resource_id
     FROM #{table} e
-    JOIN #{integration_table} i ON i.id = e.outbound_integration_id
+    JOIN #{integration_table} i ON i.id = e.integration_id
     WHERE e.state = 'pending'
       AND i.suspended = false
       AND NOT EXISTS (
         SELECT 1 FROM #{table} s
-        WHERE s.outbound_integration_id = e.outbound_integration_id
+        WHERE s.integration_id = e.integration_id
           AND s.resource_id = e.resource_id
           AND s.state = 'scheduled'
       )
