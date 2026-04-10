@@ -101,11 +101,24 @@ defmodule AshIntegration.Transports.Kafka do
   end
 
   @doc false
+  # Broker availability
   def retryable_error?(:leader_not_available), do: true
   def retryable_error?(:not_leader_for_partition), do: true
-  def retryable_error?(:request_timed_out), do: true
+  def retryable_error?(:broker_not_available), do: true
+  def retryable_error?(:replica_not_available), do: true
+  def retryable_error?(:preferred_leader_not_available), do: true
+  # Replication
   def retryable_error?(:not_enough_replicas), do: true
-  def retryable_error?({:connect_error, _}), do: true
+  def retryable_error?(:not_enough_replicas_after_append), do: true
+  # Timeouts and network
+  def retryable_error?(:request_timed_out), do: true
   def retryable_error?(:timeout), do: true
+  def retryable_error?(:network_exception), do: true
+  def retryable_error?({:connect_error, _}), do: true
+  # Coordinator
+  def retryable_error?(:coordinator_not_available), do: true
+  def retryable_error?(:not_coordinator), do: true
+  # Catch-all: unknown errors default to non-retryable to surface permanent
+  # failures quickly rather than burning through Oban retry attempts.
   def retryable_error?(_), do: false
 end
