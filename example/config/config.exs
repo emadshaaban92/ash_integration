@@ -108,7 +108,7 @@ config :phoenix, :json_library, Jason
 config :ash_integration,
   otp_app: :example,
   outbound_integration_resource: Example.Integration.OutboundIntegration,
-  delivery_log_resource: Example.Integration.DeliveryLog,
+  outbound_integration_log_resource: Example.Integration.OutboundIntegrationLog,
   outbound_integration_event_resource: Example.Integration.OutboundIntegrationEvent,
   domain: Example.Integration,
   repo: Example.Repo,
@@ -127,7 +127,7 @@ config :example, Oban,
   plugins: [
     {Oban.Plugins.Cron,
      crontab: [
-       {"0 3 * * *", AshIntegration.Workers.DeliveryLogCleanup}
+       {"0 3 * * *", AshIntegration.Workers.OutboundIntegrationLogCleanup}
      ]}
   ]
 

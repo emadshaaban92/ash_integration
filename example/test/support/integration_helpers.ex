@@ -55,8 +55,8 @@ defmodule Example.IntegrationHelpers do
     |> Ash.create!(authorize?: false)
   end
 
-  def get_delivery_logs(outbound_integration_id) do
-    AshIntegration.delivery_log_resource()
+  def get_outbound_integration_logs(outbound_integration_id) do
+    AshIntegration.outbound_integration_log_resource()
     |> Ash.Query.filter(outbound_integration_id == ^outbound_integration_id)
     |> Ash.Query.sort(created_at: :desc)
     |> Ash.read!(authorize?: false)

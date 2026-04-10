@@ -1,22 +1,22 @@
-defmodule AshIntegration.Workers.DeliveryLogCleanup do
+defmodule AshIntegration.Workers.OutboundIntegrationLogCleanup do
   use Oban.Worker, queue: :maintenance, max_attempts: 3
 
   require Ash.Query
 
   @impl Oban.Worker
   def perform(%Oban.Job{}) do
-    retention_days = AshIntegration.delivery_log_retention_days()
+    retention_days = AshIntegration.outbound_integration_log_retention_days()
 
-    cleanup_old_delivery_logs(retention_days)
+    cleanup_old_outbound_integration_logs(retention_days)
     cleanup_old_events(retention_days)
 
     :ok
   end
 
-  defp cleanup_old_delivery_logs(days) do
-    delivery_log_resource = AshIntegration.delivery_log_resource()
+  defp cleanup_old_outbound_integration_logs(days) do
+    outbound_integration_log_resource = AshIntegration.outbound_integration_log_resource()
 
-    delivery_log_resource
+    outbound_integration_log_resource
     |> Ash.Query.for_read(:older_than, %{days: days})
     |> Ash.bulk_destroy!(:destroy, %{},
       strategy: :atomic_batches,

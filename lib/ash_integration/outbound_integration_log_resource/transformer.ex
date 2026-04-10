@@ -1,4 +1,4 @@
-defmodule AshIntegration.DeliveryLogResource.Transformer do
+defmodule AshIntegration.OutboundIntegrationLogResource.Transformer do
   @moduledoc false
   use Spark.Dsl.Transformer
 

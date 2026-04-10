@@ -199,7 +199,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "integration_delivery_logs_outbound_integration_id_fkey",
+        "name": "outbound_integration_logs_outbound_integration_id_fkey",
         "on_delete": "delete",
         "on_update": "restrict",
         "primary_key?": true,
@@ -230,7 +230,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "integration_delivery_logs_outbound_integration_event_id_fkey",
+        "name": "outbound_integration_logs_outbound_integration_event_id_fkey",
         "on_delete": null,
         "on_update": null,
         "primary_key?": true,
@@ -357,5 +357,5 @@
   },
   "repo": "Elixir.Example.Repo",
   "schema": null,
-  "table": "integration_delivery_logs"
+  "table": "outbound_integration_logs"
 }

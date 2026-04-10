@@ -53,7 +53,7 @@ In your `assets/css/app.css`, add:
 config :ash_integration,
   otp_app: :my_app,
   outbound_integration_resource: MyApp.Integration.OutboundIntegration,
-  delivery_log_resource: MyApp.Integration.DeliveryLog,
+  outbound_integration_log_resource: MyApp.Integration.OutboundIntegrationLog,
   outbound_integration_event_resource: MyApp.Integration.OutboundIntegrationEvent,
   domain: MyApp.Integration,
   repo: MyApp.Repo,
@@ -67,7 +67,7 @@ config :ash_integration,
 config :ash_integration,
   # ...required settings above
   auto_suspension_threshold: 50,           # Consecutive failures before auto-suspend (default: 50)
-  delivery_log_retention_days: 90,         # Days to keep delivery logs and old events (default: 90)
+  outbound_integration_log_retention_days: 90, # Days to keep logs and old events (default: 90)
   kafka_idle_timeout_ms: 300_000           # Kafka client idle teardown (default: 5 min)
 ```
 
@@ -85,13 +85,13 @@ config :my_app, Oban,
   ]
 ```
 
-To enable automatic cleanup of old delivery logs and delivered/cancelled events, add a cron schedule:
+To enable automatic cleanup of old integration logs and delivered/cancelled events, add a cron schedule:
 
 ```elixir
 config :my_app, Oban,
   plugins: [
     {Oban.Plugins.Cron, crontab: [
-      {AshIntegration.Workers.DeliveryLogCleanup, "0 3 * * *"}
+      {AshIntegration.Workers.OutboundIntegrationLogCleanup, "0 3 * * *"}
       # ...your other cron jobs
     ]}
   ]
@@ -122,18 +122,18 @@ defmodule MyApp.Integration.OutboundIntegration do
 end
 ```
 
-Create a `DeliveryLog` resource:
+Create an `OutboundIntegrationLog` resource:
 
 ```elixir
-defmodule MyApp.Integration.DeliveryLog do
+defmodule MyApp.Integration.OutboundIntegrationLog do
   use Ash.Resource,
     domain: MyApp.Integration,
     data_layer: AshPostgres.DataLayer,
-    extensions: [AshIntegration.DeliveryLogResource],
+    extensions: [AshIntegration.OutboundIntegrationLogResource],
     authorizers: [Ash.Policy.Authorizer]
 
   postgres do
-    table "integration_delivery_logs"
+    table "outbound_integration_logs"
     repo MyApp.Repo
   end
 
@@ -172,7 +172,7 @@ defmodule MyApp.Integration do
 
   resources do
     resource MyApp.Integration.OutboundIntegration
-    resource MyApp.Integration.DeliveryLog
+    resource MyApp.Integration.OutboundIntegrationLog
     resource MyApp.Integration.OutboundIntegrationEvent
   end
 end

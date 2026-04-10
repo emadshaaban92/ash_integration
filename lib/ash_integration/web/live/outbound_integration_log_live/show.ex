@@ -1,11 +1,11 @@
-defmodule AshIntegration.Web.DeliveryLogLive.Show do
+defmodule AshIntegration.Web.OutboundIntegrationLogLive.Show do
   use AshIntegration.Web, :live_view
 
   alias AshIntegration.Web.OutboundIntegrationLive.Helpers
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    resource = AshIntegration.delivery_log_resource()
+    resource = AshIntegration.outbound_integration_log_resource()
     actor = socket.assigns.current_user
 
     case Ash.get(resource, id, actor: actor, load: [:outbound_integration]) do
@@ -13,12 +13,12 @@ defmodule AshIntegration.Web.DeliveryLogLive.Show do
         {:ok,
          socket
          |> assign(log: log)
-         |> assign(page_title: "Delivery Log")}
+         |> assign(page_title: "Integration Log")}
 
       {:error, _} ->
         {:ok,
          socket
-         |> put_flash(:error, "Delivery log not found")
+         |> put_flash(:error, "Integration log not found")
          |> push_navigate(to: "#{base_path()}/logs/all")}
     end
   end
@@ -37,10 +37,10 @@ defmodule AshIntegration.Web.DeliveryLogLive.Show do
   def render(assigns) do
     ~H"""
     <div class="p-4 sm:p-6">
-      <.back_link navigate={"#{base_path()}/logs/all"} label="Back to Delivery Logs" />
+      <.back_link navigate={"#{base_path()}/logs/all"} label="Back to Integration Logs" />
 
       <.page_header>
-        Delivery Log
+        Integration Log
         <:subtitle>
           <.status_badge status={@log.status} />
           <.resource_badge value={@log.resource} />

@@ -120,7 +120,7 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       product = create_product!()
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :success
       assert log.response_status == 200
     end
@@ -149,7 +149,7 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       product = create_product!()
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :success
       assert log.response_status == 200
     end
@@ -174,7 +174,7 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       product = create_product!()
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :success
     end
 
@@ -198,7 +198,7 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       product = create_product!()
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :success
     end
 
@@ -228,7 +228,7 @@ defmodule Example.AshIntegration.GrpcIntegrationTest do
       product = create_product!()
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :failed
       assert log.error_message =~ "Unimplemented" or log.error_message =~ "unknown service"
     end

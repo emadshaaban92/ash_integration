@@ -41,7 +41,7 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_outbound_integration_relationship_if_not_exists()
-     |> add_delivery_logs_relationship_if_not_exists()
+     |> add_outbound_integration_logs_relationship_if_not_exists()
      |> add_default_accept_if_not_set()
      |> add_defaults_if_not_set()
      |> add_create_action_if_not_exists()
@@ -142,16 +142,16 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
     end
   end
 
-  defp add_delivery_logs_relationship_if_not_exists(dsl_state) do
-    if Info.relationship(dsl_state, :delivery_logs) do
+  defp add_outbound_integration_logs_relationship_if_not_exists(dsl_state) do
+    if Info.relationship(dsl_state, :outbound_integration_logs) do
       dsl_state
     else
-      delivery_log_resource = AshIntegration.delivery_log_resource()
+      log_resource = AshIntegration.outbound_integration_log_resource()
 
       {:ok, relationship} =
         Transformer.build_entity(Dsl, [:relationships], :has_many,
-          name: :delivery_logs,
-          destination: delivery_log_resource,
+          name: :outbound_integration_logs,
+          destination: log_resource,
           destination_attribute: :outbound_integration_event_id,
           domain: AshIntegration.domain()
         )

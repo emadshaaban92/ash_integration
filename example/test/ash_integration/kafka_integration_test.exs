@@ -80,7 +80,7 @@ defmodule Example.AshIntegration.KafkaIntegrationTest do
       execute_pipeline!(product)
 
       # Find the delivery log
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :success
       assert is_integer(log.kafka_offset)
       assert is_integer(log.kafka_partition)
@@ -126,7 +126,7 @@ defmodule Example.AshIntegration.KafkaIntegrationTest do
       product = create_product!()
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :success
 
       {:kafka_message, _, _key, _value, _ts_type, _ts, headers} =
@@ -155,7 +155,7 @@ defmodule Example.AshIntegration.KafkaIntegrationTest do
       product = create_product!()
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :success
 
       {:kafka_message, _, _key, value, _ts_type, _ts, headers} =
@@ -195,7 +195,7 @@ defmodule Example.AshIntegration.KafkaIntegrationTest do
       Ash.update!(product, %{name: "Updated Name"}, action: :update, authorize?: false)
       execute_pipeline!(product)
 
-      logs = get_delivery_logs(integration.id)
+      logs = get_outbound_integration_logs(integration.id)
       partitions = Enum.map(logs, & &1.kafka_partition) |> Enum.uniq()
       assert length(partitions) == 1, "Expected all messages for same resource on same partition"
     end

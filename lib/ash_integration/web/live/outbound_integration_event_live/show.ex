@@ -10,7 +10,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
 
     case Ash.get(event_resource, event_id,
            actor: actor,
-           load: [:outbound_integration, :delivery_logs]
+           load: [:outbound_integration, :outbound_integration_logs]
          ) do
       {:ok, event} ->
         {:ok,
@@ -41,7 +41,8 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
          |> Ash.Changeset.for_update(:cancel, %{})
          |> Ash.update(actor: actor) do
       {:ok, updated} ->
-        updated = Ash.load!(updated, [:outbound_integration, :delivery_logs], actor: actor)
+        updated =
+          Ash.load!(updated, [:outbound_integration, :outbound_integration_logs], actor: actor)
 
         {:noreply,
          socket
@@ -84,7 +85,9 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
          )
          |> Ash.update(actor: actor) do
       {:ok, updated} ->
-        updated = Ash.load!(updated, [:outbound_integration, :delivery_logs], actor: actor)
+        updated =
+          Ash.load!(updated, [:outbound_integration, :outbound_integration_logs], actor: actor)
+
         AshIntegration.EventScheduler.notify()
 
         {:noreply,
@@ -230,8 +233,8 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
         </div>
       </div>
 
-      <div :if={@event.delivery_logs != []} class="mt-6">
-        <h3 class="text-lg font-semibold mb-3">Delivery Logs</h3>
+      <div :if={@event.outbound_integration_logs != []} class="mt-6">
+        <h3 class="text-lg font-semibold mb-3">Integration Logs</h3>
         <div class="overflow-x-auto">
           <table class="table table-zebra table-sm">
             <thead>
@@ -245,7 +248,7 @@ defmodule AshIntegration.Web.OutboundIntegrationEventLive.Show do
               </tr>
             </thead>
             <tbody>
-              <tr :for={log <- @event.delivery_logs} id={"log-#{log.id}"}>
+              <tr :for={log <- @event.outbound_integration_logs} id={"log-#{log.id}"}>
                 <td><.status_badge status={log.status} /></td>
                 <td>
                   <span :if={log.response_status} class="badge badge-sm">

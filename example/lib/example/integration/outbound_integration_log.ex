@@ -1,17 +1,17 @@
-defmodule Example.Integration.DeliveryLog do
+defmodule Example.Integration.OutboundIntegrationLog do
   use Ash.Resource,
     domain: Example.Integration,
     data_layer: AshPostgres.DataLayer,
-    extensions: [AshIntegration.DeliveryLogResource],
+    extensions: [AshIntegration.OutboundIntegrationLogResource],
     authorizers: [Ash.Policy.Authorizer]
 
   postgres do
-    table "integration_delivery_logs"
+    table "outbound_integration_logs"
     repo Example.Repo
   end
 
   resource do
-    plural_name :delivery_logs
+    plural_name :outbound_integration_logs
   end
 
   policies do

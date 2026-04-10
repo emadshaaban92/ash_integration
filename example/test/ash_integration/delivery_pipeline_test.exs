@@ -37,7 +37,7 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
       assert event.state == :delivered
 
       # Verify delivery log created with success status
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :success
       assert log.resource == "product"
       assert log.action == "create"
@@ -56,7 +56,7 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
 
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :failed
       assert log.response_status == 500
 
@@ -79,7 +79,7 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
 
       execute_pipeline!(product)
 
-      [log] = get_delivery_logs(integration.id)
+      [log] = get_outbound_integration_logs(integration.id)
       assert log.status == :failed
       assert log.response_status == 400
 

@@ -3,7 +3,7 @@ defmodule Example.Integration do
 
   resources do
     resource Example.Integration.OutboundIntegration
-    resource Example.Integration.DeliveryLog
+    resource Example.Integration.OutboundIntegrationLog
     resource Example.Integration.OutboundIntegrationEvent
   end
 

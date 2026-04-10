@@ -1,11 +1,11 @@
-defmodule AshIntegration.Web.DeliveryLogLive.Index do
+defmodule AshIntegration.Web.OutboundIntegrationLogLive.Index do
   use AshIntegration.Web, :live_view
 
   alias AshIntegration.Web.OutboundIntegrationLive.Helpers
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, assign(socket, page_title: "Delivery Logs")}
+    {:ok, assign(socket, page_title: "Integration Logs")}
   end
 
   @impl true
@@ -15,7 +15,7 @@ defmodule AshIntegration.Web.DeliveryLogLive.Index do
   end
 
   defp load_logs(socket, offset) do
-    resource = AshIntegration.delivery_log_resource()
+    resource = AshIntegration.outbound_integration_log_resource()
     actor = socket.assigns.current_user
 
     case resource
@@ -61,11 +61,11 @@ defmodule AshIntegration.Web.DeliveryLogLive.Index do
       <.back_link navigate={base_path()} label="Back to Integrations" />
 
       <.page_header>
-        Delivery Logs
+        Integration Logs
       </.page_header>
 
       <div :if={@logs == []}>
-        <.empty_state title="No delivery logs yet" icon="hero-document-text" />
+        <.empty_state title="No integration logs yet" icon="hero-document-text" />
       </div>
 
       <div :if={@logs != []} class="overflow-x-auto">

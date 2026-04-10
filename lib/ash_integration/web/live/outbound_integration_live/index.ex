@@ -109,7 +109,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Index do
             <.icon name="hero-plus-mini" /> New Integration
           </.link>
           <.link navigate={path(:logs)} class="btn btn-ghost btn-sm">
-            <.icon name="hero-document-text-mini" /> Delivery Logs
+            <.icon name="hero-document-text-mini" /> Integration Logs
           </.link>
         </:actions>
       </.page_header>

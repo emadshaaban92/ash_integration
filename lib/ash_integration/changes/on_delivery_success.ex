@@ -34,10 +34,10 @@ defmodule AshIntegration.Changes.OnDeliverySuccess do
   end
 
   defp create_delivery_log(event, status) do
-    delivery_log_resource = AshIntegration.delivery_log_resource()
+    log_resource = AshIntegration.outbound_integration_log_resource()
     metadata = event.delivery_metadata || %{}
 
-    delivery_log_resource
+    log_resource
     |> Ash.Changeset.for_create(
       :create,
       %{

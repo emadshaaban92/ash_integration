@@ -11,7 +11,7 @@ defmodule AshIntegration do
       config :ash_integration,
         otp_app: :my_app,
         outbound_integration_resource: MyApp.Integration.OutboundIntegration,
-        delivery_log_resource: MyApp.Integration.DeliveryLog,
+        outbound_integration_log_resource: MyApp.Integration.OutboundIntegrationLog,
         domain: MyApp.Integration,
         repo: MyApp.Repo,
         actor_resource: MyApp.Accounts.User,
@@ -29,8 +29,8 @@ defmodule AshIntegration do
     Keyword.fetch!(config(), :outbound_integration_resource)
   end
 
-  def delivery_log_resource do
-    Keyword.fetch!(config(), :delivery_log_resource)
+  def outbound_integration_log_resource do
+    Keyword.fetch!(config(), :outbound_integration_log_resource)
   end
 
   def outbound_integration_event_resource do
@@ -57,8 +57,8 @@ defmodule AshIntegration do
     Keyword.get(config(), :auto_suspension_threshold, 50)
   end
 
-  def delivery_log_retention_days do
-    Keyword.get(config(), :delivery_log_retention_days, 90)
+  def outbound_integration_log_retention_days do
+    Keyword.get(config(), :outbound_integration_log_retention_days, 90)
   end
 
   def http_max_timeout_ms do

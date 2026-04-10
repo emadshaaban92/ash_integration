@@ -10,7 +10,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     resource = AshIntegration.outbound_integration_resource()
     actor = socket.assigns.current_user
 
-    case Ash.get(resource, id, actor: actor, load: [:owner, :delivery_logs]) do
+    case Ash.get(resource, id, actor: actor, load: [:owner, :outbound_integration_logs]) do
       {:ok, integration} ->
         {:ok,
          socket
@@ -95,7 +95,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
   end
 
   def handle_event("paginate", %{"offset" => offset}, socket) do
-    {:noreply, load_delivery_logs(socket, Helpers.parse_int(offset, 0))}
+    {:noreply, load_outbound_integration_logs(socket, Helpers.parse_int(offset, 0))}
   end
 
   def handle_event("suspend", _params, socket) do
@@ -185,12 +185,12 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     end
   end
 
-  defp load_delivery_logs(socket, offset) do
-    delivery_log_resource = AshIntegration.delivery_log_resource()
+  defp load_outbound_integration_logs(socket, offset) do
+    log_resource = AshIntegration.outbound_integration_log_resource()
     actor = socket.assigns.current_user
     integration = socket.assigns.integration
 
-    case delivery_log_resource
+    case log_resource
          |> Ash.Query.for_read(
            :for_outbound_integration,
            %{outbound_integration_id: integration.id},
