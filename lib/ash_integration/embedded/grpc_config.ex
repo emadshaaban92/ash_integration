@@ -1,4 +1,11 @@
 defmodule AshIntegration.GrpcConfig do
+  @moduledoc """
+  Embedded config for the **experimental** gRPC transport.
+
+  See the [gRPC Transport guide](guides/grpc-transport.md) for details on
+  the experimental status. Configuration options may change in future releases.
+  """
+
   @vault Application.compile_env!(:ash_integration, :vault)
 
   use Ash.Resource,

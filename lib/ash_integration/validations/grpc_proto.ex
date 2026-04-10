@@ -6,6 +6,8 @@ defmodule AshIntegration.Validations.GrpcProto do
   1. The proto is syntactically valid
   2. The specified service exists
   3. The specified method exists on that service
+
+  Part of the **experimental** gRPC transport. Interface may change.
   """
   use Ash.Resource.Validation
 

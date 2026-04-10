@@ -11,7 +11,7 @@ When an Ash resource changes, the pipeline:
 1. Creates an `OutboundIntegrationEvent` for each matching integration
 2. Caches the Lua-transformed payload on the event at creation time
 3. Schedules delivery jobs one at a time per `(integration, resource_id)` chain
-4. Delivers via the configured transport (HTTP, Kafka, gRPC)
+4. Delivers via the configured transport (HTTP, Kafka, or gRPC — note that gRPC is [experimental](grpc-transport.md))
 5. Creates an `OutboundIntegrationLog` entry for each delivery attempt
 
 **Delivery semantics**: This is an **at-least-once** delivery system. If a node

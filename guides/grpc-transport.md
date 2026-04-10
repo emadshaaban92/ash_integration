@@ -1,4 +1,20 @@
-# gRPC Transport
+# gRPC Transport *(Experimental)*
+
+> **Status: Experimental** — The gRPC transport is functional and available for use, but
+> it is not yet at the same maturity level as the HTTP and Kafka transports. Its public
+> interface, configuration options, and operational characteristics may change in future
+> releases without a deprecation period.
+>
+> **Why experimental?** Most Elixir gRPC libraries assume proto definitions are available
+> at compile time, but AshIntegration accepts them at runtime (user-provided per
+> integration). This requires shelling out to `grpcurl` for each delivery rather than
+> using a native Elixir gRPC client with persistent connections. The approach works
+> correctly but has inherent trade-offs: per-call process spawn overhead, no connection
+> reuse, and string-based error classification. These are acceptable for moderate volume
+> but differ from the native client implementations used by HTTP (Req) and Kafka (brod).
+>
+> If you need gRPC delivery today, this transport will get the job done. Just be aware
+> that it is a tier behind HTTP and Kafka in terms of operational maturity.
 
 The gRPC transport delivers events as unary RPC calls using [grpcurl](https://github.com/fullstorydev/grpcurl).
 

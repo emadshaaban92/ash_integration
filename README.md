@@ -7,7 +7,7 @@ Declare which resource actions trigger outbound events, write Lua transform scri
 ## Features
 
 - **Declarative DSL** — add `outbound_integrations` to any Ash resource to declare publishable actions
-- **Multi-transport** — deliver via [HTTP](guides/http-transport.md), [Kafka](guides/kafka-transport.md), or [gRPC](guides/grpc-transport.md)
+- **Multi-transport** — deliver via [HTTP](guides/http-transport.md), [Kafka](guides/kafka-transport.md), or [gRPC](guides/grpc-transport.md) (experimental)
 - **Schema versioning** — pin integrations to specific payload versions for safe consumer upgrades
 - **Lua transform scripts** — sandboxed Lua execution to reshape event data before delivery
 - **Payload signing** — HMAC-SHA256 signatures across all transports
@@ -299,7 +299,7 @@ AshIntegration supports three transport types. Each has its own configuration, s
 
 - **[HTTP Transport](guides/http-transport.md)** — JSON payloads over HTTP with Bearer, API Key, or Basic Auth
 - **[Kafka Transport](guides/kafka-transport.md)** — Kafka messages with SASL/TLS security and partition-based ordering
-- **[gRPC Transport](guides/grpc-transport.md)** — Protobuf-encoded unary RPCs over HTTP/2 with TLS/mTLS support
+- **[gRPC Transport](guides/grpc-transport.md)** *(experimental)* — Protobuf-encoded unary RPCs over HTTP/2 with TLS/mTLS support. The gRPC transport is functional but not yet at the same maturity level as HTTP and Kafka. Its interface may change in future releases.
 
 All transports support HMAC-SHA256 payload signing via the `signing_secret` config field.
 

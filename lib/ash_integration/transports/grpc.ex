@@ -1,5 +1,12 @@
 defmodule AshIntegration.Transports.Grpc do
-  @moduledoc false
+  @moduledoc """
+  **Experimental** — gRPC transport via `grpcurl` subprocess.
+
+  This transport shells out to `grpcurl` for each delivery. It works correctly but
+  does not use persistent connections or a native Elixir gRPC client. See the
+  [gRPC Transport guide](guides/grpc-transport.md) for details on the experimental
+  status and known trade-offs.
+  """
 
   @behaviour AshIntegration.Transport
 

@@ -4,6 +4,8 @@ defmodule AshIntegration.Transports.Grpc.ProtoValidator do
 
   Returns `{errors, warnings}` where errors are type mismatches that will
   fail at encoding, and warnings are missing/extra fields.
+
+  Part of the **experimental** gRPC transport. Interface may change.
   """
 
   alias Google.Protobuf.{DescriptorProto, FieldDescriptorProto, FileDescriptorSet}

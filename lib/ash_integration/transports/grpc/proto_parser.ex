@@ -3,6 +3,8 @@ defmodule AshIntegration.Transports.Grpc.ProtoParser do
   Parses proto definitions via `protoc` and resolves service/method/message types.
 
   Used by `ProtoValidator` to validate transform output against proto schemas.
+
+  Part of the **experimental** gRPC transport. Interface may change.
   """
 
   @doc """
