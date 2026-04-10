@@ -12,7 +12,7 @@ Declare which resource actions trigger outbound events, write Lua transform scri
 - **Lua transform scripts** — sandboxed Lua execution to reshape event data before delivery
 - **Payload signing** — HMAC-SHA256 signatures across all transports
 - **Secret encryption** — credentials encrypted at rest via AshCloak
-- **Event-driven delivery** — durable `OutboundIntegrationEvent` records own the full lifecycle; Oban jobs are disposable execution mechanisms
+- **[Event-driven delivery](guides/delivery-pipeline.md)** — durable `OutboundIntegrationEvent` records own the full lifecycle; Oban jobs are disposable execution mechanisms
 - **At-least-once semantics** — events are never lost, even if Oban jobs are discarded or nodes crash
 - **Ordering guarantees** — per-resource-id ordering enforced by a partial unique index (database-level correctness)
 - **Integration suspension** — auto-suspend after consecutive failures (events keep accumulating, no data loss)
