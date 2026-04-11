@@ -426,7 +426,7 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
           label="Transport"
           name="transport_selector"
           value={@selected_transport}
-          options={[{"HTTP (Webhook)", "http"}, {"Kafka", "kafka"}, {"gRPC", "grpc"}]}
+          options={transport_options(@selected_transport)}
           phx-change="transport-type-changed"
           phx-target={@myself}
         />
@@ -938,5 +938,31 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
       </.inputs_for>
     </div>
     """
+  end
+
+  defp transport_options(selected_transport) do
+    available = AshIntegration.Transport.available()
+
+    base =
+      [{"HTTP (Webhook)", "http"}] ++
+        if(:kafka in available, do: [{"Kafka", "kafka"}], else: []) ++
+        if(:grpc in available, do: [{"gRPC (Experimental)", "grpc"}], else: [])
+
+    # Always include the currently selected transport so existing integrations
+    # using an unavailable transport still render correctly
+    selected_atom = String.to_existing_atom(selected_transport)
+
+    if selected_atom not in available do
+      label =
+        case selected_atom do
+          :kafka -> "Kafka (unavailable)"
+          :grpc -> "gRPC (unavailable)"
+          other -> "#{other} (unavailable)"
+        end
+
+      base ++ [{label, selected_transport}]
+    else
+      base
+    end
   end
 end

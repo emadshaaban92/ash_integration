@@ -25,13 +25,11 @@ defmodule AshIntegration.Validations.GrpcProto do
   end
 
   defp do_validate(proto, service, method) do
-    case System.find_executable("grpcurl") do
-      nil ->
-        # Fall back to accepting if grpcurl isn't available (validation is best-effort)
-        :ok
-
-      _path ->
-        validate_with_grpcurl(proto, service, method)
+    if AshIntegration.Transport.available?(:grpc) do
+      validate_with_grpcurl(proto, service, method)
+    else
+      # gRPC transport not fully available — skip validation
+      :ok
     end
   end
 

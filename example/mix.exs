@@ -80,7 +80,10 @@ defmodule Example.MixProject do
       {:tidewave, "~> 0.1", only: [:dev]},
       {:ash_integration, path: ".."},
       {:cloak, "~> 1.1"},
-      {:picosat_elixir, "~> 0.2"}
+      {:picosat_elixir, "~> 0.2"},
+      # Optional transports — add these to enable Kafka and gRPC in the dashboard
+      {:brod, "~> 4.0"},
+      {:protobuf, "~> 0.13"}
     ]
   end
 

@@ -14,21 +14,20 @@ defmodule AshIntegration.Transports.Grpc do
 
   @impl true
   def deliver(outbound_integration, event_id, _resource_id, payload) do
-    %Ash.Union{type: :grpc, value: config} = outbound_integration.transport_config
-    json_payload = Jason.encode!(payload)
-    integration_id = to_string(outbound_integration.id)
+    unless AshIntegration.Transport.available?(:grpc) do
+      {:error,
+       %{
+         error_message:
+           "gRPC transport is not available. Requires the :protobuf dependency " <>
+             "plus grpcurl and protoc on PATH.",
+         retryable: false
+       }}
+    else
+      %Ash.Union{type: :grpc, value: config} = outbound_integration.transport_config
+      json_payload = Jason.encode!(payload)
+      integration_id = to_string(outbound_integration.id)
 
-    case System.find_executable("grpcurl") do
-      nil ->
-        {:error,
-         %{
-           error_message:
-             "grpcurl is not available on PATH. Install grpcurl to use gRPC transport.",
-           retryable: false
-         }}
-
-      _path ->
-        execute_grpcurl(config, event_id, integration_id, json_payload)
+      execute_grpcurl(config, event_id, integration_id, json_payload)
     end
   end
 

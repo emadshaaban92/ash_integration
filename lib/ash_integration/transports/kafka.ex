@@ -9,6 +9,19 @@ defmodule AshIntegration.Transports.Kafka do
 
   @impl true
   def deliver(outbound_integration, event_id, resource_id, payload) do
+    unless AshIntegration.Transport.available?(:kafka) do
+      {:error,
+       %{
+         error_message:
+           "Kafka transport is not available. Add {:brod, \"~> 4.0\"} to your dependencies.",
+         retryable: false
+       }}
+    else
+      do_deliver(outbound_integration, event_id, resource_id, payload)
+    end
+  end
+
+  defp do_deliver(outbound_integration, event_id, resource_id, payload) do
     %Ash.Union{type: :kafka, value: config} = outbound_integration.transport_config
     json_payload = Jason.encode!(payload)
 

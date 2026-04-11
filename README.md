@@ -34,6 +34,21 @@ def deps do
 end
 ```
 
+### Optional transport dependencies
+
+HTTP transport works out of the box. To enable additional transports, add their dependencies:
+
+```elixir
+# Kafka transport — requires the brod Erlang Kafka client
+{:brod, "~> 4.0"}
+
+# gRPC transport (experimental) — requires the protobuf library
+# plus grpcurl and protoc executables on PATH
+{:protobuf, "~> 0.13"}
+```
+
+The dashboard automatically shows only the transports that are available in your environment.
+
 AshIntegration's dashboard uses [LiveSelect](https://hex.pm/packages/live_select) for the owner picker component. LiveSelect requires JavaScript hooks and Tailwind content path configuration — see the [LiveSelect installation guide](https://hexdocs.pm/live_select/readme.html#installation) for setup instructions.
 
 ### CSS Configuration

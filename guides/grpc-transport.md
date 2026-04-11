@@ -20,9 +20,12 @@ The gRPC transport delivers events as unary RPC calls using [grpcurl](https://gi
 
 ## Prerequisites
 
-The gRPC transport requires `grpcurl` installed on the system PATH for delivering events and validating proto definitions.
+The gRPC transport requires **all three** of the following to be available. If any are
+missing, the transport will not appear in the dashboard and cannot be used for delivery:
 
-`protoc` (Protocol Buffer compiler v3+) is optional — it enables field-level type validation in the dashboard's test panel when previewing gRPC integrations.
+1. **`:protobuf` dependency** — add `{:protobuf, "~> 0.13"}` to your `mix.exs`
+2. **`grpcurl`** — CLI tool for making gRPC calls
+3. **`protoc`** — Protocol Buffer compiler v3+, used for proto field validation
 
 ```bash
 # grpcurl (required)

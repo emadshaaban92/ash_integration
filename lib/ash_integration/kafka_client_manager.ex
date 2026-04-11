@@ -56,8 +56,12 @@ defmodule AshIntegration.KafkaClientManager do
 
   @impl true
   def init(_opts) do
-    schedule_cleanup()
-    {:ok, %{clients: %{}}}
+    if AshIntegration.Transport.available?(:kafka) do
+      schedule_cleanup()
+      {:ok, %{clients: %{}}}
+    else
+      :ignore
+    end
   end
 
   @impl true

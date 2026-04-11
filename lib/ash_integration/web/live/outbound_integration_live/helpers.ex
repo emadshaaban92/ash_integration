@@ -396,14 +396,18 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
           when is_binary(proto) and proto != "" and
                  is_binary(service) and service != "" and
                  is_binary(method) and method != "" ->
-            {errors, warnings} =
-              AshIntegration.Transports.Grpc.ProtoValidator.validate(
-                result,
-                proto,
-                %{service: service, method: method}
-              )
+            if Code.ensure_loaded?(AshIntegration.Transports.Grpc.ProtoValidator) do
+              {errors, warnings} =
+                AshIntegration.Transports.Grpc.ProtoValidator.validate(
+                  result,
+                  proto,
+                  %{service: service, method: method}
+                )
 
-            {:ok, json, errors, warnings}
+              {:ok, json, errors, warnings}
+            else
+              {:ok, json}
+            end
 
           _ ->
             {:ok, json}

@@ -2,6 +2,16 @@
 
 The Kafka transport publishes JSON payloads as Kafka messages, with per-resource-id partitioning for ordering guarantees.
 
+## Prerequisites
+
+The Kafka transport requires the `:brod` dependency. Add it to your `mix.exs`:
+
+```elixir
+{:brod, "~> 4.0"}
+```
+
+The transport will appear in the dashboard automatically once `:brod` is available.
+
 ## Configuration
 
 Set `transport_config.type` to `:kafka`:
