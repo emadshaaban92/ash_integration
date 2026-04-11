@@ -198,4 +198,86 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
       assert ready_pairs == []
     end
   end
+
+  describe "unsuspend integration" do
+    test "unsuspending resets consecutive_failures to 0" do
+      stub_webhook_failure(500)
+
+      integration = create_outbound_integration!()
+
+      # Drive up consecutive_failures via actual delivery failures
+      product = create_product!()
+      execute_pipeline!(product)
+
+      integration = reload_integration!(integration)
+      assert integration.consecutive_failures == 1
+
+      # Suspend the integration
+      integration =
+        integration
+        |> Ash.Changeset.for_update(:suspend, %{reason: "Test suspension"}, authorize?: false)
+        |> Ash.update!(authorize?: false)
+
+      assert integration.suspended == true
+      assert integration.consecutive_failures == 1
+
+      # Unsuspend — should reset consecutive_failures to 0
+      integration =
+        integration
+        |> Ash.Changeset.for_update(:unsuspend, %{}, authorize?: false)
+        |> Ash.update!(authorize?: false)
+
+      assert integration.suspended == false
+      assert integration.suspended_at == nil
+      assert integration.suspension_reason == nil
+      assert integration.consecutive_failures == 0
+    end
+
+    test "unsuspending allows pending events to be scheduled again" do
+      stub_webhook_success()
+
+      integration = create_outbound_integration!()
+
+      # Suspend the integration
+      integration =
+        integration
+        |> Ash.Changeset.for_update(:suspend, %{reason: "Test suspension"}, authorize?: false)
+        |> Ash.update!(authorize?: false)
+
+      # Create a product while suspended — event should be pending
+      _product = create_product!()
+      run_latest_dispatcher!()
+
+      [event] = get_events(integration.id)
+      assert event.state == :pending
+
+      # Scheduler should find no ready pairs while suspended
+      assert AshIntegration.EventScheduler.find_ready_pairs(100) == []
+
+      # Unsuspend
+      integration
+      |> Ash.Changeset.for_update(:unsuspend, %{}, authorize?: false)
+      |> Ash.update!(authorize?: false)
+
+      # Now the scheduler should find the pending event
+      ready_pairs = AshIntegration.EventScheduler.find_ready_pairs(100)
+      assert length(ready_pairs) == 1
+
+      # Run full scheduling + delivery
+      schedule_via_real_scheduler()
+
+      delivery_jobs =
+        Oban.Job
+        |> Ecto.Query.where(worker: "AshIntegration.Workers.OutboundDelivery")
+        |> Ecto.Query.where(state: "available")
+        |> Example.Repo.all()
+
+      Enum.each(delivery_jobs, fn job ->
+        AshIntegration.Workers.OutboundDelivery.perform(job)
+      end)
+
+      event = reload_event!(event)
+      assert event.state == :delivered
+    end
+  end
 end
