@@ -390,33 +390,36 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
 
       {:ok, result} ->
         json = Jason.encode!(result, pretty: true)
-
-        case grpc_config do
-          %{proto_definition: proto, service: service, method: method}
-          when is_binary(proto) and proto != "" and
-                 is_binary(service) and service != "" and
-                 is_binary(method) and method != "" ->
-            if Code.ensure_loaded?(AshIntegration.Transports.Grpc.ProtoValidator) do
-              {errors, warnings} =
-                AshIntegration.Transports.Grpc.ProtoValidator.validate(
-                  result,
-                  proto,
-                  %{service: service, method: method}
-                )
-
-              {:ok, json, errors, warnings}
-            else
-              {:ok, json}
-            end
-
-          _ ->
-            {:ok, json}
-        end
+        maybe_validate_proto(result, json, grpc_config)
 
       {:error, message} ->
         {:error, message}
     end
   end
+
+  defp maybe_validate_proto(result, json, %{
+         proto_definition: proto,
+         service: service,
+         method: method
+       })
+       when is_binary(proto) and proto != "" and
+              is_binary(service) and service != "" and
+              is_binary(method) and method != "" do
+    if Code.ensure_loaded?(AshIntegration.Transports.Grpc.ProtoValidator) do
+      {errors, warnings} =
+        AshIntegration.Transports.Grpc.ProtoValidator.validate(
+          result,
+          proto,
+          %{service: service, method: method}
+        )
+
+      {:ok, json, errors, warnings}
+    else
+      {:ok, json}
+    end
+  end
+
+  defp maybe_validate_proto(_result, json, _grpc_config), do: {:ok, json}
 
   defp extract_grpc_config(form) do
     tc_params = get_in(form.params || %{}, ["transport_config"]) || %{}
