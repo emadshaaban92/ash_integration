@@ -379,11 +379,11 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Helpers do
   defp encode_sample(nil), do: nil
   defp encode_sample(map), do: Jason.encode!(map, pretty: true)
 
-  defp transform_preview(nil, _sample, _grpc), do: nil
-  defp transform_preview(_script, nil, _grpc), do: nil
-  defp transform_preview("", _sample, _grpc), do: nil
+  def transform_preview(nil, _sample, _grpc), do: nil
+  def transform_preview(_script, nil, _grpc), do: nil
+  def transform_preview("", _sample, _grpc), do: nil
 
-  defp transform_preview(script, sample_event_map, grpc_config) do
+  def transform_preview(script, sample_event_map, grpc_config) do
     case AshIntegration.LuaSandbox.execute(script, sample_event_map) do
       {:ok, :skip} ->
         {:ok, :skip}
