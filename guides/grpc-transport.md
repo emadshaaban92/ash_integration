@@ -141,7 +141,7 @@ gRPC status codes are mapped to HTTP equivalents for retry decisions:
 | DEADLINE_EXCEEDED | 4 | 504 | Yes |
 | NOT_FOUND | 5 | 404 | No |
 | PERMISSION_DENIED | 7 | 403 | No |
-| RESOURCE_EXHAUSTED | 8 | 429 | No |
+| RESOURCE_EXHAUSTED | 8 | 429 | Yes |
 | UNIMPLEMENTED | 12 | 501 | No |
 | UNAVAILABLE | 14 | 503 | Yes |
 | UNAUTHENTICATED | 16 | 401 | No |
