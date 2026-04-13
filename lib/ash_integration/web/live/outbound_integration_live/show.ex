@@ -10,13 +10,14 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
     resource = AshIntegration.outbound_integration_resource()
     actor = socket.assigns.current_user
 
-    case Ash.get(resource, id, actor: actor, load: [:owner, :logs]) do
+    case Ash.get(resource, id, actor: actor, load: [:owner]) do
       {:ok, integration} ->
         {:ok,
          socket
          |> assign(integration: integration)
          |> assign(page_title: integration.name)
-         |> assign_event_counts(integration)}
+         |> assign_event_counts(integration)
+         |> load_outbound_integration_logs(0)}
 
       {:error, _} ->
         {:ok,
@@ -348,8 +349,18 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
       <%= case @live_action do %>
         <% :show -> %>
           <.show_detail integration={@integration} />
+          <.recent_logs
+            integration={@integration}
+            logs={@recent_logs}
+            logs_page={@logs_page}
+          />
         <% :edit -> %>
           <.show_detail integration={@integration} />
+          <.recent_logs
+            integration={@integration}
+            logs={@recent_logs}
+            logs_page={@logs_page}
+          />
         <% :test -> %>
           <.test_panel
             integration={@integration}
@@ -432,6 +443,84 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
         <div class="divider"></div>
         <h3 class="font-semibold mb-3">Transform Script</h3>
         <pre class="bg-base-300 p-3 rounded-lg text-xs overflow-x-auto max-h-60"><code>{@integration.transform_script}</code></pre>
+      </div>
+    </div>
+    """
+  end
+
+  attr :integration, :any, required: true
+  attr :logs, :list, required: true
+  attr :logs_page, :map, required: true
+
+  defp recent_logs(assigns) do
+    ~H"""
+    <div class="mt-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold">Recent Delivery Logs</h3>
+        <.link
+          navigate={"#{base_path()}/logs/all?integration_id=#{@integration.id}"}
+          class="btn btn-ghost btn-xs"
+        >
+          View all logs <.icon name="hero-arrow-right-mini" class="size-4" />
+        </.link>
+      </div>
+
+      <div :if={@logs == []} class="text-sm text-base-content/50 py-4">
+        No delivery logs yet for this integration.
+      </div>
+
+      <div :if={@logs != []} class="overflow-x-auto">
+        <table class="table table-zebra table-sm">
+          <thead>
+            <tr>
+              <th>Resource</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>HTTP Status</th>
+              <th>Duration</th>
+              <th>Error</th>
+              <th>Created</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={log <- @logs} id={"log-#{log.id}"}>
+              <td><.resource_badge value={log.resource} /></td>
+              <td class="text-sm">{humanize(log.action)}</td>
+              <td><.status_badge status={log.status} /></td>
+              <td>
+                <span
+                  :if={log.response_status}
+                  class={[
+                    "badge badge-sm",
+                    cond do
+                      log.response_status < 300 -> "badge-success"
+                      log.response_status < 400 -> "badge-warning"
+                      true -> "badge-error"
+                    end
+                  ]}
+                >
+                  {log.response_status}
+                </span>
+                <span :if={is_nil(log.response_status)} class="text-base-content/50">—</span>
+              </td>
+              <td class="text-sm">
+                <span :if={log.duration_ms}>{log.duration_ms}ms</span>
+                <span :if={is_nil(log.duration_ms)} class="text-base-content/50">—</span>
+              </td>
+              <td class="text-sm text-error max-w-xs truncate">{log.error_message}</td>
+              <td class="text-sm text-base-content/60">
+                {Helpers.format_datetime(log.created_at, :long)}
+              </td>
+              <td>
+                <.link navigate={"#{base_path()}/logs/#{log.id}"} class="btn btn-ghost btn-xs">
+                  View
+                </.link>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <.pagination page={@logs_page} />
       </div>
     </div>
     """
