@@ -2,18 +2,17 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.TransportConfig do
   use Phoenix.Component
 
   import AshIntegration.Web.Components
-  import Phoenix.HTML
 
-  attr :tc, :any, required: true
-  attr :selected_transport, :string, required: true
-  attr :action, :atom, required: true
-  attr :has_secrets, :map, required: true
-  attr :submitted?, :boolean, default: false
-  attr :header_rows, :list, default: []
-  attr :broker_rows, :list, default: []
-  attr :kafka_header_rows, :list, default: []
-  attr :grpc_header_rows, :list, default: []
-  attr :myself, :any, required: true
+  attr(:tc, :any, required: true)
+  attr(:selected_transport, :string, required: true)
+  attr(:action, :atom, required: true)
+  attr(:has_secrets, :map, required: true)
+  attr(:submitted?, :boolean, default: false)
+  attr(:header_rows, :list, default: [])
+  attr(:broker_rows, :list, default: [])
+  attr(:kafka_header_rows, :list, default: [])
+  attr(:grpc_header_rows, :list, default: [])
+  attr(:myself, :any, required: true)
 
   def transport_config(%{selected_transport: "http"} = assigns) do
     ~H"""
