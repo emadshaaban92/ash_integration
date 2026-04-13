@@ -25,7 +25,6 @@ defmodule Example.AshIntegration.KafkaConfigTest do
       assert config.brokers == ["localhost:9092"]
       assert config.topic == "test-events"
       assert config.acks == :all
-      assert config.delivery_timeout_ms == 30_000
       assert config.headers == %{}
       assert %Ash.Union{type: :none} = config.security
     end
@@ -38,7 +37,6 @@ defmodule Example.AshIntegration.KafkaConfigTest do
               brokers: ["broker1:9092", "broker2:9093"],
               topic: "my-topic",
               acks: :leader,
-              delivery_timeout_ms: 10_000,
               headers: %{"x-source" => "test"},
               signing_secret: "my-secret",
               security: %{
@@ -54,7 +52,6 @@ defmodule Example.AshIntegration.KafkaConfigTest do
       assert config.brokers == ["broker1:9092", "broker2:9093"]
       assert config.topic == "my-topic"
       assert config.acks == :leader
-      assert config.delivery_timeout_ms == 10_000
       assert config.headers == %{"x-source" => "test"}
       assert %Ash.Union{type: :sasl_tls, value: sec} = config.security
       assert sec.mechanism == :plain
@@ -123,25 +120,6 @@ defmodule Example.AshIntegration.KafkaConfigTest do
                    actions: ["create"],
                    schema_version: 1,
                    transport_config: %{type: :kafka, brokers: ["localhost:9092"]},
-                   transform_script: "result = event",
-                   owner_id: create_user!().id
-                 },
-                 authorize?: false
-               )
-               |> Ash.create(authorize?: false)
-    end
-
-    test "rejects delivery_timeout_ms below 1000" do
-      assert {:error, _} =
-               Example.Integration.OutboundIntegration
-               |> Ash.Changeset.for_create(
-                 :create,
-                 %{
-                   name: "kafka-low-timeout",
-                   resource: "product",
-                   actions: ["create"],
-                   schema_version: 1,
-                   transport_config: kafka_transport_config(%{delivery_timeout_ms: 500}),
                    transform_script: "result = event",
                    owner_id: create_user!().id
                  },

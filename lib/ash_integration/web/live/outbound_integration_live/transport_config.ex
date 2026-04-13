@@ -209,14 +209,6 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.TransportConfig do
         options={[{"All Replicas", "all"}, {"Leader Only", "leader"}, {"None", "none"}]}
       />
 
-      <.input
-        field={@tc[:delivery_timeout_ms]}
-        type="text"
-        label="Delivery Timeout (ms)"
-        required
-        phx-debounce="blur"
-      />
-
       <.input field={@tc[:ssl]} type="checkbox" label="Use TLS" />
 
       <label class="label mt-2">Custom Kafka Headers</label>

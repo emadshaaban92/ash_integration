@@ -496,10 +496,6 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.Show do
         <dd>{humanize(@config.acks)}</dd>
       </div>
       <div class="flex justify-between">
-        <dt class="text-base-content/60">Delivery Timeout</dt>
-        <dd>{@config.delivery_timeout_ms}ms</dd>
-      </div>
-      <div class="flex justify-between">
         <dt class="text-base-content/60">Security</dt>
         <dd>{security_label(@config.security)}</dd>
       </div>

@@ -23,16 +23,25 @@ defmodule AshIntegration.KafkaClientManager do
   Ensures a brod client is running for the given integration.
   Starts one if it doesn't exist. Returns `:ok` or `{:error, reason}`.
   """
-  @spec ensure_client(String.t(), [{binary(), non_neg_integer()}], keyword(), String.t()) ::
+  @spec ensure_client(
+          String.t(),
+          [{binary(), non_neg_integer()}],
+          keyword(),
+          String.t(),
+          keyword()
+        ) ::
           :ok | {:error, term()}
-  def ensure_client(integration_id, brokers, client_config, topic) do
+  def ensure_client(integration_id, brokers, client_config, topic, producer_config \\ []) do
     client_id = client_id_for(integration_id)
 
     if client_alive?(client_id) do
       touch(integration_id)
       :ok
     else
-      GenServer.call(__MODULE__, {:start_client, integration_id, brokers, client_config, topic})
+      GenServer.call(
+        __MODULE__,
+        {:start_client, integration_id, brokers, client_config, topic, producer_config}
+      )
     end
   end
 
@@ -65,7 +74,11 @@ defmodule AshIntegration.KafkaClientManager do
   end
 
   @impl true
-  def handle_call({:start_client, integration_id, brokers, client_config, topic}, _from, state) do
+  def handle_call(
+        {:start_client, integration_id, brokers, client_config, topic, producer_config},
+        _from,
+        state
+      ) do
     client_id = client_id_for(integration_id)
 
     if client_alive?(client_id) do
@@ -73,7 +86,7 @@ defmodule AshIntegration.KafkaClientManager do
       {:reply, :ok, state}
     else
       with :ok <- :brod.start_client(brokers, client_id, client_config),
-           :ok <- :brod.start_producer(client_id, topic, []) do
+           :ok <- :brod.start_producer(client_id, topic, producer_config) do
         state = put_in(state, [:clients, integration_id], now())
         {:reply, :ok, state}
       else

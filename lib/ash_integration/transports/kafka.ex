@@ -44,12 +44,15 @@ defmodule AshIntegration.Transports.Kafka do
       headers: headers
     }
 
+    producer_config = [required_acks: acks_to_brod(config.acks)]
+
     with :ok <-
            KafkaClientManager.ensure_client(
              outbound_integration.id,
              brokers,
              client_config,
-             config.topic
+             config.topic,
+             producer_config
            ),
          partition_count <- resolve_partition_count(client_id, config.topic),
          partition = partition_for(partition_key, partition_count),
@@ -134,4 +137,8 @@ defmodule AshIntegration.Transports.Kafka do
   # Catch-all: unknown errors default to non-retryable to surface permanent
   # failures quickly rather than burning through Oban retry attempts.
   def retryable_error?(_), do: false
+
+  defp acks_to_brod(:all), do: -1
+  defp acks_to_brod(:leader), do: 1
+  defp acks_to_brod(:none), do: 0
 end

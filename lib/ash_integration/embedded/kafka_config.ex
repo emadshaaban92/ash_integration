@@ -69,13 +69,6 @@ defmodule AshIntegration.KafkaConfig do
       default :all
       constraints one_of: [:all, :leader, :none]
     end
-
-    attribute :delivery_timeout_ms, :integer do
-      allow_nil? false
-      public? true
-      default 30_000
-      constraints min: 1000
-    end
   end
 
   actions do
