@@ -209,8 +209,6 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.TransportConfig do
         options={[{"All Replicas", "all"}, {"Leader Only", "leader"}, {"None", "none"}]}
       />
 
-      <.input field={@tc[:ssl]} type="checkbox" label="Use TLS" />
-
       <label class="label mt-2">Custom Kafka Headers</label>
       <div class="space-y-2">
         <div
