@@ -26,6 +26,8 @@ config :example, ExampleWeb.Endpoint,
 # Configure Oban for testing
 config :example, Oban, testing: :manual
 
+config :example, start_ash_integration?: false
+
 # Route outbound delivery HTTP calls through Req.Test
 config :ash_integration, req_options: [plug: {Req.Test, AshIntegration.Workers.OutboundDelivery}]
 

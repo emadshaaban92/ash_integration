@@ -1,5 +1,5 @@
 defmodule Example.AshIntegration.KafkaConfigTest do
-  use Example.DataCase
+  use Example.DataCase, async: true
 
   import Example.IntegrationHelpers
 

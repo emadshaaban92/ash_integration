@@ -7,22 +7,33 @@ defmodule Example.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      ExampleWeb.Telemetry,
-      Example.Repo,
-      {DNSCluster, query: Application.get_env(:example, :dns_cluster_query) || :ignore},
-      {Phoenix.PubSub, name: Example.PubSub},
-      Example.Vault,
-      AshIntegration.Supervisor,
-      {Oban, Application.fetch_env!(:example, Oban)},
-      ExampleWeb.Endpoint,
-      {AshAuthentication.Supervisor, [otp_app: :example]}
-    ]
+    children =
+      [
+        ExampleWeb.Telemetry,
+        Example.Repo,
+        {DNSCluster, query: Application.get_env(:example, :dns_cluster_query) || :ignore},
+        {Phoenix.PubSub, name: Example.PubSub},
+        Example.Vault
+      ] ++
+        ash_integration_children() ++
+        [
+          {Oban, Application.fetch_env!(:example, Oban)},
+          ExampleWeb.Endpoint,
+          {AshAuthentication.Supervisor, [otp_app: :example]}
+        ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Example.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp ash_integration_children do
+    if Application.get_env(:example, :start_ash_integration?, true) do
+      [AshIntegration.Supervisor]
+    else
+      []
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration

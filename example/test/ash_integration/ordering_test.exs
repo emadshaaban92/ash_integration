@@ -1,5 +1,5 @@
 defmodule Example.AshIntegration.OrderingTest do
-  use Example.DataCase
+  use Example.DataCase, async: true
   use Oban.Testing, repo: Example.Repo
 
   require Ash.Query

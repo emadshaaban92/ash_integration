@@ -1,5 +1,5 @@
 defmodule Example.AshIntegration.WebhookSigningTest do
-  use Example.DataCase
+  use Example.DataCase, async: true
   use Oban.Testing, repo: Example.Repo
 
   import Example.IntegrationHelpers
