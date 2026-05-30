@@ -65,10 +65,11 @@ defmodule AshIntegration.LuaSandbox do
   defp stringify_keys(value), do: value
 
   defp decode_result(table) when is_list(table) do
-    if keyword_table?(table) do
-      Map.new(table, fn {k, v} -> {k, decode_result(v)} end)
-    else
-      Enum.map(table, &decode_result/1)
+    cond do
+      table == [] -> []
+      keyword_table?(table) -> Map.new(table, fn {k, v} -> {k, decode_result(v)} end)
+      sequence_table?(table) -> table |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&decode_result(elem(&1, 1)))
+      true -> Enum.map(table, &decode_result/1)
     end
   end
 
@@ -76,4 +77,9 @@ defmodule AshIntegration.LuaSandbox do
 
   defp keyword_table?([{k, _v} | _]) when is_binary(k), do: true
   defp keyword_table?(_), do: false
+
+  # Lua/luerl returns a sequence (array) table as an integer-keyed proplist
+  # (`[{1, v1}, {2, v2}, ...]`). Decode it to an ordered list of decoded values.
+  defp sequence_table?([{k, _v} | _]) when is_integer(k), do: true
+  defp sequence_table?(_), do: false
 end
