@@ -41,7 +41,7 @@ RUN curl -LO https://github.com/fullstorydev/grpcurl/releases/download/v$GRPCURL
 RUN mkdir /app
 RUN chown $USERNAME /app
 
-ARG TIDEWAVE_VERSION=v0.4.0
+ARG TIDEWAVE_VERSION=v0.4.4
 RUN curl -sL -o tidewave https://github.com/tidewave-ai/tidewave_app/releases/download/$TIDEWAVE_VERSION/tidewave-cli-$(uname -m)-unknown-linux-gnu \
     && chmod +x tidewave \
     && mv tidewave /usr/local/bin/
@@ -53,6 +53,9 @@ USER $USERNAME
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && ln -sf /home/$USERNAME/.claude/.claude.json /home/$USERNAME/.claude.json
 
+ENV CLAUDE_CODE_EXECUTABLE=/home/$USERNAME/.local/bin/claude
+
 RUN mix local.hex --force && mix archive.install hex phx_new --force && mix local.rebar --force && mix escript.install hex protobuf --force
 
 ENV PATH="${PATH}:/home/$USERNAME/.mix/escripts"
+
