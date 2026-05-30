@@ -12,7 +12,7 @@ defmodule AshIntegration.Changes.OnDeliverySuccess do
   @impl true
   def change(changeset, _opts, _context) do
     Ash.Changeset.after_action(changeset, fn _changeset, record ->
-      record = Ash.load!(record, :integration)
+      record = Ash.load!(record, :integration, authorize?: false)
       integration = record.integration
 
       # Create delivery log
