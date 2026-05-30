@@ -197,6 +197,42 @@ defmodule Example.AshIntegration.DeliveryPipelineTest do
       ready_pairs = AshIntegration.EventScheduler.find_ready_pairs(100)
       assert ready_pairs == []
     end
+
+    test "suspending after an event is scheduled halts the in-flight delivery job" do
+      stub_webhook_success()
+      integration = create_outbound_integration!()
+      _product = create_product!()
+
+      # Dispatch + schedule (but do NOT deliver) so the event is :scheduled
+      # with a queued OutboundDelivery job — while the integration is healthy.
+      run_latest_dispatcher!()
+      schedule_via_real_scheduler()
+
+      [event] = get_events(integration.id)
+      assert event.state == :scheduled
+
+      delivery_job =
+        Oban.Job
+        |> Ecto.Query.where(worker: "AshIntegration.Workers.OutboundDelivery")
+        |> Ecto.Query.where(state: "available")
+        |> Ecto.Query.where([j], fragment("?->>'event_id' = ?", j.args, ^to_string(event.id)))
+        |> Ecto.Query.limit(1)
+        |> Example.Repo.one!()
+
+      # Now suspend — simulating auto-suspension while work is already in-flight.
+      integration
+      |> Ash.Changeset.for_update(:suspend, %{reason: "Test suspension"}, authorize?: false)
+      |> Ash.update!(authorize?: false)
+
+      # The delivery worker must refuse to deliver: cancel the job (no retry)...
+      assert {:cancel, :integration_suspended} =
+               AshIntegration.Workers.OutboundDelivery.perform(delivery_job)
+
+      # ...and park the event back to :pending (no delivery attempted at all).
+      event = reload_event!(event)
+      assert event.state == :pending
+      assert get_outbound_integration_logs(integration.id) == []
+    end
   end
 
   describe "unsuspend integration" do
