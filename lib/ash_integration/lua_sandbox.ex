@@ -66,10 +66,17 @@ defmodule AshIntegration.LuaSandbox do
 
   defp decode_result(table) when is_list(table) do
     cond do
-      table == [] -> []
-      keyword_table?(table) -> Map.new(table, fn {k, v} -> {k, decode_result(v)} end)
-      sequence_table?(table) -> table |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&decode_result(elem(&1, 1)))
-      true -> Enum.map(table, &decode_result/1)
+      table == [] ->
+        []
+
+      keyword_table?(table) ->
+        Map.new(table, fn {k, v} -> {k, decode_result(v)} end)
+
+      sequence_table?(table) ->
+        table |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&decode_result(elem(&1, 1)))
+
+      true ->
+        Enum.map(table, &decode_result/1)
     end
   end
 

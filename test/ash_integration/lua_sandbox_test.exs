@@ -74,12 +74,43 @@ defmodule AshIntegration.LuaSandboxTest do
       assert {:ok, %{"foo" => "bar", "baz" => "qux"}} = LuaSandbox.execute(script, %{})
     end
 
-    test "Lua sequential tables decode as integer-keyed tuples" do
+    test "Lua sequential tables decode as ordered lists" do
       script = ~S"""
       result = {"a", "b", "c"}
       """
 
-      assert {:ok, [{1, "a"}, {2, "b"}, {3, "c"}]} = LuaSandbox.execute(script, %{})
+      assert {:ok, ["a", "b", "c"]} = LuaSandbox.execute(script, %{})
+    end
+
+    test "Lua arrays of objects decode as a list of maps" do
+      script = ~S"""
+      result = {
+        {id = 1, name = "a"},
+        {id = 2, name = "b"}
+      }
+      """
+
+      assert {:ok, [%{"id" => 1, "name" => "a"}, %{"id" => 2, "name" => "b"}]} =
+               LuaSandbox.execute(script, %{})
+    end
+
+    test "sequence order is preserved regardless of insertion order" do
+      script = ~S"""
+      result = {}
+      result[3] = "third"
+      result[1] = "first"
+      result[2] = "second"
+      """
+
+      assert {:ok, ["first", "second", "third"]} = LuaSandbox.execute(script, %{})
+    end
+
+    test "empty Lua table decodes as empty list" do
+      script = ~S"""
+      result = {}
+      """
+
+      assert {:ok, []} = LuaSandbox.execute(script, %{})
     end
 
     test "nested tables decode correctly" do
@@ -91,8 +122,26 @@ defmodule AshIntegration.LuaSandboxTest do
       """
 
       assert {:ok, result} = LuaSandbox.execute(script, %{})
-      assert result["items"] == [{1, "x"}, {2, "y"}]
+      assert result["items"] == ["x", "y"]
       assert result["meta"] == %{"count" => 2}
+    end
+
+    test "objects nested inside sequences decode recursively" do
+      script = ~S"""
+      result = {
+        rows = {
+          {sku = "A", qty = 1},
+          {sku = "B", qty = 2}
+        }
+      }
+      """
+
+      assert {:ok, result} = LuaSandbox.execute(script, %{})
+
+      assert result["rows"] == [
+               %{"sku" => "A", "qty" => 1},
+               %{"sku" => "B", "qty" => 2}
+             ]
     end
 
     test "sandboxed functions raise runtime errors" do

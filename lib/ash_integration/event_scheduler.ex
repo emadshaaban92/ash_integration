@@ -56,7 +56,7 @@ defmodule AshIntegration.EventScheduler do
     now = System.monotonic_time(:millisecond)
     elapsed = now - state.last_run_at
 
-    if elapsed >= @min_run_interval_ms do
+    if run_due?(state.last_run_at, now) do
       schedule_ready_events()
       Process.send_after(self(), :schedule, @idle_interval)
       %{state | last_run_at: now, deferred: false}
@@ -67,6 +67,18 @@ defmodule AshIntegration.EventScheduler do
 
       %{state | deferred: true}
     end
+  end
+
+  @doc """
+  Whether a scheduling run is due given the last run time and the current time
+  (both `System.monotonic_time(:millisecond)` values).
+
+  A run is due once at least `@min_run_interval_ms` has elapsed. Note that BEAM
+  monotonic time can be negative (it is large and negative at startup), so this
+  must operate on the *difference*, never on the absolute value of `now`.
+  """
+  def run_due?(last_run_at, now) when is_integer(last_run_at) and is_integer(now) do
+    now - last_run_at >= @min_run_interval_ms
   end
 
   defp schedule_ready_events do
