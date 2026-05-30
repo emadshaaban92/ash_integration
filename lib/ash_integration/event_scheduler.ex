@@ -38,7 +38,8 @@ defmodule AshIntegration.EventScheduler do
   @impl true
   def init(_opts) do
     Process.send_after(self(), :schedule, @idle_interval)
-    {:ok, %{last_run_at: 0, deferred: false}}
+    last_run_at = System.monotonic_time(:millisecond) - @min_run_interval_ms
+    {:ok, %{last_run_at: last_run_at, deferred: false}}
   end
 
   @impl true
