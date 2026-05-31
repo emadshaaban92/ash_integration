@@ -210,6 +210,32 @@ defmodule AshIntegration.Web.Components do
     """
   end
 
+  def input(%{type: "checkbox"} = assigns) do
+    assigns =
+      assign_new(assigns, :checked, fn ->
+        Phoenix.HTML.Form.normalize_value("checkbox", assigns[:value])
+      end)
+
+    ~H"""
+    <div class="fieldset mb-2">
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="hidden" name={@name} value="false" disabled={@rest[:disabled]} />
+        <input
+          type="checkbox"
+          name={@name}
+          id={@id}
+          value="true"
+          checked={@checked}
+          class={[@class || "toggle", @errors != [] && "toggle-error"]}
+          {@rest}
+        />
+        <span :if={@label} class="label">{@label}</span>
+      </label>
+      <.input_error :for={msg <- @errors}>{msg}</.input_error>
+    </div>
+    """
+  end
+
   def input(assigns) do
     ~H"""
     <div class="fieldset mb-2">
