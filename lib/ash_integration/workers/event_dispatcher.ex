@@ -173,7 +173,8 @@ defmodule AshIntegration.Workers.EventDispatcher do
         )
         |> Ash.create(authorize?: false)
         |> case do
-          {:ok, _event} ->
+          {:ok, event} ->
+            coalesce_superseded_pending(outbound_integration, event)
             :ok
 
           {:error, err} ->
@@ -182,6 +183,84 @@ defmodule AshIntegration.Workers.EventDispatcher do
             )
         end
     end
+  end
+
+  # Log-compaction / conflation: by default an integration only needs the LATEST
+  # state per resource, so among the pending events for a (integration, resource_id)
+  # we keep only the newest (by occurred_at, then id) and cancel the rest. This bounds
+  # the pending backlog to ~one event per resource at all times (even while suspended,
+  # since the dispatcher keeps creating events), so unsuspending never has to drain a
+  # huge backlog of intermediate updates.
+  #
+  # We compute "newest" from the full pending set (not "the event just created") so
+  # out-of-order dispatch can't leave a stale event as the survivor.
+  #
+  # Opt out per integration with `notify_on_every_change: true` to get one delivery per
+  # change (no coalescing). The payload is snapshotted here at DISPATCH time (the transform
+  # runs and caches it now) — as early as practical, so intermediate states are preserved in
+  # the common case (capturing at the exact change instant would mean snapshotting inside
+  # every source write, which is too costly). Skipped entirely if ANY pending
+  # event for the resource has a nil payload (Lua failed) — that chain is blocked awaiting
+  # :reprocess, and we must not strand it by cancelling its deliverable siblings.
+  defp coalesce_superseded_pending(%{notify_on_every_change: true}, _event), do: :ok
+
+  defp coalesce_superseded_pending(outbound_integration, event) do
+    event_resource = AshIntegration.outbound_integration_event_resource()
+
+    pending =
+      event_resource
+      |> Ash.Query.filter(
+        integration_id == ^outbound_integration.id and
+          resource_id == ^event.resource_id and
+          state == :pending
+      )
+      |> Ash.read!(authorize?: false)
+
+    cond do
+      Enum.any?(pending, &is_nil(&1.payload)) ->
+        :ok
+
+      true ->
+        superseded =
+          pending
+          |> Enum.sort_by(&{&1.occurred_at, &1.id}, :desc)
+          |> Enum.drop(1)
+
+        cancel_superseded(superseded, outbound_integration, event)
+    end
+  end
+
+  defp cancel_superseded([], _outbound_integration, _event), do: :ok
+
+  defp cancel_superseded(superseded, outbound_integration, event) do
+    for stale <- superseded do
+      stale
+      |> Ash.Changeset.for_update(
+        :cancel,
+        %{last_error: "Superseded by a newer update (coalesced)"},
+        authorize?: false
+      )
+      |> Ash.update!(authorize?: false)
+    end
+
+    count = length(superseded)
+
+    Logger.info(
+      "Coalesced #{count} superseded pending event(s) for integration " <>
+        "#{outbound_integration.id} (resource #{event.resource}/#{event.resource_id})"
+    )
+
+    :telemetry.execute(
+      [:ash_integration, :coalesce, :events_dropped],
+      %{count: count},
+      %{
+        integration_id: outbound_integration.id,
+        resource: event.resource,
+        resource_id: event.resource_id
+      }
+    )
+
+    :ok
   end
 
   defp parse_datetime(datetime) when is_binary(datetime) do

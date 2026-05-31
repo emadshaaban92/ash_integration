@@ -60,6 +60,11 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
        allow_nil?: true,
        public?: true
      )
+     |> add_attribute_if_not_exists(:notify_on_every_change, :boolean,
+       default: false,
+       public?: true,
+       always_select?: true
+     )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_logs_relationship_if_not_exists()
@@ -411,7 +416,8 @@ defmodule AshIntegration.OutboundIntegrationResource.Transformer do
     :schema_version,
     :owner_id,
     :transport_config,
-    :transform_script
+    :transform_script,
+    :notify_on_every_change
   ]
 
   defp add_default_accept_if_not_set(dsl_state) do

@@ -19,6 +19,14 @@ crashes after the target system accepts a request but before the event is marked
 as delivered, the event will be re-delivered. Consumers should deduplicate by
 event ID (the UUIDv7 primary key, included in every payload).
 
+**Latest-state by default**: By default an integration delivers only the
+**latest state per resource** — when a new event is dispatched, older *pending*
+events for the same `(integration, resource_id)` are superseded (cancelled). This
+suits state-sync integrations and keeps backlogs small. Set
+`notify_on_every_change: true` on the integration to send **one delivery per
+change**, each capturing the record's state at dispatch time (see
+[Latest-State Delivery (Coalescing)](#latest-state-delivery-coalescing)).
+
 ## Pipeline Flow
 
 ```mermaid
@@ -72,7 +80,10 @@ created to prevent data loss):
 3. Creates an `OutboundIntegrationEvent` with the cached payload
 4. If Lua fails, creates the event with `payload: nil` and `last_error` set
 5. If Lua returns `skip`, creates a `cancelled` event for the audit trail
-6. Notifies `EventScheduler` that new events are ready
+6. Unless `notify_on_every_change: true`, coalesces: cancels older `pending`
+   events for the same `(integration, resource_id)`, keeping only the newest
+   (see [Latest-State Delivery](#latest-state-delivery-coalescing))
+7. Notifies `EventScheduler` that new events are ready
 
 ### EventScheduler (GenServer)
 
@@ -145,10 +156,63 @@ violation and safely skips.
 Events for **different resource_ids** within the same integration run in
 parallel. Only same-resource events are serialized.
 
+## Latest-State Delivery (Coalescing)
+
+Most integrations only care about the **current state** of a resource, not every
+intermediate change. By default, the pipeline therefore **coalesces** pending
+events per `(integration, resource_id)`: when the dispatcher creates a new event,
+it cancels the older `pending` events for that same resource, keeping only the
+newest (by `occurred_at`, then id). Superseded events become `cancelled` with
+`last_error: "Superseded by a newer update (coalesced)"` (kept for audit, reaped
+by the cleanup job).
+
+Why this matters:
+
+- **Bounded backlog.** Because events are coalesced on write — and the dispatcher
+  keeps creating events even while an integration is suspended — at most ~one
+  pending event per resource accumulates at any time. Unsuspending therefore
+  drains *one event per distinct resource*, never a backlog of millions of
+  intermediate updates.
+- **Smaller blast radius** and fewer redundant deliveries.
+
+Each compaction emits a `[:ash_integration, :coalesce, :events_dropped]` telemetry
+event and an info log, so dropped events are observable.
+
+**Opting out — a delivery per change:** set `notify_on_every_change: true` on the
+integration. Nothing is coalesced — every change produces its own delivery.
+
+> **When is the payload captured?** Each event's payload is snapshotted when the
+> event is **dispatched** (see [EventDispatcher](#eventdispatcher-oban-worker)) —
+> shortly after the change is processed, and usually before later changes land. This
+> captures intermediate states for `notify_on_every_change` consumers as early as is
+> practical, rather than waiting until the (possibly much later) moment of delivery,
+> by which point the record may have changed several more times.
+>
+> Snapshotting at the *exact* instant of each change would be the most faithful, but
+> it would mean capturing inside every source write — costly, and it would slow every
+> write down — so the snapshot is taken at dispatch instead. It is therefore
+> **best-effort** per-change history: in the common case each change gets its own
+> snapshot, but during a rapid burst, if several changes are dispatched only after
+> they have all been applied, their snapshots can coincide and reflect the latest
+> state.
+
+**Preconditions and safeguards:**
+
+- Only correct for **snapshot** payloads (the full current state), not deltas
+  (e.g. "quantity +5") — dropping intermediates would corrupt a delta stream. Use
+  `notify_on_every_change: true` for delta/event-stream integrations.
+- Coalescing only ever cancels `pending` events — never `scheduled` (in-flight)
+  or `delivered` ones.
+- If **any** pending event for the resource has a `nil` payload (Lua failed, chain
+  blocked awaiting `:reprocess`), coalescing is skipped for that resource so it
+  can't strand the chain by cancelling deliverable siblings.
+
 ## Integration Suspension
 
 When a target system is persistently failing, the pipeline stops delivery
-attempts but **never stops creating events**.
+attempts but **never stops creating events** (though by default only the latest
+state per resource is retained — see
+[Latest-State Delivery](#latest-state-delivery-coalescing)).
 
 - **Deactivate** = EventDispatcher stops creating events. Data is lost during
   the outage.

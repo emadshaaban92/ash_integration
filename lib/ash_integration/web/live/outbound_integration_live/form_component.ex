@@ -421,6 +421,22 @@ defmodule AshIntegration.Web.OutboundIntegrationLive.FormComponent do
         <% end %>
       </div>
 
+      <div class="card card-border border-base-300 p-4 mt-4">
+        <.input
+          field={@form[:notify_on_every_change]}
+          type="checkbox"
+          label="Notify on every change"
+        />
+        <p class="text-xs text-base-content/50 mt-1">
+          By default, only the <strong>latest</strong>
+          state of each record is delivered: when several changes for the same record are
+          still queued, the older ones are dropped (kept as
+          <code class="text-xs">cancelled</code>
+          for audit). Enable this to send <strong>one delivery per change</strong>,
+          each capturing the record's state at that point.
+        </p>
+      </div>
+
       <div class="mt-4">
         <.input
           type="select"

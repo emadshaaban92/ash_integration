@@ -519,7 +519,9 @@ defmodule AshIntegration.OutboundIntegrationEventResource.Transformer do
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :update,
           name: :cancel,
-          accept: [],
+          # last_error is optional — lets callers record WHY an event was cancelled
+          # (e.g. coalescing supersedes older pending events).
+          accept: [:last_error],
           require_atomic?: false,
           changes: [
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
