@@ -37,6 +37,7 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   """
 
   alias AshIntegration.Outbound.Delivery.LuaSandbox
+  alias AshIntegration.Transport.Egress
   alias AshIntegration.Transport.Utils
   alias AshIntegration.Outbound.Wire.Envelope
 
@@ -105,12 +106,13 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
 
   defp finalize(:http, config, result, _created_at) do
     with {:ok, method} <- normalize_method(result["method"]),
-         {:ok, headers} <- normalize_headers(result["headers"]) do
+         {:ok, headers} <- normalize_headers(result["headers"]),
+         {:ok, url} <- resolve_url(config, result) do
       {:ok,
        %{
          "transport" => "http",
          "method" => method,
-         "url" => resolve_url(config, result),
+         "url" => url,
          "headers" => headers,
          "body" => normalize_body(Map.get(result, "body"))
        }}
@@ -144,10 +146,20 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   # `result.url`, when set, is a full absolute override that bypasses the
   # base_url + path join entirely; otherwise the path is joined onto the
   # connection's base URL (resolved to the final absolute URL and snapshotted).
+  # The resolved URL is run through the SSRF egress policy here so a transform
+  # pointing at a private/loopback/metadata host parks the delivery with a clear
+  # error at dispatch instead of being sent. (Delivery re-checks at send time as a
+  # backstop against DNS rebinding — see the HTTP transport.)
   defp resolve_url(config, result) do
-    case result["url"] do
-      url when is_binary(url) and url != "" -> url
-      _ -> Utils.build_url(config.base_url, result["path"])
+    url =
+      case result["url"] do
+        url when is_binary(url) and url != "" -> url
+        _ -> Utils.build_url(config.base_url, result["path"])
+      end
+
+    case Egress.validate(url) do
+      :ok -> {:ok, url}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -167,9 +179,14 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
 
   defp normalize_headers(headers) when is_map(headers) do
     Enum.reduce_while(headers, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
-      case header_value(value) do
-        {:ok, value} -> {:cont, {:ok, Map.put(acc, to_string(key), value)}}
-        :error -> {:halt, {:error, "result.headers[#{inspect(key)}] must be a string"}}
+      name = to_string(key)
+
+      with {:ok, value} <- header_value(key, value),
+           :ok <- reject_control_chars(name, name),
+           :ok <- reject_control_chars(name, value) do
+        {:cont, {:ok, Map.put(acc, name, value)}}
+      else
+        {:error, _} = error -> {:halt, error}
       end
     end)
   end
@@ -177,10 +194,22 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   defp normalize_headers(other),
     do: {:error, "result.headers must be a table, got #{inspect(other)}"}
 
-  defp header_value(value) when is_binary(value), do: {:ok, value}
-  defp header_value(value) when is_number(value), do: {:ok, to_string(value)}
-  defp header_value(value) when is_boolean(value), do: {:ok, to_string(value)}
-  defp header_value(_), do: :error
+  defp header_value(_key, value) when is_binary(value), do: {:ok, value}
+  defp header_value(_key, value) when is_number(value), do: {:ok, to_string(value)}
+  defp header_value(_key, value) when is_boolean(value), do: {:ok, to_string(value)}
+  defp header_value(key, _value), do: {:error, "result.headers[#{inspect(key)}] must be a string"}
+
+  # Untrusted event data can flow into a transform-built header. A `\r`/`\n` (or
+  # any C0 control / DEL) in a header name or value is a request-splitting vector
+  # and crash-loops a delivery into a wedged lane (Mint raises on it). Reject it at
+  # the resolver boundary so the delivery PARKS with a readable error instead.
+  defp reject_control_chars(name, string) do
+    if String.match?(string, ~r/[\x00-\x1f\x7f]/) do
+      {:error, "result.headers[#{inspect(name)}] contains a control character (CR/LF/etc.)"}
+    else
+      :ok
+    end
+  end
 
   defp normalize_timestamp(nil, created_at),
     do: {:ok, DateTime.to_unix(created_at, :millisecond)}

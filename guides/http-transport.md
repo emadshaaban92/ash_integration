@@ -158,6 +158,36 @@ A successful delivery resets both counters. Suspended routes keep accumulating
 events safely (latest-state per key) until an operator investigates and
 un-suspends. See the [Delivery Pipeline guide](delivery-pipeline.md#suspension--failure-isolation) for the full model.
 
+## SSRF egress control
+
+A connection's `base_url` is shape-checked (`https?://…`) but not range-checked,
+and a Lua transform can point `result.url` at an **arbitrary absolute URL**. Left
+unguarded, an operator-authored transform could aim a delivery at a private,
+loopback, or link-local address — the cloud-metadata endpoint
+(`169.254.169.254`), `localhost`, or an in-cluster service — turning the delivery
+pipeline into an SSRF primitive.
+
+The egress guard resolves the host of the effective delivery URL (covering both
+the `base_url`-joined path **and** a transform-set `result.url`) and **blocks**
+it when any resolved address is private/loopback/link-local/metadata. It runs at
+dispatch (a blocked URL **parks** the delivery with a readable error, so no
+retries are wasted) and again at send time (a backstop against DNS rebinding).
+
+**Blocking is on by default.** A trusted internal deployment — delivering to a
+private mesh, a sidecar, or an in-cluster host — opts out, or carves out specific
+hosts:
+
+```elixir
+config :ash_integration,
+  egress: [
+    block_private?: true,                  # default; set false to allow all egress
+    allow_hosts: ["metadata.internal"]     # exact host allowlist (escape hatch)
+  ]
+```
+
+`allow_hosts` matches the URL's host verbatim (case-insensitively) and skips the
+IP check for that host only — prefer it over disabling the guard globally.
+
 ## Req Options
 
 You can inject custom options into all HTTP requests (useful for testing):

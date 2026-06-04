@@ -44,10 +44,10 @@ defmodule AshIntegration.LuaSandboxTest do
     end
 
     @tag timeout: 10_000
-    test "returns error when script times out" do
+    test "returns error when a script runs away (reduction budget or wall-clock)" do
       script = "while true do end"
       assert {:error, message} = LuaSandbox.execute(script, %{})
-      assert message =~ "timed out"
+      assert message =~ "reduction" or message =~ "timed out"
     end
 
     test "event data round-trips through Lua" do

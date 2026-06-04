@@ -41,6 +41,7 @@ defmodule AshIntegration.MixProject do
 
   def application do
     [
+      mod: {AshIntegration.Application, []},
       extra_applications: [:logger]
     ]
   end

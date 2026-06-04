@@ -446,6 +446,32 @@ applies immediately and the anti-replay timestamp stays honest on retries.
 Reprocess is only needed for an edited transform or route config, not a secret
 rotation.
 
+**Untrusted-output guards (operator-trust boundary).** The transform is
+operator-authored but untrusted at runtime, so its output is validated before it
+can reach the wire — each of these **parks** the delivery with a readable error
+rather than crashing a lane:
+
+- **SSRF egress** — the resolved HTTP URL (both the `base_url`-joined path and a
+  transform-set `result.url`) is host-resolved and rejected when any address is
+  private/loopback/link-local/metadata. On by default; opt out per-deployment or
+  allowlist specific hosts (`config :ash_integration, egress: …`). Re-checked live
+  at send time against DNS rebinding.
+- **Header control chars** — a `\r`/`\n`/C0/DEL in a transform-built header name
+  or value is rejected at the resolver boundary (request-splitting + lane
+  wedging).
+- **Sandbox resource limits** — the Lua run is bounded by a luerl
+  `max_reductions` budget, a per-runner `:max_heap_size`, and a wall-clock
+  `max_time`, and runs under `Task.Supervisor.async_nolink` so a crash/kill is
+  isolated from the caller (`config :ash_integration, lua_sandbox: …`).
+
+**Secret hygiene in audit rows.** The delivery log redacts secret-bearing header
+values (`authorization`, `x-signature`, …) from the snapshotted descriptor copy,
+truncates + masks reflected secrets in the stored `response_body`, and scrubs
+error reasons (whitelisting atoms/printable strings; structs collapse to their
+module name) so a decrypted credential can't land in `last_error`. The live
+descriptor on `EventDelivery` keeps a transform-set `authorization` verbatim (it
+is the live auth override) — only the queryable log copy is redacted.
+
 ## 12. Data model
 
 Five host-owned resources, each a library Spark extension that injects its schema

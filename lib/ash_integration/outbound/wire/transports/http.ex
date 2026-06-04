@@ -33,6 +33,19 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
 
   defp do_deliver(event, config, body, auth, signature) do
     delivery = event.delivery
+
+    # Re-validate the snapshotted URL against the egress policy right before the
+    # send — a backstop against DNS rebinding between dispatch and delivery, and
+    # against snapshots materialized before the policy existed. The resolver
+    # already parked anything that fails this at dispatch time.
+    case AshIntegration.Transport.Egress.validate(delivery["url"]) do
+      :ok -> do_send(event, config, body, auth, signature)
+      {:error, reason} -> egress_error(reason)
+    end
+  end
+
+  defp do_send(event, config, body, auth, signature) do
+    delivery = event.delivery
     req_options = Application.get_env(:ash_integration, :req_options, [])
 
     case Req.request(
@@ -70,9 +83,15 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
     {:error,
      %{
        failure_class: :transport,
-       error_message: "Network error: #{inspect(reason)}",
+       error_message: "Network error: #{Utils.scrub_reason(reason)}",
        retryable: true
      }}
+  end
+
+  # A blocked egress target won't fix itself on retry — surface it as a
+  # non-retryable transport failure rather than looping.
+  defp egress_error(reason) do
+    {:error, %{failure_class: :transport, error_message: reason, retryable: false}}
   end
 
   # Both secret-derived headers are injected LIVE here (never in the event row or

@@ -35,6 +35,12 @@ config :ash_integration, enabled?: false
 config :ash_integration,
   req_options: [plug: {Req.Test, AshIntegration.Outbound.Wire.Transports.Http}]
 
+# The SSRF egress guard resolves + checks delivery URLs. The suite delivers to
+# loopback (`localhost:9999`, mocked by Req.Test), which the guard blocks by
+# default — so turn it off here and exercise it explicitly in egress-specific
+# tests (which flip `block_private?` back on for their scope).
+config :ash_integration, egress: [block_private?: false]
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

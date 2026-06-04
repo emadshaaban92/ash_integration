@@ -37,9 +37,10 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliverySuccess do
         event_type: event.event_type,
         version: event.version,
         event_key: event.event_key,
-        request_payload: event.delivery,
+        request_payload: AshIntegration.Transport.Utils.redact_descriptor(event.delivery),
         response_status: metadata["response_status"],
-        response_body: metadata["response_body"],
+        response_body:
+          AshIntegration.Transport.Utils.redact_response_body(metadata["response_body"]),
         kafka_offset: metadata["kafka_offset"],
         kafka_partition: metadata["kafka_partition"],
         duration_ms: metadata["duration_ms"],

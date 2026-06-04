@@ -464,3 +464,35 @@ there's no per-stage start flag.
 - **Target down for an extended period**: events keep being created (no data
   loss). Auto-suspension stops delivery churn. When unsuspended, the backlog
   drains in order — at most one in-flight event per lane, so no thundering herd.
+- **Transform emits a control character in a header**: a `\r`/`\n` (or any C0
+  control / DEL) in a transform-built header name or value is rejected at the
+  resolver boundary and the delivery **parks** with a readable error — it never
+  reaches the transport (where it would otherwise crash-loop the lane). Fix the
+  transform and reprocess.
+
+## Transform sandbox limits
+
+Lua transforms are **operator-authored but untrusted at runtime** (a typo, a
+pathological loop, or hostile event data flowing into the script). Each run is
+bounded so one script can't take down the node:
+
+- **CPU** — a luerl `max_reductions` budget kills a runaway loop.
+- **Memory** — a per-runner `:max_heap_size` kills an allocation bomb the instant
+  it exceeds the heap ceiling, before it can OOM the node.
+- **Wall-clock** — a luerl `max_time` plus an outer `Task` backstop.
+- **Crash isolation** — the script runs under `Task.Supervisor.async_nolink`, so
+  a sandbox crash/kill surfaces as a parked delivery, never as a crash of the
+  delivery worker.
+
+A script that hits any limit fails like any other transform error: the delivery
+**parks** with the limit in `last_error`. The limits are configurable (safe
+defaults shown):
+
+```elixir
+config :ash_integration,
+  lua_sandbox: [
+    timeout_ms:     5_000,
+    max_reductions: 100_000_000,   # ≈ a brief spin before the kill
+    max_heap_words: 50_000_000     # heap+stack ceiling per run, in words (~400MB)
+  ]
+```

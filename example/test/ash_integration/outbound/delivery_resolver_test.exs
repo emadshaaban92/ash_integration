@@ -164,6 +164,63 @@ defmodule Example.Outbound.DeliveryResolverTest do
       assert d["headers"]["x-custom"] == "1"
       assert Enum.all?(Map.keys(d["headers"]), &(&1 == String.downcase(&1)))
     end
+
+    test "a control char in a transform-set header value parks the delivery", %{owner: owner} do
+      dest = http_connection!(owner)
+      sub = subscription!(dest, "widget.updated", ~s|result.headers["x-evil"] = "a\\r\\nInjected: 1"|)
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "control character"
+    end
+
+    test "a control char in a transform-set header NAME parks the delivery", %{owner: owner} do
+      dest = http_connection!(owner)
+      sub = subscription!(dest, "widget.updated", ~s|result.headers["x-bad\\nname"] = "1"|)
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "control character"
+    end
+  end
+
+  describe "SSRF egress (blocking on)" do
+    setup do
+      original = Application.get_env(:ash_integration, :egress)
+      Application.put_env(:ash_integration, :egress, block_private?: true)
+
+      on_exit(fn ->
+        case original do
+          nil -> Application.delete_env(:ash_integration, :egress)
+          value -> Application.put_env(:ash_integration, :egress, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "a transform pointing result.url at the metadata IP parks the delivery", %{owner: owner} do
+      dest = http_connection!(owner)
+      sub = subscription!(dest, "widget.updated", ~s|result.url = "http://169.254.169.254/latest"|)
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "egress blocked"
+    end
+
+    test "a private base_url (loopback) parks even a no-op transform", %{owner: owner} do
+      # The helper's base_url is http://localhost:9999/webhook — loopback.
+      dest = http_connection!(owner)
+      sub = subscription!(dest, "widget.updated", "-- noop")
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "egress blocked"
+    end
+
+    test "a public base_url still resolves cleanly", %{owner: owner} do
+      dest = http_connection!(owner, base_url: "https://1.1.1.1/hook")
+      sub = subscription!(dest, "widget.updated", "-- noop")
+
+      assert {:ok, d} = resolve(dest, sub, %{})
+      assert d["url"] == "https://1.1.1.1/hook"
+    end
   end
 
   describe "Kafka" do
@@ -267,7 +324,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
     config =
       %{
         type: :http,
-        base_url: "http://localhost:9999/webhook",
+        base_url: Keyword.get(opts, :base_url, "http://localhost:9999/webhook"),
         auth: Keyword.get(opts, :auth, %{type: "none"}),
         timeout_ms: 5000
       }

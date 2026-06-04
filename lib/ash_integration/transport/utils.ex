@@ -38,6 +38,118 @@ defmodule AshIntegration.Transport.Utils do
     end
   end
 
+  # Header names whose VALUES are secret-bearing and must never be persisted to
+  # the delivery log (the stored wire descriptor and any reflected response body).
+  # Matched case-insensitively; a name is also treated as sensitive when it
+  # contains "secret", "token", or "password".
+  @sensitive_headers ~w(authorization proxy-authorization cookie set-cookie
+                        x-signature signature x-api-key api-key x-auth-token)
+
+  @max_error_len 300
+  @max_response_body_len 4_096
+
+  @doc """
+  Whether a header name carries a secret value (matched case-insensitively).
+  """
+  @spec sensitive_header?(String.t()) :: boolean()
+  def sensitive_header?(name) do
+    down = String.downcase(to_string(name))
+    down in @sensitive_headers or String.contains?(down, ["secret", "token", "password"])
+  end
+
+  @doc """
+  Redact secret-bearing header values in the stored wire descriptor before it is
+  copied into the delivery log's `request_payload`.
+
+  The live `EventDelivery.delivery` snapshot keeps a transform-set `authorization`
+  verbatim (it's the live auth override replayed on every retry) — only the audit
+  COPY written to the log is redacted, so the secret never lands in a queryable
+  log row.
+  """
+  @spec redact_descriptor(map() | nil) :: map() | nil
+  def redact_descriptor(%{"headers" => headers} = descriptor) when is_map(headers) do
+    redacted =
+      Map.new(headers, fn {name, value} ->
+        if sensitive_header?(name), do: {name, "[REDACTED]"}, else: {name, value}
+      end)
+
+    %{descriptor | "headers" => redacted}
+  end
+
+  def redact_descriptor(descriptor), do: descriptor
+
+  @doc """
+  Truncate a reflected response body for storage and mask anything that looks like
+  a reflected secret header (`authorization: …`, `x-signature: …`). A hostile or
+  buggy target can echo the request's auth/signature headers back in its body; we
+  store at most #{@max_response_body_len} bytes with those values masked.
+  """
+  @spec redact_response_body(String.t() | nil) :: String.t() | nil
+  def redact_response_body(nil), do: nil
+
+  def redact_response_body(body) when is_binary(body) do
+    body
+    |> truncate(@max_response_body_len)
+    |> mask_reflected_secrets()
+  end
+
+  defp mask_reflected_secrets(body) do
+    Regex.replace(
+      ~r/("?(?:authorization|proxy-authorization|x-signature|signature|x-api-key|api-key|cookie|set-cookie|x-auth-token)"?\s*[:=]\s*"?)([^"\r\n]+)/i,
+      body,
+      "\\1[REDACTED]"
+    )
+  end
+
+  @doc """
+  Build a safe, bounded error string from an arbitrary failure `reason` for
+  persistence to `last_error` / the delivery log.
+
+  `inspect(reason)` on an Ash error, a struct, or a record can splat decrypted
+  secrets or whole credential structs into a queryable column. This whitelists
+  what survives: atoms, numbers and printable binaries pass through; exceptions
+  and structs collapse to their module name; anything else is `(redacted)`. The
+  common, useful network reasons (`:econnrefused`, `{:tls_alert, …}`) stay
+  readable.
+  """
+  @spec scrub_reason(term()) :: String.t()
+  def scrub_reason(reason), do: reason |> summarize_reason() |> truncate(@max_error_len)
+
+  defp summarize_reason(reason) when is_atom(reason), do: inspect(reason)
+  defp summarize_reason(reason) when is_number(reason), do: to_string(reason)
+
+  defp summarize_reason(reason) when is_binary(reason) do
+    if String.printable?(reason), do: reason, else: "(binary redacted)"
+  end
+
+  defp summarize_reason(%{__exception__: true} = exception),
+    do: inspect(exception.__struct__)
+
+  defp summarize_reason(%{__struct__: module}), do: inspect(module)
+
+  defp summarize_reason(list) when is_list(list) do
+    if Enum.all?(list, &simple_term?/1),
+      do: inspect(Enum.map(list, &summarize_reason/1)),
+      else: "(list redacted)"
+  end
+
+  defp summarize_reason(tuple) when is_tuple(tuple) do
+    elements = Tuple.to_list(tuple)
+
+    if Enum.all?(elements, &simple_term?/1),
+      do: "{" <> Enum.map_join(elements, ", ", &summarize_reason/1) <> "}",
+      else: "(redacted)"
+  end
+
+  defp summarize_reason(_other), do: "(redacted)"
+
+  defp simple_term?(value), do: is_atom(value) or is_number(value) or is_binary(value)
+
+  defp truncate(string, max) when byte_size(string) > max,
+    do: binary_part(string, 0, max) <> "…(truncated)"
+
+  defp truncate(string, _max), do: string
+
   @doc """
   Encode a stored delivery body/value (a decoded term) to the exact wire bytes,
   used by BOTH the transport that sends it and the live signer — so the signature
@@ -144,7 +256,7 @@ defmodule AshIntegration.Transport.Utils do
   defp secret_error(context, reason) do
     %{
       failure_class: :transport,
-      error_message: "Failed to load #{context}: #{inspect(reason)}",
+      error_message: "Failed to load #{context}: #{scrub_reason(reason)}",
       retryable: false
     }
   end

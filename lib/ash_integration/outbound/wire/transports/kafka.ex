@@ -132,7 +132,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
         {:error,
          %{
            failure_class: :transport,
-           error_message: "Kafka error: #{inspect(reason)}",
+           error_message: "Kafka error: #{Utils.scrub_reason(reason)}",
            retryable: Utils.retryable_error?(reason)
          }}
     end
