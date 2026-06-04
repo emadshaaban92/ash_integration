@@ -11,6 +11,11 @@ defmodule AshIntegration.MixProject do
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      # Tests define Ash resources at compile time, and each one carries its own
+      # `Inspect` implementation. Consolidated protocols would make those runtime
+      # implementations warn ("protocol has already been consolidated"), so leave
+      # protocols unconsolidated in :test. See the Protocol module docs.
+      consolidate_protocols: Mix.env() != :test,
       deps: deps(),
       name: "AshIntegration",
       description: "Outbound integration system for Ash Framework with built-in dashboard UI",
@@ -71,7 +76,8 @@ defmodule AshIntegration.MixProject do
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:usage_rules, "~> 1.0", only: [:dev]},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false}
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 
