@@ -188,6 +188,12 @@ config :ash_integration,
 `allow_hosts` matches the URL's host verbatim (case-insensitively) and skips the
 IP check for that host only — prefer it over disabling the guard globally.
 
+**Redirects are never followed.** Delivery requests set `redirect: false`: the
+egress guard only validates the URL being sent, so following a `3xx` to a
+different host would slip past it (a public endpoint redirecting to
+`169.254.169.254`). A redirect from a webhook target is treated as a non-2xx
+rejection, not a route to chase.
+
 ## Req Options
 
 You can inject custom options into all HTTP requests (useful for testing):

@@ -96,8 +96,11 @@ defmodule AshIntegration.Transport.Utils do
   end
 
   defp mask_reflected_secrets(body) do
+    # Value class `(?:\\.|[^"\r\n])+` consumes escaped quotes (`\"`) so a JSON
+    # value containing one (`"token":"ab\"cd"`) is masked in full, not just up to
+    # the escaped quote.
     Regex.replace(
-      ~r/("?(?:authorization|proxy-authorization|x-signature|signature|x-api-key|api-key|cookie|set-cookie|x-auth-token)"?\s*[:=]\s*"?)([^"\r\n]+)/i,
+      ~r/("?(?:authorization|proxy-authorization|x-signature|signature|x-api-key|api-key|cookie|set-cookie|x-auth-token)"?\s*[:=]\s*"?)((?:\\.|[^"\r\n])+)/i,
       body,
       "\\1[REDACTED]"
     )

@@ -223,6 +223,42 @@ defmodule Example.Outbound.TransportHttpTest do
     assert reload(s1).consecutive_failures == 0
   end
 
+  test "does not follow an HTTP redirect to an internal address (SSRF: redirect: false)", %{
+    connection: dest
+  } do
+    test_pid = self()
+
+    # The webhook answers every request with a 302 pointing at the cloud-metadata
+    # endpoint. With `redirect: false` the transport must NOT chase it: the stub is
+    # hit once (the original send to localhost) and never again for the internal
+    # host — so a redirect can't be turned into an SSRF primitive. Egress is off in
+    # the test config, so `redirect: false` is the *only* thing guarding this path
+    # here, which is exactly what this test isolates.
+    Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn plug_conn ->
+      send(test_pid, {:redirect_target, plug_conn.host})
+
+      plug_conn
+      |> Plug.Conn.put_resp_header("location", "http://169.254.169.254/latest/meta-data/")
+      |> Plug.Conn.send_resp(302, "")
+    end)
+
+    s1 = create_subscription!(dest)
+    event = create_event!(s1)
+
+    drain_delivery!()
+
+    # The original send happened…
+    assert_received {:redirect_target, "localhost"}
+    # …but the redirect to the metadata host was never chased.
+    refute_received {:redirect_target, "169.254.169.254"}
+
+    # A 302 is a non-2xx rejection: classified `:response` (subscription counter),
+    # never delivered.
+    refute reload(event).state == :delivered
+    assert reload(s1).consecutive_failures == 1
+    assert reload(dest).consecutive_failures == 0
+  end
+
   # ── Helpers ───────────────────────────────────────────────────────────────
 
   defp create_user! do

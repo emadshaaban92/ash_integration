@@ -114,7 +114,15 @@ defmodule AshIntegration.Outbound.Declare.Registry do
 
   defp build_and_store(resources) do
     snapshot = build(resources)
-    :persistent_term.put(@cache_key, snapshot)
+
+    # Only `put` when the value actually changes, so a lazy-fallback build that
+    # races `warm/0` doesn't trigger persistent_term's global heap-scan a second
+    # time (mirrors Dispatch.Supervisor.put_config/2).
+    case :persistent_term.get(@cache_key, :__unset__) do
+      ^snapshot -> :ok
+      _ -> :persistent_term.put(@cache_key, snapshot)
+    end
+
     snapshot
   end
 

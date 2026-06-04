@@ -69,7 +69,12 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
              body: body,
              headers: headers(auth, delivery["headers"], signature),
              receive_timeout: timeout(event.subscription.route_config, config),
-             retry: false
+             retry: false,
+             # Never follow redirects. Egress.validate only checked the snapshotted
+             # URL; a 3xx to an internal address (e.g. 169.254.169.254) would bypass
+             # that check entirely. A webhook target answering a delivery with a
+             # redirect is a misconfiguration, not a route worth chasing.
+             redirect: false
            ] ++ req_options
          ) do
       {:ok, %Req.Response{status: status, body: resp}} when status in 200..299 ->

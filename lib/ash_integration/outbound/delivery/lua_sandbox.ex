@@ -56,6 +56,12 @@ defmodule AshIntegration.Outbound.Delivery.LuaSandbox do
 
     task =
       Task.Supervisor.async_nolink(AshIntegration.TaskSupervisor, fn ->
+        # The luerl runner's own `:max_heap_size` only bounds script *execution*.
+        # Reading and decoding the `result` table (read_result/decode_result) runs
+        # here in the Task, after the runner returns — so a script that builds a
+        # within-budget-but-huge `result` could balloon this process's heap, outside
+        # that ceiling. Cap the Task heap too (kill: true → surfaces as `{:exit, _}`).
+        Process.flag(:max_heap_size, %{size: max_heap_words(), kill: true, error_logger: false})
         run_sandboxed(script, event_data, preseed)
       end)
 
