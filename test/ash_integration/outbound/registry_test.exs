@@ -2,6 +2,7 @@ defmodule AshIntegration.Outbound.RegistryTest do
   use ExUnit.Case, async: true
 
   alias AshIntegration.Outbound.Declare.Registry
+  alias AshIntegration.Outbound.Declare.Source.Info
 
   defmodule Producer do
     @moduledoc false
@@ -88,6 +89,7 @@ defmodule AshIntegration.Outbound.RegistryTest do
         actions([:update])
         producer(AshIntegration.Outbound.RegistryTest.Producer)
         version(1)
+        capture_isolation?(true)
       end
     end
 
@@ -235,6 +237,17 @@ defmodule AshIntegration.Outbound.RegistryTest do
 
     test "reset_cache/0 is safe to call" do
       assert Registry.reset_cache() in [true, false]
+    end
+  end
+
+  describe "capture_isolation? (per-event opt-in)" do
+    test "defaults to false and is read from the DSL when set" do
+      events = Info.events(Product)
+      created = Enum.find(events, &(Info.event_type(&1) == "product.created"))
+      stock = Enum.find(events, &(Info.event_type(&1) == "stock.changed"))
+
+      assert Info.capture_isolation?(created) == false
+      assert Info.capture_isolation?(stock) == true
     end
   end
 end

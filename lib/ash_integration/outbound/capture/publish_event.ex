@@ -15,10 +15,27 @@ defmodule AshIntegration.Outbound.Capture.PublishEvent do
   # `produce` runs under producer/system authority (no per-actor read) — capture
   # is point-in-time; authorization moves to the producer's `project/3` at
   # dispatch.
+  #
+  # ## Capture-failure blast radius (IMPORTANT)
+  #
+  # Because capture runs in the source transaction, a failure here — a raising
+  # `produce`/`event_key`, or a failed bulk `Event` insert — **rolls back the
+  # host's business action**. This is deliberate: it preserves the transactional
+  # outbox (no committed change without its event, no event without its change).
+  # The cost is coupling — a producer bug can block a business write.
+  #
+  # An event can opt OUT of that coupling per-declaration with `capture_isolation?
+  # true`: a `produce`/`event_key` failure for THAT event is caught, logged, and
+  # surfaced on `[:ash_integration, :capture, :isolated_failure]` telemetry, and the
+  # event is **dropped** (the business action still commits). Use it for
+  # non-critical events where availability beats outbox completeness. The shared
+  # bulk insert is still all-or-nothing (an infra-level DB failure is not isolable
+  # per event).
   use Ash.Resource.Change
 
   require Ash.Tracer
   require Ash.Query
+  require Logger
 
   alias AshIntegration.Outbound.Declare.Source.Info
 
@@ -61,13 +78,37 @@ defmodule AshIntegration.Outbound.Capture.PublishEvent do
       %{
         event_type: Info.event_type(event),
         producer: Info.producer(event),
-        versions: Info.versions(event)
+        versions: Info.versions(event),
+        capture_isolation?: Info.capture_isolation?(event)
       }
     end
   end
 
-  # One trigger → Event attrs for each subscribed version × produced data.
-  defp capture(%{event_type: type, producer: producer, versions: versions}, pairs, ctx, meta) do
+  # One trigger → Event attrs for each subscribed version × produced data. When the
+  # event opts into `capture_isolation?`, a raising produce/event_key is caught,
+  # logged, and the event dropped — the host action commits regardless.
+  defp capture(%{capture_isolation?: true} = trigger, pairs, ctx, meta) do
+    do_capture(trigger, pairs, ctx, meta)
+  rescue
+    exception ->
+      Logger.error(
+        "AshIntegration: isolated capture failure for event " <>
+          "\"#{trigger.event_type}\" (#{inspect(trigger.producer)}) — event dropped, host " <>
+          "action committed: #{Exception.message(exception)}"
+      )
+
+      :telemetry.execute(
+        [:ash_integration, :capture, :isolated_failure],
+        %{count: 1},
+        %{event_type: trigger.event_type, producer: trigger.producer}
+      )
+
+      []
+  end
+
+  defp capture(trigger, pairs, ctx, meta), do: do_capture(trigger, pairs, ctx, meta)
+
+  defp do_capture(%{event_type: type, producer: producer, versions: versions}, pairs, ctx, meta) do
     type
     |> subscribed_versions(versions)
     |> Enum.flat_map(fn version ->

@@ -63,6 +63,26 @@ end
 - The `context` map carries the action + actor (constant across the batch); it is
   the extension point for future capture-time data.
 
+> **Capture-failure blast radius.** Because `produce`/`event_key` run **in the
+> source transaction**, a failure here (a raise, or a failed `Event` insert) **rolls
+> back the host's business action**. This is deliberate — it keeps the transactional
+> outbox intact (no committed change without its event, and vice versa) — but it
+> means a producer bug can block a business write. An event can opt OUT per
+> declaration with `capture_isolation? true`: a `produce`/`event_key` failure for
+> that event is then caught, logged, and surfaced on `[:ash_integration, :capture,
+> :isolated_failure]` telemetry, and the event is **dropped** while the business
+> action still commits. Use it for non-critical events where availability beats
+> outbox completeness:
+>
+> ```elixir
+> event "activity.logged" do
+>   actions [:create]
+>   producer MyApp.Outbound.ActivityLogged
+>   version 1
+>   capture_isolation? true   # a capture bug drops the event, never blocks the write
+> end
+> ```
+
 ### `event_key/2`
 
 Returns the **event key** for a produced payload — the partition identity that

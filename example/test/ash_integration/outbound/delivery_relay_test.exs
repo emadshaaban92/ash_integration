@@ -158,7 +158,26 @@ defmodule Example.Outbound.DeliveryRelayTest do
       # Terminal: never claimed again, stays stuck with its lane blocked.
       assert [] = Dispatcher.claim(10)
     end
+
+    test "the terminal attempt does NOT bump the suspension counter (no double-penalty)", %{
+      connection: conn
+    } do
+      stub_webhook_failure(503)
+      s = create_subscription!(conn)
+      d = scheduled_delivery!(s)
+      # The next (claim → fail) crosses the ceiling, making this a poison attempt.
+      set_fields!(d, attempts: Stage.max_attempts() - 1)
+
+      drain_delivery!()
+
+      assert reload(d).attempts == Stage.max_attempts()
+      # A 5xx is normally a :response failure that bumps the SUBSCRIPTION counter —
+      # but on the terminal/poison attempt it must NOT (the row already blocks its
+      # lane forever; also suspending the subscription would be a double-penalty).
+      assert reload(s).consecutive_failures == 0
+    end
   end
+
 
   describe "lease-token fence (stale claimer can't finalize a re-claimed row)" do
     test ":deliver does not apply when the claimed_at token no longer matches", %{

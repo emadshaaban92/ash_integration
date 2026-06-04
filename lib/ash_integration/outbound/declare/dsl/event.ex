@@ -15,6 +15,7 @@ defmodule AshIntegration.Outbound.Declare.Dsl.Event do
     :type,
     :actions,
     :producer,
+    capture_isolation?: false,
     versions: [],
     __identifier__: nil,
     __spark_metadata__: nil

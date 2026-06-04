@@ -69,6 +69,15 @@ defmodule AshIntegration.Outbound.Declare.Source do
         type: :atom,
         required: true,
         doc: "An `AshIntegration.Outbound.Declare.Producer` module for this event type."
+      ],
+      capture_isolation?: [
+        type: :boolean,
+        required: false,
+        default: false,
+        doc:
+          "When true, a capture failure for THIS event (a raising `produce`/`event_key`) is " <>
+            "caught, logged, and the event is DROPPED instead of rolling back the host's " <>
+            "business action. Default false: capture failures fail the action (outbox integrity)."
       ]
     ]
   }

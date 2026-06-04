@@ -20,29 +20,42 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
   require Logger
   import Ecto.Query
 
+  alias AshIntegration.Outbound.Delivery.Dispatcher
+
   @impl true
   def change(changeset, _opts, _context) do
     Ash.Changeset.after_action(changeset, fn _changeset, event ->
       create_delivery_log(event)
 
-      case classify(event.delivery_metadata || %{}) do
-        :transport ->
-          bump_and_maybe_suspend(
-            AshIntegration.connection_resource(),
-            event.connection_id,
-            "transport"
-          )
-
-        :response ->
-          bump_and_maybe_suspend(
-            AshIntegration.subscription_resource(),
-            event.subscription_id,
-            "response"
-          )
+      # Don't bump the suspension counter on the TERMINAL (poison) attempt. That
+      # row is now stuck `:scheduled` and blocks its own lane forever (§9/#60), so
+      # also auto-suspending the whole connection/subscription on top is a
+      # double-penalty — one poison row would suspend every other event type on the
+      # connection. The audit log above is still written.
+      unless Dispatcher.poison?(event) do
+        bump_for_class(event)
       end
 
       {:ok, event}
     end)
+  end
+
+  defp bump_for_class(event) do
+    case classify(event.delivery_metadata || %{}) do
+      :transport ->
+        bump_and_maybe_suspend(
+          AshIntegration.connection_resource(),
+          event.connection_id,
+          "transport"
+        )
+
+      :response ->
+        bump_and_maybe_suspend(
+          AshIntegration.subscription_resource(),
+          event.subscription_id,
+          "response"
+        )
+    end
   end
 
   defp classify(metadata) do
@@ -85,11 +98,11 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
     threshold = AshIntegration.auto_suspension_threshold()
 
     if new_count >= threshold and not suspended do
-      Logger.warning(
-        "Auto-suspending #{kind_label(resource)} #{id} after #{new_count} consecutive " <>
-          "#{kind} failures"
-      )
-
+      # Filtered (atomic) suspend: `suspended == false` is the real guard, not the
+      # `not suspended` value read by the increment above. Two concurrent
+      # threshold-crossers both see `false` there; the filter lets exactly ONE
+      # update match, so only the winner logs/telemetries the suspension — the loser
+      # matches no row and is a clean no-op.
       resource
       |> Ash.get!(id, authorize?: false)
       |> Ash.Changeset.for_update(
@@ -97,7 +110,20 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
         %{reason: "Auto-suspended: #{new_count} consecutive #{kind} failures"},
         authorize?: false
       )
-      |> Ash.update!(authorize?: false)
+      |> Ash.Changeset.filter(Ash.Expr.expr(suspended == false))
+      |> Ash.update(authorize?: false)
+      |> case do
+        {:ok, _record} ->
+          Logger.warning(
+            "Auto-suspending #{kind_label(resource)} #{id} after #{new_count} consecutive " <>
+              "#{kind} failures"
+          )
+
+        # No row matched the `suspended == false` filter: a concurrent crosser won
+        # the race and already suspended it. Nothing to do (and nothing to log).
+        {:error, _stale} ->
+          :ok
+      end
     end
   end
 

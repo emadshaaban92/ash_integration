@@ -172,6 +172,15 @@ critical path, `produce` running **once instead of once-per-subscription** is a 
 reduction in work. (A "lite produce + async enrich" fallback exists per-producer if
 a heavy `produce` makes the write too slow; §14.)
 
+**Capture-failure blast radius.** Capture runs in the source transaction, so a
+failure (a raising `produce`/`event_key`, a failed bulk insert) **rolls back the
+host's business action** — the price of outbox integrity. An event opts out per
+declaration with `capture_isolation? true`: a `produce`/`event_key` failure for
+that event is caught, logged, and surfaced on `[:ash_integration, :capture,
+:isolated_failure]` telemetry, and the event is **dropped** while the business
+action commits (availability over outbox completeness; the shared bulk insert
+remains all-or-nothing).
+
 ## 6. The dispatch relay
 
 Fan-out — turning an `Event` into `EventDelivery` rows — runs on a driver-independent
@@ -405,6 +414,23 @@ all failures at the connection would let one bad type suspend everything
 failure defaults to `response` (narrower blast radius). Threshold default 50.
 Kafka rarely trips the subscription counter (the broker accepts bytes without
 semantic validation).
+
+Two details keep the counter honest:
+
+- **No double-penalty on the terminal attempt.** The attempt that tips a delivery
+  into poison (`attempts >= delivery max_attempts`) does **not** bump the
+  suspension counter — that row is already stuck `:scheduled` blocking its own lane
+  forever (§9), so also suspending the whole connection/subscription on top would
+  punish twice. The audit log row is still written.
+- **Atomic auto-suspend.** Crossing the threshold suspends via a **filtered
+  update** (`suspended == false`), so two concurrent threshold-crossers don't both
+  log/telemetry a suspension — exactly one update matches; the loser is a clean
+  no-op.
+
+A blank signing-secret never fails silently: if a connection has a *present-but-empty*
+`signing_secret`, the delivery is sent unsigned but emits a warning +
+`[:ash_integration, :signing, :blank_secret]` telemetry (§11) rather than silently
+shipping without a signature.
 
 A suspended subscription holding a lane's oldest event **parks that key's lane**
 until it recovers — the §8 head-of-line tradeoff extended to suspension:

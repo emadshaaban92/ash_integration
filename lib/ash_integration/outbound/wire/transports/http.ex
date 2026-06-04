@@ -15,6 +15,20 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
   alias AshIntegration.Transport.Utils
 
   @impl true
+  def deliver(_connection, %{subscription: %Ash.NotLoaded{}}) do
+    # The HTTP transport reads the per-route timeout live from `event.subscription`.
+    # A caller that forgot the preload should get a classified, non-retryable error
+    # — not an `Ash.NotLoaded` crash that tears down the delivery batcher.
+    {:error,
+     %{
+       failure_class: :transport,
+       retryable: false,
+       error_message:
+         "event.subscription was not loaded before delivery (load [:subscription] " <>
+           "on the EventDelivery first)"
+     }}
+  end
+
   def deliver(connection, event) do
     %Ash.Union{type: :http, value: config} = connection.transport_config
     delivery = event.delivery

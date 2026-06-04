@@ -240,21 +240,25 @@ defmodule AshIntegration.Outbound.Declare.Registry do
   Returns the orphaned subscriptions. Resilient: if the catalog or the DB can't
   be read at boot (e.g. migrations not yet run), it warns once and returns `[]`.
   """
+  # Cap on the number of orphans logged individually before collapsing the rest
+  # into one summary line — a misconfigured environment could orphan thousands of
+  # subscriptions, and one Logger line each would flood the boot log.
+  @orphan_log_limit 20
+
   def warn_orphaned_subscriptions(resources \\ source_resources()) do
     catalog = catalog(resources)
 
-    AshIntegration.subscription_resource()
-    |> Ash.read!(authorize?: false)
-    |> Enum.filter(fn sub -> not known?(catalog, sub.event_type, sub.version) end)
-    |> tap(fn orphans ->
-      Enum.each(orphans, fn sub ->
-        Logger.warning(
-          "AshIntegration: subscription #{sub.id} references unknown event " <>
-            "\"#{sub.event_type}\" v#{sub.version} — it will never match a dispatch. " <>
-            "Fix its event_type/version or remove it."
-        )
-      end)
-    end)
+    orphans =
+      AshIntegration.subscription_resource()
+      |> Ash.Query.new()
+      # Stream in pages so a large subscription table is never loaded whole into
+      # memory at boot.
+      |> Ash.stream!(batch_size: 500, authorize?: false)
+      |> Stream.filter(fn sub -> not known?(catalog, sub.event_type, sub.version) end)
+      |> Enum.to_list()
+
+    log_orphans(orphans)
+    orphans
   rescue
     e ->
       Logger.warning(
@@ -263,6 +267,29 @@ defmodule AshIntegration.Outbound.Declare.Registry do
       )
 
       []
+  end
+
+  defp log_orphans([]), do: :ok
+
+  defp log_orphans(orphans) do
+    Enum.each(Enum.take(orphans, @orphan_log_limit), fn sub ->
+      Logger.warning(
+        "AshIntegration: subscription #{sub.id} references unknown event " <>
+          "\"#{sub.event_type}\" v#{sub.version} — it will never match a dispatch. " <>
+          "Fix its event_type/version or remove it."
+      )
+    end)
+
+    extra = length(orphans) - @orphan_log_limit
+
+    if extra > 0 do
+      Logger.warning(
+        "AshIntegration: …and #{extra} more orphaned subscription(s) " <>
+          "(per-orphan logging capped at #{@orphan_log_limit})."
+      )
+    end
+
+    :ok
   end
 
   defp known?(catalog, event_type, version) do

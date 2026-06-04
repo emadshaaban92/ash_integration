@@ -60,6 +60,12 @@ defmodule AshIntegration.Outbound.Declare.Source.Info do
   @doc "The producer module for an `event`."
   def producer(%Event{producer: producer}), do: producer
 
+  @doc """
+  Whether this `event` opts into **capture isolation** — a capture failure for it
+  is caught + dropped instead of rolling back the host action. Default `false`.
+  """
+  def capture_isolation?(%Event{capture_isolation?: value}), do: value || false
+
   @doc "Supported version numbers for an `event`, sorted ascending."
   def versions(%Event{versions: versions}) do
     versions |> Enum.map(& &1.number) |> Enum.sort()

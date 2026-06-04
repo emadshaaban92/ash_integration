@@ -39,4 +39,17 @@ defmodule AshIntegration.Outbound.Wire.TransportDispatchTest do
       assert {:error, %{failure_class: :transport}} = results["e2"]
     end
   end
+
+  describe "HTTP transport with an unloaded subscription" do
+    test "returns a classified error instead of crashing on Ash.NotLoaded" do
+      event = %{subscription: %Ash.NotLoaded{type: :relationship, field: :subscription}}
+
+      assert {:error, error} =
+               AshIntegration.Outbound.Wire.Transports.Http.deliver(connection(:http), event)
+
+      assert error.failure_class == :transport
+      assert error.retryable == false
+      assert error.error_message =~ "subscription was not loaded"
+    end
+  end
 end
