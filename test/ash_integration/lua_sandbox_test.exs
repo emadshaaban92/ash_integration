@@ -1,7 +1,7 @@
 defmodule AshIntegration.LuaSandboxTest do
   use ExUnit.Case, async: true
 
-  alias AshIntegration.LuaSandbox
+  alias AshIntegration.Outbound.Delivery.LuaSandbox
 
   describe "execute/2" do
     test "returns transformed result when script sets result" do

@@ -23,13 +23,17 @@ config :example, ExampleWeb.Endpoint,
   secret_key_base: "rdjqciemeeFhAG35Yc4Za6HlE7O6bAS7pjzFNumTaTQKQQqIVi8x041t6Fy0o2Gs",
   server: false
 
-# Configure Oban for testing
-config :example, Oban, testing: :manual
+# The whole AshIntegration runtime is off in tests — no background relays, sweeper
+# or scheduler. Each test starts exactly what it exercises (e.g. an isolated relay
+# via `start_supervised!/1`, or the synchronous `drain_dispatch!`/`drain_delivery!`
+# DataCase helpers), so the async Broadway pipelines never add nondeterminism or
+# sandbox-ownership noise.
+config :ash_integration, enabled?: false
 
-config :example, start_ash_integration?: false
-
-# Route outbound delivery HTTP calls through Req.Test
-config :ash_integration, req_options: [plug: {Req.Test, AshIntegration.Workers.OutboundDelivery}]
+# Route outbound delivery HTTP calls through Req.Test (owner = the HTTP transport
+# that actually issues the request, now that the Oban delivery worker is gone).
+config :ash_integration,
+  req_options: [plug: {Req.Test, AshIntegration.Outbound.Wire.Transports.Http}]
 
 # Print only warnings and errors during test
 config :logger, level: :warning

@@ -11,7 +11,6 @@ defmodule AshIntegration.Web do
       import Phoenix.HTML
 
       alias Phoenix.LiveView.JS
-      alias AshIntegration.OutboundIntegrations.Info, as: OutboundInfo
 
       unquote(helpers())
     end
@@ -25,7 +24,6 @@ defmodule AshIntegration.Web do
       import Phoenix.HTML
 
       alias Phoenix.LiveView.JS
-      alias AshIntegration.OutboundIntegrations.Info, as: OutboundInfo
 
       unquote(helpers())
     end
@@ -33,7 +31,7 @@ defmodule AshIntegration.Web do
 
   defp helpers do
     quote do
-      defdelegate humanize(value), to: AshIntegration.Web.OutboundIntegrationLive.Helpers
+      defdelegate humanize(value), to: AshIntegration.Web.Outbound.Helpers
     end
   end
 

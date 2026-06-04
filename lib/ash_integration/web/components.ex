@@ -15,6 +15,46 @@ defmodule AshIntegration.Web.Components do
     """
   end
 
+  attr :active, :atom,
+    required: true,
+    doc:
+      "which section is current: :dashboard | :subscriptions | :event_types | :connections | :events | :deliveries | :logs"
+
+  @nav_items [
+    {:dashboard, "Dashboard", ""},
+    {:subscriptions, "Subscriptions", "/subscriptions"},
+    {:event_types, "Event Types", "/event-types"},
+    {:connections, "Connections", "/connections"},
+    {:events, "Events", "/events"},
+    {:deliveries, "Deliveries", "/deliveries"},
+    {:logs, "Logs", "/logs"}
+  ]
+
+  @doc """
+  The outbound section sub-nav, rendered at the top of every integration page.
+
+  The hierarchy it exposes mirrors the data model:
+  *Subscriptions* + *Connections* are config; *Event Types* is the derived contract;
+  *Events* (the immutable fact / outbox) → *Deliveries* (per-subscription state
+  machine) → *Logs* (per-attempt) are the runtime/ops drill-down.
+  """
+  def outbound_nav(assigns) do
+    assigns = assign(assigns, base: AshIntegration.Web.base_path(), items: @nav_items)
+
+    ~H"""
+    <nav role="tablist" class="tabs tabs-border mb-4 overflow-x-auto flex-nowrap">
+      <.link
+        :for={{key, label, suffix} <- @items}
+        role="tab"
+        navigate={@base <> suffix}
+        class={["tab whitespace-nowrap", @active == key && "tab-active"]}
+      >
+        {label}
+      </.link>
+    </nav>
+    """
+  end
+
   slot :inner_block, required: true
   slot :subtitle
   slot :actions
@@ -122,6 +162,84 @@ defmodule AshIntegration.Web.Components do
         </button>
       </div>
     </div>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :mono, :boolean, default: false
+  slot :inner_block, required: true
+
+  @doc "A labelled value cell, shared by the outbound detail (show) pages."
+  def field(assigns) do
+    ~H"""
+    <div>
+      <div class="text-base-content/50">{@label}</div>
+      <div class={["font-medium break-all", @mono && "font-mono text-xs"]}>
+        {render_slot(@inner_block)}
+      </div>
+    </div>
+    """
+  end
+
+  attr :title, :string, required: true
+  attr :data, :any, required: true
+
+  @doc "Pretty-printed JSON panel; hidden when the data is nil/empty."
+  def json_block(assigns) do
+    ~H"""
+    <div :if={@data not in [nil, %{}]} class="mb-4">
+      <div class="text-sm font-medium mb-1">{@title}</div>
+      <pre class="bg-base-200 rounded-box p-3 text-xs overflow-x-auto"><code>{Jason.encode!(@data, pretty: true)}</code></pre>
+    </div>
+    """
+  end
+
+  attr :title, :string, required: true
+  attr :text, :any, required: true
+
+  @doc "Monospace text panel; hidden when the text is nil/empty."
+  def text_block(assigns) do
+    ~H"""
+    <div :if={@text not in [nil, ""]} class="mb-4">
+      <div class="text-sm font-medium mb-1">{@title}</div>
+      <pre class="bg-base-200 rounded-box p-3 text-xs overflow-x-auto"><code>{@text}</code></pre>
+    </div>
+    """
+  end
+
+  attr :name, :string, required: true
+  attr :label, :string, required: true
+  attr :prompt, :string, required: true
+  attr :options, :list, required: true, doc: "[{value, label}] pairs"
+  attr :selected, :any, default: nil
+
+  @doc "A labelled filter `<select>` shared by the outbound index (all) pages."
+  def filter_select(assigns) do
+    ~H"""
+    <label class="form-control">
+      <span class="label-text text-xs mb-1">{@label}</span>
+      <select name={@name} class="select select-sm select-bordered">
+        <option value="">{@prompt}</option>
+        <option
+          :for={{value, label} <- @options}
+          value={value}
+          selected={to_string(value) == to_string(@selected)}
+        >
+          {label}
+        </option>
+      </select>
+    </label>
+    """
+  end
+
+  attr :navigate, :string, required: true
+
+  @doc "Removable badge shown when an index page is scoped to a single subscription."
+  def subscription_filter_badge(assigns) do
+    ~H"""
+    <.link navigate={@navigate} class="badge badge-info gap-1">
+      Subscription filter <.icon name="hero-x-mark-mini" class="size-3" />
+    </.link>
     """
   end
 
@@ -301,5 +419,5 @@ defmodule AshIntegration.Web.Components do
   end
 
   defp humanize(value),
-    do: AshIntegration.Web.OutboundIntegrationLive.Helpers.humanize(value)
+    do: AshIntegration.Web.Outbound.Helpers.humanize(value)
 end

@@ -2,9 +2,11 @@ defmodule Example.Integration do
   use Ash.Domain
 
   resources do
-    resource Example.Integration.OutboundIntegration
-    resource Example.Integration.OutboundIntegrationLog
-    resource Example.Integration.OutboundIntegrationEvent
+    resource Example.Outbound.Connection
+    resource Example.Outbound.Subscription
+    resource Example.Outbound.Event
+    resource Example.Outbound.EventDelivery
+    resource Example.Outbound.Log
   end
 
   authorization do

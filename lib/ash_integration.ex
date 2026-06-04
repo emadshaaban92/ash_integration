@@ -1,21 +1,48 @@
 defmodule AshIntegration do
   @moduledoc """
-  Spark DSL extension for integration-oriented Ash resource metadata.
+  Configuration entry point for the event-first outbound pipeline.
 
-  The initial surface is the `outbound_integrations` section, which declares
-  which resource actions can be published to outbound integrations and which
-  loader module owns their payload generation.
-
-  ## Configuration
+  Host apps wire their own resources (carrying the `AshIntegration.Outbound.*`
+  extensions) and shared infrastructure by config:
 
       config :ash_integration,
         otp_app: :my_app,
-        outbound_integration_resource: MyApp.Integration.OutboundIntegration,
-        outbound_integration_log_resource: MyApp.Integration.OutboundIntegrationLog,
+        connection_resource: MyApp.Outbound.Connection,
+        subscription_resource: MyApp.Outbound.Subscription,
+        event_resource: MyApp.Outbound.Event,
+        event_delivery_resource: MyApp.Outbound.EventDelivery,
+        delivery_log_resource: MyApp.Outbound.Log,
+        source_domains: [MyApp.Catalog],
         domain: MyApp.Integration,
         repo: MyApp.Repo,
         actor_resource: MyApp.Accounts.User,
         vault: MyApp.Vault
+
+  Per-stage tuning lives under a nested key owned by that stage (each stage
+  validates its own slice at boot via NimbleOptions). For example the dispatch
+  stage (`AshIntegration.Outbound.Dispatch.Supervisor`):
+
+      config :ash_integration,
+        dispatch: [
+          concurrency:      System.schedulers_online(),
+          poll_interval_ms: 250,
+          batch_size:       100,
+          max_attempts:     20
+        ],
+        delivery: [
+          concurrency:      25,
+          poll_interval_ms: 250,
+          batch_size:       100,
+          max_attempts:     20,
+          backoff_base_ms:    1_000,
+          backoff_max_ms:   300_000
+        ],
+        retention: [
+          interval_ms:   :timer.minutes(1),
+          delete_limit:  500,
+          delivery_days: 90,
+          event_days:    365
+        ]
 
   """
 
@@ -23,18 +50,6 @@ defmodule AshIntegration do
 
   def otp_app do
     Keyword.fetch!(config(), :otp_app)
-  end
-
-  def outbound_integration_resource do
-    Keyword.fetch!(config(), :outbound_integration_resource)
-  end
-
-  def outbound_integration_log_resource do
-    Keyword.fetch!(config(), :outbound_integration_log_resource)
-  end
-
-  def outbound_integration_event_resource do
-    Keyword.fetch!(config(), :outbound_integration_event_resource)
   end
 
   def domain do
@@ -53,57 +68,81 @@ defmodule AshIntegration do
     Keyword.fetch!(config(), :vault)
   end
 
-  def auto_suspension_threshold do
-    Keyword.get(config(), :auto_suspension_threshold, 50)
+  @doc """
+  Whether `AshIntegration.Supervisor` runs the library's background pipeline
+  (dispatch relay, retention sweeper, delivery scheduler/guardian, Kafka client
+  manager, boot checks). Defaults to `true`; set `false` to keep the whole runtime
+  out of the supervised tree.
+
+  This is the single on/off for the runtime — there are no per-stage toggles. Tests
+  set `enabled?: false` and start exactly the pieces they exercise. A host that
+  needs heterogeneous placement (e.g. the relay on one node pool, retention on
+  another) composes the individual stage modules (`Outbound.Dispatch.Supervisor`,
+  `Outbound.Retention`, …) into their own tree directly instead of using this
+  umbrella supervisor.
+  """
+  def enabled? do
+    Keyword.get(config(), :enabled?, true)
   end
 
-  def outbound_integration_log_retention_days do
-    Keyword.get(config(), :outbound_integration_log_retention_days, 90)
+  # The runtime pipeline now started by `AshIntegration.Supervisor`: the dispatch
+  # relay, the delivery scheduler, the delivery relay, the retention sweeper, the
+  # Kafka client manager, and the boot checks. (The per-delivery Oban worker and the
+  # DeliveryGuardian were removed — the delivery relay claims `:scheduled` rows
+  # directly and a soft lease replaces orphan reconciliation.)
+
+  # ── Event-first persistence resources (Outbound.* extensions) ─────────────
+  # Host-owned resources carrying the `AshIntegration.Outbound.*` extensions.
+
+  def connection_resource do
+    Keyword.fetch!(config(), :connection_resource)
+  end
+
+  def subscription_resource do
+    Keyword.fetch!(config(), :subscription_resource)
+  end
+
+  @doc "The immutable `Event` (the fact) — captured once in the source txn."
+  def event_resource do
+    Keyword.fetch!(config(), :event_resource)
+  end
+
+  @doc "The per-subscription `EventDelivery` (the delivery state machine)."
+  def event_delivery_resource do
+    Keyword.fetch!(config(), :event_delivery_resource)
+  end
+
+  def delivery_log_resource do
+    Keyword.fetch!(config(), :delivery_log_resource)
+  end
+
+  @doc """
+  Domains scanned to build the event-first source registry
+  (`AshIntegration.Outbound.Declare.Registry`). Each domain's resources are filtered to
+  those carrying the `AshIntegration.Outbound.Declare.Source` extension.
+  """
+  def source_domains do
+    Keyword.get(config(), :source_domains, [])
+  end
+
+  def auto_suspension_threshold do
+    Keyword.get(config(), :auto_suspension_threshold, 50)
   end
 
   def http_max_timeout_ms do
     Keyword.get(config(), :http_max_timeout_ms, 60_000)
   end
 
-  @outbound_action %Spark.Dsl.Entity{
-    name: :outbound_action,
-    describe: "Declares an action that can trigger outbound integrations.",
-    target: AshIntegration.OutboundIntegrations.Action,
-    args: [:name],
-    identifier: :name,
-    schema: [
-      name: [
-        type: :atom,
-        required: true,
-        doc: "The Ash action name exposed to outbound integrations."
-      ]
-    ]
-  }
+  # ── Retention stage ───────────────────────────────────────────────────────
+  # The retention sweeper owns and validates its own configuration under the
+  # nested `:retention` key — see `AshIntegration.Outbound.Retention` for the
+  # schema, defaults, and windows. Not surfaced here (each stage owns its config).
 
-  @outbound_integrations %Spark.Dsl.Section{
-    name: :outbound_integrations,
-    describe: "Declare outbound integration metadata for an Ash resource.",
-    schema: [
-      resource_identifier: [
-        type: :string,
-        required: true,
-        doc: "Stable external identifier used by outbound integrations."
-      ],
-      loader: [
-        type: :atom,
-        required: true,
-        doc: "Loader module that builds outbound payloads for this resource."
-      ],
-      supported_versions: [
-        type: {:wrap_list, :integer},
-        required: true,
-        doc: "Schema versions supported for this resource's outbound payload."
-      ]
-    ],
-    entities: [@outbound_action]
-  }
-
-  use Spark.Dsl.Extension,
-    sections: [@outbound_integrations],
-    transformers: [AshIntegration.Transformer]
+  # ── Dispatch & delivery stages ────────────────────────────────────────────
+  # Each pipeline stage owns and validates its own configuration under a nested key
+  # — see `AshIntegration.Outbound.Dispatch.Supervisor` (`:dispatch`) and
+  # `AshIntegration.Outbound.Delivery.Supervisor` (`:delivery`, which also owns the
+  # delivery poison ceiling `max_attempts` and the durable backoff knobs). They are
+  # intentionally NOT surfaced here: this module doesn't become a god-module of every
+  # knob.
 end

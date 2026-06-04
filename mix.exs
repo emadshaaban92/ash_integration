@@ -55,10 +55,10 @@ defmodule AshIntegration.MixProject do
       {:ash_cloak, "~> 0.2"},
       {:ash_phoenix, "~> 2.0"},
       {:spark, "~> 2.0"},
-      {:oban, "~> 2.0"},
+      {:broadway, "~> 1.0"},
+      {:nimble_options, "~> 1.0"},
       {:req, "~> 0.5"},
       {:brod, "~> 4.0", optional: true},
-      {:protobuf, "~> 0.13", optional: true},
       {:lua, "~> 0.4"},
       {:jason, "~> 1.0"},
       {:phoenix, "~> 1.7"},
@@ -84,10 +84,10 @@ defmodule AshIntegration.MixProject do
       main: "readme",
       extras: [
         "README.md",
-        "guides/loaders.md",
+        "guides/delivery-pipeline.md",
+        "guides/producers.md",
         "guides/http-transport.md",
-        "guides/kafka-transport.md",
-        "guides/grpc-transport.md"
+        "guides/kafka-transport.md"
       ],
       groups_for_extras: [
         Guides: ~r/guides\/.*/
