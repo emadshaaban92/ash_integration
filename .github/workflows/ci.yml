@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs for the same ref when a new commit is pushed.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MIX_ENV: test
+
+jobs:
+  build:
+    name: Compile · Format · Test · Audit
+    runs-on: ubuntu-latest
+
+    # Keep this in sync with the `elixir: "~> 1.19"` requirement in mix.exs.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir: "1.19"
+            otp: "28"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir / OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Check for unused dependencies in mix.lock
+        run: mix deps.unlock --check-unused
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      # The remaining checks are independent, so run all of them even if an
+      # earlier one fails — that way a single CI run surfaces every problem.
+      - name: Check formatting
+        if: ${{ !cancelled() }}
+        run: mix format --check-formatted
+
+      - name: Run tests
+        if: ${{ !cancelled() }}
+        run: mix test --warnings-as-errors
+
+      - name: Static analysis (Credo)
+        if: ${{ !cancelled() }}
+        run: mix credo
+
+      - name: Security analysis (Sobelow)
+        if: ${{ !cancelled() }}
+        run: mix sobelow
+
+      - name: Dependency vulnerability audit (mix deps.audit)
+        if: ${{ !cancelled() }}
+        run: mix deps.audit
+
+      - name: Retired package audit (mix hex.audit)
+        if: ${{ !cancelled() }}
+        run: mix hex.audit
