@@ -15,9 +15,8 @@ defmodule Example.Application do
         {Phoenix.PubSub, name: Example.PubSub},
         Example.Vault
       ] ++
-        ash_integration_children() ++
         [
-          {Oban, Application.fetch_env!(:example, Oban)},
+          AshIntegration.Supervisor,
           ExampleWeb.Endpoint,
           {AshAuthentication.Supervisor, [otp_app: :example]}
         ]
@@ -26,14 +25,6 @@ defmodule Example.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Example.Supervisor]
     Supervisor.start_link(children, opts)
-  end
-
-  defp ash_integration_children do
-    if Application.get_env(:example, :start_ash_integration?, true) do
-      [AshIntegration.Supervisor]
-    else
-      []
-    end
   end
 
   # Tell Phoenix to update the endpoint configuration

@@ -2,21 +2,11 @@ defmodule Example.Catalog.Product do
   use Ash.Resource,
     domain: Example.Catalog,
     data_layer: AshPostgres.DataLayer,
-    extensions: [AshIntegration],
     authorizers: [Ash.Policy.Authorizer]
 
   postgres do
     table "products"
     repo Example.Repo
-  end
-
-  outbound_integrations do
-    resource_identifier("product")
-    loader(Example.Loaders.ProductLoader)
-    supported_versions([1])
-
-    outbound_action(:create)
-    outbound_action(:update)
   end
 
   actions do

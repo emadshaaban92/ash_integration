@@ -34,3 +34,5 @@ ash_integration-*.tar
 .elixir_ls
 .devcontainer/.env
 .env
+
+.DS_Store

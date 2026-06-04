@@ -107,29 +107,16 @@ config :phoenix, :json_library, Jason
 
 config :ash_integration,
   otp_app: :example,
-  outbound_integration_resource: Example.Integration.OutboundIntegration,
-  outbound_integration_log_resource: Example.Integration.OutboundIntegrationLog,
-  outbound_integration_event_resource: Example.Integration.OutboundIntegrationEvent,
+  connection_resource: Example.Outbound.Connection,
+  subscription_resource: Example.Outbound.Subscription,
+  event_resource: Example.Outbound.Event,
+  event_delivery_resource: Example.Outbound.EventDelivery,
+  delivery_log_resource: Example.Outbound.Log,
+  source_domains: [Example.Catalog],
   domain: Example.Integration,
   repo: Example.Repo,
   actor_resource: Example.Accounts.User,
   vault: Example.Vault
-
-config :example, Oban,
-  engine: Oban.Engines.Basic,
-  notifier: Oban.Notifiers.PG,
-  queues: [
-    integration_dispatch: 10,
-    integration_delivery: 20,
-    maintenance: 2
-  ],
-  repo: Example.Repo,
-  plugins: [
-    {Oban.Plugins.Cron,
-     crontab: [
-       {"0 3 * * *", AshIntegration.Workers.OutboundIntegrationLogCleanup}
-     ]}
-  ]
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

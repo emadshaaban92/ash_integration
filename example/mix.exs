@@ -74,16 +74,14 @@ defmodule Example.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:igniter, "~> 0.5", only: [:dev, :test]},
-      {:oban, "~> 2.0"},
       {:live_select, "~> 1.0"},
       {:lua, "~> 0.4"},
       {:tidewave, "~> 0.1", only: [:dev]},
       {:ash_integration, path: ".."},
       {:cloak, "~> 1.1"},
       {:picosat_elixir, "~> 0.2"},
-      # Optional transports — add these to enable Kafka and gRPC in the dashboard
-      {:brod, "~> 4.0"},
-      {:protobuf, "~> 0.13"}
+      # Optional transports — add this to enable Kafka in the dashboard
+      {:brod, "~> 4.0"}
     ]
   end
 

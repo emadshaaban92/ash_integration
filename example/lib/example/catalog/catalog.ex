@@ -3,6 +3,8 @@ defmodule Example.Catalog do
 
   resources do
     resource Example.Catalog.Product
+    resource Example.Catalog.Widget
+    resource Example.Catalog.StockItem
   end
 
   authorization do

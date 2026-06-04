@@ -1,1 +1,24 @@
-[exit: :low, format: "txt", ignore_files: [], ignore: ["Config.HTTPS", "Config.CSRFRoute"], out: nil, private: false, router: nil, skip: true, threshold: :low, verbose: false, version: false]
+# Sobelow configuration (auto-loaded by `mix sobelow`; no `--config` flag needed).
+#
+# This package is a LIBRARY: it ships dashboard LiveViews but defines no
+# Phoenix router or endpoint of its own (the host app mounts them and owns the
+# router). Sobelow's router/endpoint-level web checks therefore have nothing to
+# scan here and are ignored below — the consuming app must run Sobelow against
+# its own router to get CSRF/headers/CSP/HTTPS coverage.
+#
+# `skip: true` honours inline `# sobelow_skip [...]` annotations (see
+# KafkaClientManager.client_id_for/1). `exit: :low` fails CI on any finding at
+# or above the :low threshold.
+[
+  exit: :low,
+  format: "txt",
+  ignore_files: [],
+  ignore: ["Config.CSRF", "Config.CSRFRoute", "Config.Headers", "Config.CSP", "Config.HTTPS"],
+  out: nil,
+  private: false,
+  router: nil,
+  skip: true,
+  threshold: :low,
+  verbose: false,
+  version: false
+]
