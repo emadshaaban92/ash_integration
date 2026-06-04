@@ -19,9 +19,17 @@ defmodule AshIntegration.Supervisor do
   @impl true
   def init(_opts) do
     if AshIntegration.enabled?() do
-      # Boot verifier: reject cross-mention event-schema conflicts at startup
-      # rather than lazily at first dispatch. One scan of the source_domains.
+      # Boot verifier: reject cross-mention event-schema conflicts + missing
+      # producer callbacks at startup rather than lazily at first dispatch. One
+      # scan of the source_domains.
       AshIntegration.Outbound.Declare.Registry.verify!()
+
+      # Build the derived registry once into :persistent_term so dispatch batches,
+      # subscription writes, and LiveView renders read it instead of re-scanning the
+      # domains on every call.
+      AshIntegration.Outbound.Declare.Registry.warm()
+
+      warn_if_catalog_empty()
 
       children = [
         AshIntegration.Transport.KafkaClientManager,
@@ -55,6 +63,24 @@ defmodule AshIntegration.Supervisor do
       Supervisor.init(children, strategy: :one_for_one)
     else
       :ignore
+    end
+  end
+
+  # The runtime is enabled but no resource declares an `outbound_events` block — so
+  # nothing will ever be captured or delivered. Almost always a misconfiguration
+  # (forgotten `source_domains`, the extension not attached). Warn loudly; don't
+  # crash (a host may legitimately stage the runtime before wiring sources).
+  defp warn_if_catalog_empty do
+    if AshIntegration.Outbound.Declare.Registry.catalog() == %{} do
+      require Logger
+
+      Logger.warning(
+        "AshIntegration: the runtime is enabled but the event catalog is EMPTY — no " <>
+          "resource declares an `outbound_events` block in `source_domains` " <>
+          "(#{inspect(AshIntegration.source_domains())}). No events will be captured " <>
+          "or delivered. Check `:source_domains` and that the " <>
+          "`AshIntegration.Outbound.Declare.Source` extension is attached."
+      )
     end
   end
 end

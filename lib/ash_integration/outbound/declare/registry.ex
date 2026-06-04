@@ -41,19 +41,88 @@ defmodule AshIntegration.Outbound.Declare.Registry do
     |> Enum.filter(&Info.source?/1)
   end
 
+  @cache_key {__MODULE__, :snapshot}
+
   @doc """
   The `Producer` module for `event_type` (the module that captures + projects it).
   All resources declaring the type must name the same producer — checked by
   `verify!/1` — so the first mention is canonical. Returns `nil` if unknown.
+
+  The no-arg form is an **O(1) map lookup** off the cached snapshot, not a domain
+  scan; pass an explicit resource list (tests) to derive it uncached.
   """
-  def producer_for(event_type, resources \\ source_resources()) do
-    Enum.find_value(triggers(resources), fn {_key, triggers} ->
+  def producer_for(event_type), do: Map.get(cached().producers, event_type)
+
+  def producer_for(event_type, resources) do
+    Enum.find_value(build_triggers(resources), fn {_key, triggers} ->
       Enum.find_value(triggers, fn t -> if t.event_type == event_type, do: t.producer end)
     end)
   end
 
   @doc "`{resource, action} => [trigger]` — the change-capture side of the registry."
-  def triggers(resources \\ source_resources()) do
+  def triggers, do: cached().triggers
+  def triggers(resources), do: build_triggers(resources)
+
+  @doc """
+  `event_type => %{versions: [version], producers: [{resource, action}]}` — the
+  derived catalog the form and dispatcher read. `versions` is the sorted union of
+  every declaration's supported version numbers.
+
+  Does **not** run `verify!/1`: the producer-consistency invariant is a code-level
+  check run once at boot (`AshIntegration.Supervisor`), so re-verifying on every
+  catalog read — which happens on each subscription create/update — would be
+  wasted work.
+  """
+  def catalog, do: cached().catalog
+  def catalog(resources), do: build_catalog(resources)
+
+  # ── Boot-built cache (the DSL is compile-time, so the derived registry is
+  # immutable for the running system). `catalog/0` / `triggers/0` / `producer_for/1`
+  # rebuilt from a full domain scan on every dispatch batch, subscription write, and
+  # LiveView render; instead we compute the snapshot once and read it from
+  # `:persistent_term`. ──────────────────────────────────────────────────────────
+
+  @doc """
+  Build the derived snapshot and store it in `:persistent_term`. Called once at
+  boot (`AshIntegration.Supervisor`); idempotent, safe to re-run after a hot
+  upgrade.
+  """
+  def warm, do: build_and_store(source_resources())
+
+  @doc "Drop the cached snapshot (next read rebuilds). For tests/hot-reload."
+  def reset_cache, do: :persistent_term.erase(@cache_key)
+
+  @doc false
+  # The full derived snapshot: the two views plus an `event_type => producer` map
+  # for O(1) `producer_for/1`.
+  def build(resources \\ source_resources()) do
+    triggers = build_triggers(resources)
+
+    %{
+      triggers: triggers,
+      catalog: build_catalog(resources),
+      producers: producers_from_triggers(triggers)
+    }
+  end
+
+  defp cached do
+    case :persistent_term.get(@cache_key, nil) do
+      nil -> build_and_store(source_resources())
+      snapshot -> snapshot
+    end
+  end
+
+  defp build_and_store(resources) do
+    snapshot = build(resources)
+    :persistent_term.put(@cache_key, snapshot)
+    snapshot
+  end
+
+  defp producers_from_triggers(triggers) do
+    for {_key, ts} <- triggers, t <- ts, into: %{}, do: {t.event_type, t.producer}
+  end
+
+  defp build_triggers(resources) do
     for resource <- resources,
         event <- Info.events(resource),
         action <- Info.actions(event),
@@ -69,17 +138,7 @@ defmodule AshIntegration.Outbound.Declare.Registry do
     end
   end
 
-  @doc """
-  `event_type => %{versions: [version], producers: [{resource, action}]}` — the
-  derived catalog the form and dispatcher read. `versions` is the sorted union of
-  every declaration's supported version numbers.
-
-  Does **not** run `verify!/1`: the producer-consistency invariant is a code-level
-  check run once at boot (`AshIntegration.Supervisor`), so re-verifying on every
-  catalog read — which happens on each subscription create/update — would be
-  wasted work.
-  """
-  def catalog(resources \\ source_resources()) do
+  defp build_catalog(resources) do
     for resource <- resources,
         event <- Info.events(resource),
         reduce: %{} do
@@ -126,22 +185,38 @@ defmodule AshIntegration.Outbound.Declare.Registry do
 
     Enum.each(by_type, fn {type, producers} ->
       case Enum.uniq(producers) do
-        [producer] -> verify_project_required!(type, producer)
+        [producer] -> verify_callbacks!(type, producer)
         many -> raise conflicting_producers_error(type, many)
       end
     end)
   end
 
-  defp verify_project_required!(type, producer) do
+  # Every required producer callback must be exported, asserted at boot.
+  # `produce/3` and `event_key/2` run on the host's business-write critical path
+  # (capture), and `project/3` decides fan-out — a missing one compiles fine but
+  # crashes that write (or silently fails to deliver) at runtime. `example/1`
+  # backs the preview/test surface. Failing loudly here turns a latent runtime
+  # crash into a dev/CI boot error.
+  @required_callbacks [produce: 3, event_key: 2, project: 3, example: 1]
+
+  defp verify_callbacks!(type, producer) do
     Code.ensure_loaded(producer)
 
-    unless function_exported?(producer, :project, 3) do
+    missing =
+      for {fun, arity} <- @required_callbacks,
+          not function_exported?(producer, fun, arity),
+          do: "#{fun}/#{arity}"
+
+    unless missing == [] do
       raise """
-      Event type #{inspect(type)} is produced by #{inspect(producer)}, which does not \
-      implement the required `project/3` callback. Every event type must state who \
-      receives it (even "everyone" — a one-line `def project(events, _subs, _ctx), do: \
-      Map.new(events, &{&1.id, :deliver})`); omission is not allowed, so a private \
-      event can't broadcast by mistake.
+      Event type #{inspect(type)} is produced by #{inspect(producer)}, which is \
+      missing required callback(s): #{Enum.join(missing, ", ")}.
+
+      A `Producer` must implement all of produce/3, event_key/2, project/3, and \
+      example/1 (`use AshIntegration.Outbound.Declare.Producer`). produce/3 and \
+      event_key/2 run during capture on the source action's critical path; project/3 \
+      decides who receives the event (omission is never "deliver"); example/1 backs \
+      the preview/test surface.
       """
     end
   end

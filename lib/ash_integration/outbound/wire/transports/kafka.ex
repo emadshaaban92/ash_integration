@@ -115,7 +115,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
              topic,
              producer_config
            ),
-         partition_count <- resolve_partition_count(client_id, topic),
+         {:ok, partition_count} <- resolve_partition_count(client_id, topic),
          partition = Utils.partition_for(message.key, partition_count),
          {:ok, offset} <-
            :brod.produce_sync_offset(client_id, topic, partition, <<>>, message) do
@@ -160,10 +160,26 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
     end
   end
 
+  # The partition count drives murmur2 key→partition selection. If brod can't read
+  # it (metadata not yet refreshed, broker transiently unavailable), DO NOT default
+  # to partition 0 — that silently routes every key to one partition and breaks
+  # per-key ordering on a multi-partition topic. Surface a retryable transport
+  # error so the delivery is retried (and the connection counter tracks it) once
+  # metadata is available.
   defp resolve_partition_count(client_id, topic) do
     case :brod.get_partitions_count(client_id, topic) do
-      {:ok, count} -> count
-      {:error, _} -> 1
+      {:ok, count} ->
+        {:ok, count}
+
+      {:error, reason} ->
+        {:error,
+         %{
+           failure_class: :transport,
+           error_message:
+             "Could not resolve partition count for topic #{inspect(topic)}: " <>
+               "#{Utils.scrub_reason(reason)}",
+           retryable: true
+         }}
     end
   end
 

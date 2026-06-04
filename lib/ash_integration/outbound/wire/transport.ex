@@ -56,11 +56,42 @@ defmodule AshIntegration.Outbound.Wire.Transport do
 
   @doc """
   Deliver `event` to `connection` over its configured transport.
+
+  An unsupported transport tag (notably a legacy `:grpc` row left over from before
+  gRPC was removed) returns a friendly, classified `:transport` error instead of
+  crashing the delivery worker with a `FunctionClauseError`.
   """
   @spec deliver(struct(), struct()) :: {:ok, success()} | {:error, error()}
   def deliver(connection, event) do
-    %Ash.Union{type: type} = connection.transport_config
-    module_for(type).deliver(connection, event)
+    case connection.transport_config do
+      %Ash.Union{type: type} when type in [:http, :kafka] ->
+        module_for(type).deliver(connection, event)
+
+      %Ash.Union{type: type} ->
+        {:error, unsupported_transport_error(type)}
+    end
+  end
+
+  # gRPC was removed; a persisted connection may still carry a `:grpc`
+  # transport_config. Reject it loudly-but-gracefully (non-retryable — it won't fix
+  # itself) so the delivery records a clear error and suspends rather than crashing.
+  defp unsupported_transport_error(:grpc) do
+    %{
+      failure_class: :transport,
+      retryable: false,
+      error_message:
+        "The gRPC transport was removed. This connection's transport_config still " <>
+          "carries a :grpc tag — migrate it to :http or :kafka (see the upgrade guide)."
+    }
+  end
+
+  defp unsupported_transport_error(type) do
+    %{
+      failure_class: :transport,
+      retryable: false,
+      error_message:
+        "Unsupported transport #{inspect(type)}; valid transports are :http and :kafka."
+    }
   end
 
   @doc """
@@ -77,13 +108,19 @@ defmodule AshIntegration.Outbound.Wire.Transport do
   """
   @spec deliver_batch(struct(), [struct()]) :: batch_results()
   def deliver_batch(connection, events) do
-    %Ash.Union{type: type} = connection.transport_config
-    module = module_for(type)
+    case connection.transport_config do
+      %Ash.Union{type: type} when type in [:http, :kafka] ->
+        module = module_for(type)
 
-    if function_exported?(module, :deliver_batch, 2) do
-      apply(module, :deliver_batch, [connection, events])
-    else
-      Map.new(events, fn event -> {event.id, module.deliver(connection, event)} end)
+        if function_exported?(module, :deliver_batch, 2) do
+          apply(module, :deliver_batch, [connection, events])
+        else
+          Map.new(events, fn event -> {event.id, module.deliver(connection, event)} end)
+        end
+
+      %Ash.Union{type: type} ->
+        error = {:error, unsupported_transport_error(type)}
+        Map.new(events, fn event -> {event.id, error} end)
     end
   end
 end

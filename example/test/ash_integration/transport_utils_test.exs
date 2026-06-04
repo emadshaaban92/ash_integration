@@ -45,6 +45,31 @@ defmodule AshIntegration.TransportUtilsTest do
     end
   end
 
+  describe "partition_for/2 (Kafka murmur2)" do
+    # Vectors from Kafka's reference partitioner (org.apache.kafka...DefaultPartitioner),
+    # cross-checked against kafka-python's Java-compatibility suite:
+    # toPositive(murmur2(key)) % 1000.
+    test "matches Kafka's murmur2 partitioner over 1000 partitions" do
+      assert Utils.partition_for("", 1000) == 681
+      assert Utils.partition_for("a", 1000) == 524
+      assert Utils.partition_for("ab", 1000) == 434
+      assert Utils.partition_for("abc", 1000) == 107
+      assert Utils.partition_for("123456789", 1000) == 566
+    end
+
+    test "a single-partition topic always returns 0" do
+      assert Utils.partition_for("anything", 1) == 0
+    end
+
+    test "is deterministic and in-range" do
+      for key <- ["k1", "order-42", "widget-999"] do
+        p = Utils.partition_for(key, 12)
+        assert p == Utils.partition_for(key, 12)
+        assert p in 0..11
+      end
+    end
+  end
+
   describe "scrub_reason/1" do
     test "passes through readable network reasons (atoms, tuples)" do
       assert Utils.scrub_reason(:econnrefused) == ":econnrefused"

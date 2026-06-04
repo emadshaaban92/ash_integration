@@ -496,3 +496,11 @@ config :ash_integration,
     max_heap_words: 50_000_000     # heap+stack ceiling per run, in words (~400MB)
   ]
 ```
+
+## Migration notes
+
+- **The gRPC transport was removed.** Only `:http` and `:kafka` are supported. A
+  connection whose persisted `transport_config` still carries a `:grpc` tag is
+  **rejected at delivery** with a friendly, non-retryable `:transport` error
+  (rather than crashing the delivery worker) — migrate the connection to `:http`
+  or `:kafka`, or delete it.

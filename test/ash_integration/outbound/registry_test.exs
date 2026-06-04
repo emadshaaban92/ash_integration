@@ -39,6 +39,23 @@ defmodule AshIntegration.Outbound.RegistryTest do
     def project(events, _subscriptions, _context), do: Map.new(events, &{&1.id, :deliver})
   end
 
+  # A producer that forgets `event_key/2` (compiles with a warning, crashes at
+  # capture). verify! must reject it at boot.
+  defmodule IncompleteProducer do
+    @moduledoc false
+    use AshIntegration.Outbound.Declare.Producer
+
+    @impl true
+    def produce(_version, pairs, _context),
+      do: Map.new(pairs, fn {_changeset, record} -> {record.id, %{id: record.id}} end)
+
+    @impl true
+    def example(_version), do: %{}
+
+    @impl true
+    def project(events, _subscriptions, _context), do: Map.new(events, &{&1.id, :deliver})
+  end
+
   defmodule Domain do
     @moduledoc false
     use Ash.Domain, validate_config_inclusion?: false
@@ -47,6 +64,7 @@ defmodule AshIntegration.Outbound.RegistryTest do
       resource AshIntegration.Outbound.RegistryTest.Product
       resource AshIntegration.Outbound.RegistryTest.Item
       resource AshIntegration.Outbound.RegistryTest.ConflictItem
+      resource AshIntegration.Outbound.RegistryTest.IncompleteItem
     end
   end
 
@@ -137,6 +155,32 @@ defmodule AshIntegration.Outbound.RegistryTest do
     end
   end
 
+  defmodule IncompleteItem do
+    @moduledoc false
+    use Ash.Resource,
+      domain: AshIntegration.Outbound.RegistryTest.Domain,
+      data_layer: Ash.DataLayer.Simple,
+      extensions: [AshIntegration.Outbound.Declare.Source]
+
+    outbound_events do
+      source_resource "incomplete_item"
+
+      event "incomplete.event" do
+        actions([:create])
+        producer(AshIntegration.Outbound.RegistryTest.IncompleteProducer)
+        version(1)
+      end
+    end
+
+    attributes do
+      uuid_v7_primary_key :id
+    end
+
+    actions do
+      defaults [:create, :read, :update, :destroy]
+    end
+  end
+
   test "triggers maps (resource, action) to the events it contributes" do
     triggers = Registry.triggers([Product, Item])
 
@@ -165,6 +209,32 @@ defmodule AshIntegration.Outbound.RegistryTest do
   test "verify! raises when resources name different producers for one event type" do
     assert_raise RuntimeError, ~r/Conflicting producers/, fn ->
       Registry.verify!([Product, ConflictItem])
+    end
+  end
+
+  test "verify! raises when a producer is missing a required callback (event_key/2)" do
+    assert_raise RuntimeError, ~r/missing required callback.*event_key\/2/s, fn ->
+      Registry.verify!([IncompleteItem])
+    end
+  end
+
+  describe "cached snapshot (build/1)" do
+    test "build/1 exposes an event_type => producer map for O(1) producer_for" do
+      snapshot = Registry.build([Product, Item])
+
+      assert snapshot.producers["product.created"] == Producer
+      assert snapshot.producers["stock.changed"] == Producer
+      assert Map.has_key?(snapshot, :triggers)
+      assert Map.has_key?(snapshot, :catalog)
+    end
+
+    test "producer_for/2 (explicit resources) resolves the producer uncached" do
+      assert Registry.producer_for("stock.changed", [Product, Item]) == Producer
+      assert Registry.producer_for("nope", [Product, Item]) == nil
+    end
+
+    test "reset_cache/0 is safe to call" do
+      assert Registry.reset_cache() in [true, false]
     end
   end
 end

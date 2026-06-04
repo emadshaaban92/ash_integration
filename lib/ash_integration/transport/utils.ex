@@ -6,6 +6,8 @@ defmodule AshIntegration.Transport.Utils do
   (`AshIntegration.Outbound.Wire.Transports.*`).
   """
 
+  import Bitwise
+
   @doc """
   De-duplicate a `{name, value}` header list case-insensitively, keeping the
   **last** value for each name and that value's position.
@@ -188,9 +190,78 @@ defmodule AshIntegration.Transport.Utils do
     String.trim_trailing(base_url, "/") <> "/" <> String.trim_leading(path, "/")
   end
 
-  @doc "Pick a Kafka partition for `key` via consistent hashing over `count` partitions."
-  def partition_for(_key, 1), do: 0
-  def partition_for(key, count), do: :erlang.phash2(key, count)
+  @doc """
+  Pick a Kafka partition for `key` over `count` partitions using **Kafka's
+  standard murmur2 partitioner** — `toPositive(murmur2(key)) rem count`, the same
+  scheme the Java client and librdkafka use by default.
+
+  This matters for interop: if a non-AshIntegration producer writes the same key
+  to the same topic, it must land on the **same** partition, or Kafka's per-key
+  ordering guarantee is split across partitions. (A previous implementation used
+  `:erlang.phash2`, which is internally consistent but does not match any other
+  producer.)
+  """
+  @spec partition_for(String.t() | binary(), pos_integer()) :: non_neg_integer()
+  def partition_for(_key, count) when count <= 1, do: 0
+  def partition_for(key, count), do: rem(to_positive(murmur2(to_string(key))), count)
+
+  @murmur2_seed 0x9747B28C
+  @murmur2_m 0x5BD1E995
+  @murmur2_r 24
+
+  @doc """
+  Kafka's `murmur2` hash of `data`, returned as a 32-bit unsigned integer (a port
+  of `org.apache.kafka.common.utils.Utils.murmur2`).
+  """
+  @spec murmur2(binary()) :: non_neg_integer()
+  def murmur2(data) when is_binary(data) do
+    h = mask32(bxor(@murmur2_seed, byte_size(data)))
+
+    {tail, h} = murmur2_body(data, h)
+
+    h
+    |> murmur2_tail(tail)
+    |> murmur2_finalize()
+  end
+
+  # Body: consume 4 bytes (little-endian) at a time.
+  defp murmur2_body(<<b0, b1, b2, b3, rest::binary>>, h) do
+    k = b0 + (b1 <<< 8) + (b2 <<< 16) + (b3 <<< 24)
+    k = imul32(k, @murmur2_m)
+    k = mask32(bxor(k, k >>> @murmur2_r))
+    k = imul32(k, @murmur2_m)
+
+    h = imul32(h, @murmur2_m)
+    h = mask32(bxor(h, k))
+    murmur2_body(rest, h)
+  end
+
+  defp murmur2_body(tail, h), do: {tail, h}
+
+  # Tail: the trailing <4 bytes (Java's fall-through switch).
+  defp murmur2_tail(h, <<b0, b1, b2>>) do
+    h = mask32(bxor(h, b2 <<< 16))
+    h = mask32(bxor(h, b1 <<< 8))
+    imul32(mask32(bxor(h, b0)), @murmur2_m)
+  end
+
+  defp murmur2_tail(h, <<b0, b1>>) do
+    h = mask32(bxor(h, b1 <<< 8))
+    imul32(mask32(bxor(h, b0)), @murmur2_m)
+  end
+
+  defp murmur2_tail(h, <<b0>>), do: imul32(mask32(bxor(h, b0)), @murmur2_m)
+  defp murmur2_tail(h, <<>>), do: h
+
+  defp murmur2_finalize(h) do
+    h = mask32(bxor(h, h >>> 13))
+    h = imul32(h, @murmur2_m)
+    mask32(bxor(h, h >>> 15))
+  end
+
+  defp imul32(a, b), do: mask32(a * b)
+  defp mask32(value), do: value &&& 0xFFFFFFFF
+  defp to_positive(value), do: value &&& 0x7FFFFFFF
 
   @doc "Whether a Kafka/`:brod` produce error is worth retrying."
   def retryable_error?(:leader_not_available), do: true

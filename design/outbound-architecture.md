@@ -97,6 +97,17 @@ resource (a module-local Spark verifier). The `version` entity carries only a
 number; there is **no** per-version `schema` field and **no** cross-mention schema
 agreement check (payload shape is convention, enforced later — §14).
 
+The registry's cross-mention checks (`Registry.verify!/0`) run once at boot: each
+event type's resource mentions must name the **same** producer, and that producer
+must export **all four** callbacks (`produce/3`, `event_key/2`, `project/3`,
+`example/1`) — a missing one compiles but would crash the host's business write at
+capture, so it fails the boot loudly instead. Because the DSL is compile-time, the
+derived registry is **immutable for the running system**: it is built once at boot
+into `:persistent_term` (`Registry.warm/0`) and read from there — `catalog/0`,
+`triggers/0`, and `producer_for/1` are cache reads (O(1) for `producer_for`), not
+per-call domain scans. Boot also warns loudly if the catalog is empty while the
+runtime is enabled.
+
 **Preview/test payloads** come from the producer's `example/1` callback (§4), not a
 per-version schema module. Declared per-version **schema validation** is deferred
 (§14): `data` is a single JSONB map today, validated by neither capture nor dispatch.
@@ -426,7 +437,12 @@ add them in Lua only if a specific consumer needs them:
 - `event_key` — an internal ordering/coalescing key. On Kafka it is already the
   native partition key (the message key, set independently of headers); on HTTP it
   carries no ordering meaning and dedup should key on `event-id`. Carried as
-  `event.event_key`.
+  `event.event_key`. The library selects the Kafka partition with the **standard
+  murmur2 partitioner** (`toPositive(murmur2(key)) rem partitions`), matching the
+  Java client and librdkafka — so a non-AshIntegration producer writing the same
+  key lands on the same partition (interop), not `:erlang.phash2`. If the partition
+  count can't be read, the send returns a **retryable** transport error rather than
+  defaulting to partition 0 (which would silently break per-key ordering).
 - connection id — an internal UUID the consumer can't act on: a leak, not a
   contract. Not exposed to the transform at all.
 
