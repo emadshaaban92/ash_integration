@@ -40,20 +40,20 @@ defmodule AshIntegration.Outbound.RegistryTest do
     def project(events, _subscriptions, _context), do: Map.new(events, &{&1.id, :deliver})
   end
 
-  # A producer that forgets `event_key/2` (compiles with a warning, crashes at
-  # capture). verify! must reject it at boot.
+  # A producer that forgets `event_key/2`. `verify!/1` (which checks
+  # `function_exported?/3`, not the behaviour) must reject it at boot — that is
+  # the invariant under test. It deliberately omits
+  # `use AshIntegration.Outbound.Declare.Producer` so the intentionally-missing
+  # callback doesn't emit a compile-time "callback not implemented" warning; the
+  # boot-time check is what guards real producers, not the compiler.
   defmodule IncompleteProducer do
     @moduledoc false
-    use AshIntegration.Outbound.Declare.Producer
 
-    @impl true
     def produce(_version, pairs, _context),
       do: Map.new(pairs, fn {_changeset, record} -> {record.id, %{id: record.id}} end)
 
-    @impl true
     def example(_version), do: %{}
 
-    @impl true
     def project(events, _subscriptions, _context), do: Map.new(events, &{&1.id, :deliver})
   end
 
