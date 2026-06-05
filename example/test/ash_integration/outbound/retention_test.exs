@@ -10,6 +10,7 @@ defmodule Example.Outbound.RetentionTest do
   import Example.IntegrationHelpers, only: [create_user!: 0]
 
   require Ash.Query
+  require Logger
 
   alias AshIntegration.Outbound.Retention
   alias Example.Outbound.{Connection, Event, EventDelivery, Subscription}
@@ -92,6 +93,49 @@ defmodule Example.Outbound.RetentionTest do
 
     refute MapSet.member?(event_ids, dispatched_orphan.id),
            "a dispatched, delivery-free Event must still be reaped"
+  end
+
+  # AshPostgres exposes no per-query `:log` hook, so the sweep honours
+  # `query_log_level` by scoping the sweeper process's Logger level around each
+  # bounded delete. The actual suppression is verified manually against the emitted
+  # SQL (it can't be asserted here: the test env pins the primary Logger level to
+  # `:warning`, so Ecto's `:debug` query log is already gone). What we *can* guard
+  # deterministically is that every supported value drives a working sweep and, in
+  # particular, that the process Logger level is restored afterwards — a botched
+  # `try/after` would otherwise leak a raised floor onto the caller.
+  describe "query_log_level" do
+    setup do
+      original = Application.fetch_env(:ash_integration, :query_log_level)
+
+      on_exit(fn ->
+        case original do
+          {:ok, value} -> Application.put_env(:ash_integration, :query_log_level, value)
+          :error -> Application.delete_env(:ash_integration, :query_log_level)
+        end
+
+        Logger.delete_process_level(self())
+      end)
+
+      :ok
+    end
+
+    for value <- [:debug, false, :info] do
+      @value value
+
+      test "sweep/0 honours query_log_level: #{inspect(value)} and leaves no process level behind" do
+        Application.put_env(:ash_integration, :query_log_level, @value)
+
+        # An old, dispatched, delivery-free Event so a real `DELETE` is issued.
+        seed_old_event(DateTime.add(DateTime.utc_now(), -400, :day))
+
+        before = Logger.get_process_level(self())
+
+        assert %{event: _, event_delivery: _, delivery_log: _} = Retention.sweep()
+
+        assert Logger.get_process_level(self()) == before,
+               "retention must restore the process Logger level after the sweep"
+      end
+    end
   end
 
   # ── helpers ───────────────────────────────────────────────────────────────

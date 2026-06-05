@@ -145,7 +145,15 @@ defmodule AshIntegration do
   entirely. Defaults to `:debug` — Ecto's own default, so behaviour is unchanged
   until you set it. Set `query_log_level: false` to stop the poll-loop query spam.
 
-  Only the library's high-frequency *internal* queries honour this. Queries that run
+  The retention sweeper's bounded `DELETE`s (run once per `interval_ms`, default a
+  minute) honour this too. They go through Ash (`Ash.bulk_destroy!`), which gives
+  AshPostgres no per-query `:log` hook, so for that path the value is applied by
+  scoping the sweeper process's `Logger` level around each delete rather than as
+  Ecto's `:log`. The common cases match — `:debug` logs the delete, `false` silences
+  it — but because a process level filters rather than re-emits, a level like `:info`
+  *hides* the `:debug` delete instead of re-routing it to `:info`.
+
+  Only the library's *internal* housekeeping queries honour this. Queries that run
   proportionally to real traffic (loading claimed rows, applying state transitions)
   are left at the repo default — they reflect actual work, not idle polling.
   """

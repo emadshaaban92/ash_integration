@@ -191,10 +191,49 @@ defmodule AshIntegration.Outbound.Retention do
   # matching row is already past the window, so the eligible set shrinks
   # monotonically and drains over successive passes.
   defp bounded_delete(query, limit) do
-    query
-    |> Ash.Query.limit(limit)
-    |> Ash.bulk_destroy!(:destroy, %{}, authorize?: false, notify?: false)
+    query = Ash.Query.limit(query, limit)
+
+    with_query_log_level(fn ->
+      Ash.bulk_destroy!(query, :destroy, %{}, authorize?: false, notify?: false)
+    end)
   end
+
+  # Honour `AshIntegration.query_log_level/0` for the per-sweep `DELETE` — the
+  # retention equivalent of the poll-loop spam that knob was added for. The poll
+  # loops pass Ecto's `:log` straight to `repo.query/3`; this delete runs through
+  # Ash (`Ash.bulk_destroy!`), and AshPostgres threads no `:log` option down to
+  # `repo.delete_all/2`, so there is no per-query hook to reach for here.
+  #
+  # Instead we scope *this* process's Logger level for the duration of the delete.
+  # Ecto emits its query log synchronously in the calling process, and a process
+  # level only ever raises the floor (the higher of process/primary level wins), so
+  # this drops the `:debug` `DELETE` without un-silencing anything else. At `:debug`
+  # (the default) logging is untouched; `false` silences the delete; any other level
+  # acts as a floor — note that, unlike `repo.query/3`'s `:log`, a floor filters
+  # rather than re-emits, so e.g. `:info` hides the `:debug` delete.
+  defp with_query_log_level(fun) do
+    case AshIntegration.query_log_level() do
+      :debug -> fun.()
+      level -> with_process_log_level(log_floor(level), fun)
+    end
+  end
+
+  defp log_floor(false), do: :none
+  defp log_floor(level), do: level
+
+  defp with_process_log_level(level, fun) do
+    previous = Logger.get_process_level(self())
+    Logger.put_process_level(self(), level)
+
+    try do
+      fun.()
+    after
+      restore_process_log_level(previous)
+    end
+  end
+
+  defp restore_process_log_level(nil), do: Logger.delete_process_level(self())
+  defp restore_process_log_level(level), do: Logger.put_process_level(self(), level)
 
   # The Event window must be at least the delivery window (deliveries reference
   # their Event). A misconfiguration is operationally surprising, so warn + clamp.
