@@ -26,6 +26,21 @@ defmodule AshIntegration.Web.Outbound.Helpers do
   def empty_page, do: %{offset: 0, limit: 20, count: 0}
 
   @doc """
+  Read a paginated list for a dashboard index. A *forbidden* read degrades to an
+  empty page (policies hide the list rather than crash it); any other error is
+  re-raised, so a real load failure surfaces with a stacktrace instead of being
+  swallowed into an empty table. The result responds to `.results` and is
+  accepted by `page_meta/1`.
+  """
+  def read_page!(query, opts) do
+    case Ash.read(query, opts) do
+      {:ok, page} -> page
+      {:error, %Ash.Error.Forbidden{}} -> %{results: [], offset: 0, limit: 20, count: 0}
+      {:error, error} -> raise error
+    end
+  end
+
+  @doc """
   Read the connections visible to `actor` for the filter dropdowns. No-bang:
   degrades to `[]` (an empty dropdown) rather than crashing the page.
   """

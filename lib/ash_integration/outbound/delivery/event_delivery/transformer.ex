@@ -62,6 +62,12 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
        allow_nil?: true,
        public?: true
      )
+     # Stamped once when `:deliver` marks the row `:delivered`; a dedicated column
+     # rather than overloading `updated_at`.
+     |> add_attribute_if_not_exists(:delivered_at, :utc_datetime_usec,
+       allow_nil?: true,
+       public?: true
+     )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_event_relationship_if_not_exists()
@@ -450,6 +456,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
           changes: [
             guard_scheduled(),
             set_state(:delivered),
+            set_delivered_at(),
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
               change: AshIntegration.Outbound.Delivery.Changes.OnDeliverySuccess
             )
@@ -565,6 +572,12 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   defp set_state(value) do
     Transformer.build_entity!(Dsl, [:actions, :update], :change,
       change: {Change.SetAttribute, [attribute: :state, value: value]}
+    )
+  end
+
+  defp set_delivered_at do
+    Transformer.build_entity!(Dsl, [:actions, :update], :change,
+      change: {Change.SetAttribute, [attribute: :delivered_at, value: &DateTime.utc_now/0]}
     )
   end
 

@@ -47,11 +47,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
       |> apply_filter(:subscription_id, f.subscription)
       |> apply_status(f.status)
 
-    page =
-      case Ash.read(query, actor: actor, page: [limit: 20, offset: offset, count: true]) do
-        {:ok, page} -> page
-        {:error, _} -> %{results: [], offset: 0, limit: 20, count: 0}
-      end
+    page = Helpers.read_page!(query, actor: actor, page: [limit: 20, offset: offset, count: true])
 
     assign(socket, logs: page.results, page: Helpers.page_meta(page))
   end

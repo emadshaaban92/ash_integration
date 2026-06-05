@@ -47,7 +47,7 @@ defmodule AshIntegration.Connection.Transformer do
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_subscriptions_relationship_if_not_exists()
-     |> add_events_relationship_if_not_exists()
+     |> add_deliveries_relationship_if_not_exists()
      |> add_owner_relationship_if_not_exists()
      |> add_identity_if_not_exists(:name, [:name])
      |> add_activate_action_if_not_exists()
@@ -145,13 +145,15 @@ defmodule AshIntegration.Connection.Transformer do
     end
   end
 
-  defp add_events_relationship_if_not_exists(dsl_state) do
-    if Info.relationship(dsl_state, :events) do
+  # Destination is EventDelivery (per-subscription delivery state), not the Event
+  # outbox — hence `:deliveries`.
+  defp add_deliveries_relationship_if_not_exists(dsl_state) do
+    if Info.relationship(dsl_state, :deliveries) do
       dsl_state
     else
       {:ok, relationship} =
         Transformer.build_entity(Dsl, [:relationships], :has_many,
-          name: :events,
+          name: :deliveries,
           destination_attribute: :connection_id,
           destination: AshIntegration.event_delivery_resource(),
           domain: AshIntegration.domain()

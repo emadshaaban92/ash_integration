@@ -69,7 +69,8 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_connection_relationship_if_not_exists()
-     |> add_events_relationship_if_not_exists()
+     |> add_deliveries_relationship_if_not_exists()
+     |> add_last_delivered_at_aggregate_if_not_exists()
      |> add_activate_action_if_not_exists()
      |> add_deactivate_action_if_not_exists()
      |> add_record_success_action_if_not_exists()
@@ -170,19 +171,39 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
     end
   end
 
-  defp add_events_relationship_if_not_exists(dsl_state) do
-    if Info.relationship(dsl_state, :events) do
+  # Destination is EventDelivery (per-subscription delivery state), not the Event
+  # outbox — hence `:deliveries`.
+  defp add_deliveries_relationship_if_not_exists(dsl_state) do
+    if Info.relationship(dsl_state, :deliveries) do
       dsl_state
     else
       {:ok, relationship} =
         Transformer.build_entity(Dsl, [:relationships], :has_many,
-          name: :events,
+          name: :deliveries,
           destination_attribute: :subscription_id,
           destination: AshIntegration.event_delivery_resource(),
           domain: AshIntegration.domain()
         )
 
       Transformer.add_entity(dsl_state, [:relationships], relationship, type: :append)
+    end
+  end
+
+  # Most recent successful delivery: max(:delivered_at) over `:deliveries`.
+  # Added-if-not-exists so hosts can override.
+  defp add_last_delivered_at_aggregate_if_not_exists(dsl_state) do
+    if Info.aggregate(dsl_state, :last_delivered_at) do
+      dsl_state
+    else
+      {:ok, aggregate} =
+        Transformer.build_entity(Dsl, [:aggregates], :max,
+          name: :last_delivered_at,
+          relationship_path: :deliveries,
+          field: :delivered_at,
+          public?: true
+        )
+
+      Transformer.add_entity(dsl_state, [:aggregates], aggregate, type: :append)
     end
   end
 

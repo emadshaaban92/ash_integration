@@ -98,10 +98,13 @@ defmodule Example.Outbound.DeliveryRelayTest do
     test "delivers a :scheduled row and frees its slot", %{connection: conn} do
       stub_webhook_success()
       d = scheduled_delivery!(create_subscription!(conn))
+      assert is_nil(d.delivered_at)
 
       drain_delivery!()
 
-      assert reload(d).state == :delivered
+      delivered = reload(d)
+      assert delivered.state == :delivered
+      refute is_nil(delivered.delivered_at)
     end
 
     test "a retryable failure records the error, stamps backoff, and stays :scheduled", %{

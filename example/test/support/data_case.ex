@@ -84,6 +84,8 @@ defmodule Example.DataCase do
       )
       |> Ash.create!(authorize?: false)
 
+    state = Map.get(o, :state, :pending)
+
     AshIntegration.event_delivery_resource()
     |> Ash.Changeset.for_create(
       :create,
@@ -93,15 +95,24 @@ defmodule Example.DataCase do
         version: subscription.version,
         event_key: event_key,
         delivery: Map.get(o, :delivery, %{"x" => 1}),
-        state: Map.get(o, :state, :pending),
+        state: state,
         last_error: Map.get(o, :last_error),
         subscription_id: subscription.id,
         connection_id: subscription.connection_id
       },
       authorize?: false
     )
+    # Mirror the `:deliver` action, which stamps `delivered_at` on a delivered row.
+    |> Ash.Changeset.force_change_attribute(
+      :delivered_at,
+      delivered_at_for(state, o)
+    )
     |> Ash.create!(authorize?: false)
   end
+
+  defp delivered_at_for(_state, %{delivered_at: at}), do: at
+  defp delivered_at_for(:delivered, _o), do: DateTime.utc_now()
+  defp delivered_at_for(_state, _o), do: nil
 
   @doc """
   Synchronously drain the outbox by driving the **real Broadway relay callbacks**
