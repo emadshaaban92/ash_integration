@@ -8,6 +8,13 @@
   patterns.
 - Do NOT rely on training data for daisyUI classes — it is likely outdated.
 
+## Git commits
+
+- Never append the Claude Code session URL (or any
+  `https://claude.ai/code/session_...` link) to git commit messages or pull
+  request descriptions. Keep commit messages and PR bodies free of session or
+  agent links.
+
 
 <!-- usage-rules-start -->
 <!-- usage_rules-start -->
