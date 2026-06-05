@@ -1,0 +1,17 @@
+# Sobelow config for the example app (auto-loaded by `mix sobelow`).
+# CSP/HTTPS ignored: not applicable to a local demo (production should enable
+# both). `exit: :low` fails on any other finding; `skip: true` honours inline
+# `# sobelow_skip` annotations.
+[
+  exit: :low,
+  format: "txt",
+  ignore_files: [],
+  ignore: ["Config.CSP", "Config.HTTPS"],
+  out: nil,
+  private: false,
+  router: nil,
+  skip: true,
+  threshold: :low,
+  verbose: false,
+  version: false
+]
