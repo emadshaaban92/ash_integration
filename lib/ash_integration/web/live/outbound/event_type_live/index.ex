@@ -6,8 +6,6 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Index do
   # produce, their versions, and who produces them."
   use AshIntegration.Web, :live_view
 
-  require Ash.Query
-
   alias AshIntegration.Outbound.Declare.Registry
 
   @impl true

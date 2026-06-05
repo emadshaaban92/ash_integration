@@ -9,7 +9,6 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
   corrected transform both unblock the lane.
   """
   require Ash.Query
-  require Logger
 
   alias AshIntegration.Outbound.Delivery.Resolver
   alias AshIntegration.Outbound.Wire.Envelope

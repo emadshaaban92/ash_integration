@@ -152,7 +152,7 @@ defmodule AshIntegration.Web.Components do
           Previous
         </button>
         <button
-          :if={@page.offset + @page.limit < (@page.count || 0)}
+          :if={@page.offset + @page.limit < @page.count}
           class="join-item btn btn-sm"
           phx-click="paginate"
           phx-value-offset={@page.offset + @page.limit}
