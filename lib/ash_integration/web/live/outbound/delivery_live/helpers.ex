@@ -26,7 +26,8 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Helpers do
   defp state_class(:delivered), do: "badge-success"
   defp state_class(:scheduled), do: "badge-info"
   defp state_class(:pending), do: "badge-warning"
-  defp state_class(:parked), do: "badge-error"
+  # No `:parked` clause: parked deliveries get their own badge in state_badge/1,
+  # so state_class/1 is only ever called for non-parked states.
   defp state_class(:cancelled), do: "badge-ghost"
   defp state_class(_), do: "badge-ghost"
 

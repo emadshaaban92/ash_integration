@@ -8,8 +8,6 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
   # on the connection page.
   use AshIntegration.Web, :live_view
 
-  require Ash.Query
-
   alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
   alias AshIntegration.Web.Outbound.Helpers
   alias AshIntegration.Web.Outbound.SubscriptionLive.FormComponent

@@ -21,8 +21,6 @@ jobs:
   test:
     name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
     runs-on: ubuntu-latest
-    # experimental combos run but don't gate.
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,14 +29,10 @@ jobs:
             otp: "27"
           - elixir: "1.19"
             otp: "28"
-          # 1.20 experimental: its type checker trips --warnings-as-errors on
-          # pre-existing web-layer warnings. Make required once those are fixed.
           - elixir: "1.20"
             otp: "28"
-            experimental: true
           - elixir: "1.20"
             otp: "29"
-            experimental: true
 
     steps:
       - name: Checkout

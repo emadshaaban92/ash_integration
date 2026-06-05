@@ -6,8 +6,6 @@ defmodule AshIntegration.Web.Outbound.Helpers do
   # secret stripping, header/broker injection). The per-page form logic lives
   # in each page's own `*.Helpers` module.
 
-  require Ash.Query
-
   # ── Index (all) page plumbing, shared by the Event/Delivery/Log browsers ────
 
   @doc "Collapse blank query params (nil / \"\") to nil."

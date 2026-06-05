@@ -43,8 +43,6 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
   """
   use Broadway
 
-  require Logger
-
   alias AshIntegration.Outbound.Dispatch.RelayProducer
   alias AshIntegration.Outbound.Dispatch.Specs
   alias AshIntegration.Outbound.Dispatch.Dispatcher

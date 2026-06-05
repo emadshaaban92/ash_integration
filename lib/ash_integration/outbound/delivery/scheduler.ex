@@ -24,7 +24,6 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   use GenServer
 
   require Logger
-  require Ash.Query
   import Ash.Expr
 
   @idle_interval :timer.seconds(10)
