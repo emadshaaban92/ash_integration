@@ -182,7 +182,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
     LIMIT $1
     """
 
-    case repo.query(query, [batch_size]) do
+    case repo.query(query, [batch_size], log: AshIntegration.query_log_level()) do
       {:ok, %{rows: rows}} ->
         Enum.map(rows, fn [id] -> id end)
 

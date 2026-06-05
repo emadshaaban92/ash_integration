@@ -94,7 +94,7 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     RETURNING e.id::text
     """
 
-    case repo.query(sql, [lease, max_attempts, limit]) do
+    case repo.query(sql, [lease, max_attempts, limit], log: AshIntegration.query_log_level()) do
       {:ok, %{rows: rows}} ->
         ids = Enum.map(rows, fn [id] -> id end)
         load_claimed(ids)

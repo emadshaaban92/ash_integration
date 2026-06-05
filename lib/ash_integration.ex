@@ -133,6 +133,26 @@ defmodule AshIntegration do
     Keyword.get(config(), :http_max_timeout_ms, 60_000)
   end
 
+  @doc """
+  Log level for the library's own internal poll/claim SQL — the housekeeping
+  queries the dispatch relay, the delivery relay, and the scheduler issue on every
+  poll tick (the outbox claim `UPDATE … RETURNING` and the scheduler's lane scan),
+  whether or not there is work to do. On a busy *or idle* node these fire several
+  times a second, so at the repo's default `:debug` level they can dominate the log.
+
+  The value is passed straight through as Ecto's `:log` option, so it accepts any
+  `Logger` level (e.g. `:debug`, `:info`) or `false` to silence these queries
+  entirely. Defaults to `:debug` — Ecto's own default, so behaviour is unchanged
+  until you set it. Set `query_log_level: false` to stop the poll-loop query spam.
+
+  Only the library's high-frequency *internal* queries honour this. Queries that run
+  proportionally to real traffic (loading claimed rows, applying state transitions)
+  are left at the repo default — they reflect actual work, not idle polling.
+  """
+  def query_log_level do
+    Keyword.get(config(), :query_log_level, :debug)
+  end
+
   # ── Retention stage ───────────────────────────────────────────────────────
   # The retention sweeper owns and validates its own configuration under the
   # nested `:retention` key — see `AshIntegration.Outbound.Retention` for the
