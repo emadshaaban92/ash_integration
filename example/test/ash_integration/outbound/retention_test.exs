@@ -10,6 +10,7 @@ defmodule Example.Outbound.RetentionTest do
   import Example.IntegrationHelpers, only: [create_user!: 0]
 
   require Ash.Query
+  require Logger
 
   alias AshIntegration.Outbound.Retention
   alias Example.Outbound.{Connection, Event, EventDelivery, Subscription}
@@ -94,7 +95,78 @@ defmodule Example.Outbound.RetentionTest do
            "a dispatched, delivery-free Event must still be reaped"
   end
 
+  # The sweep honours `query_log_level` (AshPostgres exposes no per-query `:log`
+  # hook) by scoping the sweeper process's Logger level around each bounded delete.
+  # To observe the effect we drop the *primary* level to `:debug` for the sweep —
+  # the test env pins it to `:warning`, so the `:debug` query log is otherwise
+  # filtered before any handler (incl. `capture_log`) ever sees it. Safe here only
+  # because the module is `async: false`: a sync module runs isolated, never
+  # alongside an async test whose own capture could observe the lowered level.
+  describe "query_log_level" do
+    setup do
+      original = Application.fetch_env(:ash_integration, :query_log_level)
+      primary_level = Logger.level()
+
+      on_exit(fn ->
+        Logger.configure(level: primary_level)
+        Logger.delete_process_level(self())
+
+        case original do
+          {:ok, value} -> Application.put_env(:ash_integration, :query_log_level, value)
+          :error -> Application.delete_env(:ash_integration, :query_log_level)
+        end
+      end)
+
+      # An old, dispatched, delivery-free Event so every pass issues a real `DELETE`.
+      seed_old_event(DateTime.add(DateTime.utc_now(), -400, :day))
+      :ok
+    end
+
+    test ":debug (the default) leaves the sweep's DELETE logging untouched" do
+      Application.put_env(:ash_integration, :query_log_level, :debug)
+
+      {result, log} = sweep_with_log()
+
+      assert %{event: _, event_delivery: _, delivery_log: _} = result
+
+      assert log =~ ~s(DELETE FROM "outbound_events"),
+             "the sweep's DELETE must still log at the default :debug"
+
+      assert is_nil(Logger.get_process_level(self())),
+             "retention must not leak a process Logger level after the sweep"
+    end
+
+    test "false silences the sweep's DELETEs" do
+      Application.put_env(:ash_integration, :query_log_level, false)
+
+      {result, log} = sweep_with_log()
+
+      assert %{event: _, event_delivery: _, delivery_log: _} = result
+      refute log =~ "DELETE FROM", "query_log_level: false must silence the sweep's deletes"
+
+      assert is_nil(Logger.get_process_level(self())),
+             "retention must restore the process Logger level after the sweep"
+    end
+
+    test ":info acts as a floor — the :debug DELETE is filtered, not re-routed" do
+      Application.put_env(:ash_integration, :query_log_level, :info)
+
+      {_result, log} = sweep_with_log()
+
+      refute log =~ "DELETE FROM",
+             "a process-level floor filters the :debug delete rather than re-emitting it at :info"
+    end
+  end
+
   # ── helpers ───────────────────────────────────────────────────────────────
+
+  # Run a sweep with the primary Logger level temporarily at :debug so its query
+  # log is observable, returning `{sweep_result, captured_log}`. The primary level
+  # is restored in the "query_log_level" describe's `on_exit`.
+  defp sweep_with_log do
+    Logger.configure(level: :debug)
+    ExUnit.CaptureLog.with_log(fn -> Retention.sweep() end)
+  end
 
   # A bare immutable Event with an explicit (old) created_at, so the Event-side
   # retention sweep applies. Defaults to dispatched (the normal aged-out case);

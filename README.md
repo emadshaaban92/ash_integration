@@ -96,7 +96,10 @@ fixed cadence, so their claim/scan queries run several times a second whether or
 not there is anything to do. At the repo's default `:debug` level that floods the
 log. `query_log_level` is passed straight through as Ecto's `:log` option for those
 internal queries — set it to `false` to silence them, or to any `Logger` level
-(`:info`, …) to route them elsewhere. It does **not** touch queries that run with
+(`:info`, …) to route them elsewhere. The retention sweeper's periodic `DELETE`s
+honour it too (these go through Ash, so there it scopes the sweeper's `Logger` level
+rather than Ecto's `:log` — `:debug`/`false` behave the same, other levels filter
+the delete rather than re-route it). It does **not** touch queries that run with
 real traffic (loading claimed rows, state transitions), so genuine activity still
 logs at the repo default.
 
