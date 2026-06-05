@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Elixir / OTP
         uses: erlef/setup-beam@v1
@@ -51,7 +51,7 @@ jobs:
           otp-version: ${{ matrix.otp }}
 
       - name: Cache deps and _build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             deps
@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Elixir / OTP
         uses: erlef/setup-beam@v1
@@ -84,7 +84,7 @@ jobs:
           otp-version: "28"
 
       - name: Cache deps and _build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             deps
@@ -130,7 +130,7 @@ jobs:
         working-directory: example
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Elixir / OTP
         uses: erlef/setup-beam@v1
@@ -139,7 +139,7 @@ jobs:
           otp-version: "28"
 
       - name: Cache example deps and _build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             example/deps
