@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel in-progress runs for the same ref when a new commit is pushed.
+# Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,17 +17,28 @@ env:
   MIX_ENV: test
 
 jobs:
-  build:
-    name: Compile · Format · Test · Audit
+  # Compile + test across the supported Elixir/OTP range.
+  test:
+    name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
     runs-on: ubuntu-latest
-
-    # Keep this in sync with the `elixir: "~> 1.19"` requirement in mix.exs.
+    # experimental combos run but don't gate.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - elixir: "1.19"
+            otp: "27"
+          - elixir: "1.19"
             otp: "28"
+          # 1.20 experimental: its type checker trips --warnings-as-errors on
+          # pre-existing web-layer warnings. Make required once those are fixed.
+          - elixir: "1.20"
+            otp: "28"
+            experimental: true
+          - elixir: "1.20"
+            otp: "29"
+            experimental: true
 
     steps:
       - name: Checkout
@@ -52,21 +63,46 @@ jobs:
       - name: Install dependencies
         run: mix deps.get
 
-      - name: Check for unused dependencies in mix.lock
-        run: mix deps.unlock --check-unused
-
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
-      # The remaining checks are independent, so run all of them even if an
-      # earlier one fails — that way a single CI run surfaces every problem.
+      - name: Run tests
+        run: mix test --warnings-as-errors
+
+  # Version-independent checks — run once.
+  quality:
+    name: Quality (format · credo · sobelow · audits)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir / OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.19"
+          otp-version: "28"
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-quality-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-quality-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Check for unused dependencies in mix.lock
+        run: mix deps.unlock --check-unused
+
+      # !cancelled() so one run surfaces every failure, not just the first.
       - name: Check formatting
         if: ${{ !cancelled() }}
         run: mix format --check-formatted
-
-      - name: Run tests
-        if: ${{ !cancelled() }}
-        run: mix test --warnings-as-errors
 
       - name: Static analysis (Credo)
         if: ${{ !cancelled() }}
@@ -83,3 +119,40 @@ jobs:
       - name: Retired package audit (mix hex.audit)
         if: ${{ !cancelled() }}
         run: mix hex.audit
+
+  # Scan the example app's real router/endpoint — coverage the library (no
+  # router of its own) can't get. See example/.sobelow-conf.
+  sobelow-example:
+    name: Sobelow (example app)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: example
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir / OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.19"
+          otp-version: "28"
+
+      - name: Cache example deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            example/deps
+            example/_build
+          key: ${{ runner.os }}-mix-example-${{ hashFiles('example/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-example-
+
+      - name: Install Sobelow (archive)
+        run: mix archive.install hex sobelow 0.14.1 --force
+
+      - name: Install example dependencies
+        run: mix deps.get
+
+      - name: Security analysis (Sobelow, example router/endpoint)
+        run: mix sobelow

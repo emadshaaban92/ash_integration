@@ -1,0 +1,35 @@
+version: 2
+updates:
+  # Library deps. Minor/patch grouped into one PR; majors stay separate.
+  - package-ecosystem: mix
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      mix-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Example consumer app.
+  - package-ecosystem: mix
+    directory: /example
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      example-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # CI workflow actions.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
