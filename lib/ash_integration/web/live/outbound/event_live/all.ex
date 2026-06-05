@@ -42,11 +42,7 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
       |> apply_event_type(f.event_type)
       |> apply_outbox(f.outbox)
 
-    page =
-      case Ash.read(query, actor: actor, page: [limit: 20, offset: offset, count: true]) do
-        {:ok, page} -> page
-        {:error, _} -> %{results: [], offset: 0, limit: 20, count: 0}
-      end
+    page = Helpers.read_page!(query, actor: actor, page: [limit: 20, offset: offset, count: true])
 
     assign(socket, events: page.results, page: Helpers.page_meta(page))
   end

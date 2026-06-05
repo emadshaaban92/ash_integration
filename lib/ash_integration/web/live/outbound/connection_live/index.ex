@@ -50,21 +50,18 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Index do
   defp load_connections(socket, offset) do
     actor = socket.assigns.current_user
 
-    case AshIntegration.connection_resource()
-         |> Ash.Query.for_read(:index, %{}, actor: actor)
-         |> Ash.Query.load(:owner)
-         |> Ash.read(actor: actor, page: [limit: 20, offset: offset, count: true]) do
-      {:ok, page} ->
-        assign(socket,
-          connections: page.results,
-          can_create: Helpers.can?({AshIntegration.connection_resource(), :create}, actor),
-          perms: row_perms(page.results, actor),
-          page: %{offset: page.offset || 0, limit: page.limit || 20, count: page.count}
-        )
+    page =
+      AshIntegration.connection_resource()
+      |> Ash.Query.for_read(:index, %{}, actor: actor)
+      |> Ash.Query.load(:owner)
+      |> Helpers.read_page!(actor: actor, page: [limit: 20, offset: offset, count: true])
 
-      {:error, _} ->
-        assign(socket, connections: [], page: %{offset: 0, limit: 20, count: 0})
-    end
+    assign(socket,
+      connections: page.results,
+      can_create: Helpers.can?({AshIntegration.connection_resource(), :create}, actor),
+      perms: row_perms(page.results, actor),
+      page: Helpers.page_meta(page)
+    )
   end
 
   # Per-row edit/destroy permission, resolved once per load (not per render).
