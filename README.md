@@ -87,8 +87,18 @@ config :ash_integration,
   enabled?: true,                # Run the background pipeline on this node (default: true; set false in tests)
   auto_suspension_threshold: 50, # Consecutive failures before auto-suspend (default: 50)
   http_max_timeout_ms: 60_000,   # Max allowed HTTP request timeout (default: 60s)
-  kafka_idle_timeout_ms: 300_000 # Kafka client idle teardown (default: 5 min)
+  kafka_idle_timeout_ms: 300_000,# Kafka client idle teardown (default: 5 min)
+  query_log_level: false         # Log level for internal poll/claim SQL — false silences it (default: :debug)
 ```
+
+The dispatch relay, the delivery relay, and the scheduler poll the database on a
+fixed cadence, so their claim/scan queries run several times a second whether or
+not there is anything to do. At the repo's default `:debug` level that floods the
+log. `query_log_level` is passed straight through as Ecto's `:log` option for those
+internal queries — set it to `false` to silence them, or to any `Logger` level
+(`:info`, …) to route them elsewhere. It does **not** touch queries that run with
+real traffic (loading claimed rows, state transitions), so genuine activity still
+logs at the repo default.
 
 Per-stage tuning lives under a nested key owned by that stage; each stage
 validates its own slice at boot (NimbleOptions — unknown keys / bad types fail
