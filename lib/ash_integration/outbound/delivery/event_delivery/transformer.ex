@@ -32,6 +32,10 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
      # at delivery — the snapshot-at-dispatch wire payload. Nil for a parked
      # (build-failed) or skipped delivery.
      |> add_attribute_if_not_exists(:delivery, :map, allow_nil?: true, public?: true)
+     # Canonical content hash of a delivery's body (or a transform-set `dedup_on`),
+     # used by content-addressed suppression (`suppress_unchanged`). Schema only here
+     # — nil and unused until the suppression feature populates and reads it.
+     |> add_attribute_if_not_exists(:body_hash, :string, allow_nil?: true, public?: true)
      |> add_attribute_if_not_exists(:state, :atom,
        allow_nil?: false,
        public?: true,
@@ -281,6 +285,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
             :version,
             :event_key,
             :delivery,
+            :body_hash,
             :state,
             :last_error,
             :event_id,

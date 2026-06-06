@@ -48,6 +48,15 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
        public?: true,
        always_select?: true
      )
+     # Opt in to content-addressed suppression: a delivery whose body is identical
+     # to the last one delivered on its `(subscription, event_key)` lane is withheld.
+     # Schema only here — the suppression logic lands in a follow-up; default off so
+     # existing subscriptions are unchanged.
+     |> add_attribute_if_not_exists(:suppress_unchanged, :boolean,
+       default: false,
+       public?: true,
+       always_select?: true
+     )
      # ── Per-route transport config (resolved against the connection's defaults
      #    at delivery) ──────────────────────────────────────────────────────
      # A transport-tagged union (HTTP: path/method/timeout; Kafka: topic) mirroring
@@ -367,6 +376,7 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
     :transform_source,
     :transform_runtime,
     :notify_on_every_change,
+    :suppress_unchanged,
     :route_config,
     :connection_id
   ]
