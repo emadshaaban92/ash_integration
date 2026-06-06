@@ -143,7 +143,12 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   end
 
   defp apply_result(delivery, {:ok, metadata}) do
-    finalize(delivery, :deliver, %{delivery_metadata: metadata})
+    # Emit `:delivered` only when the fenced `:deliver` actually applied (a stale
+    # claimer that lost the lease race wrote nothing).
+    case finalize(delivery, :deliver, %{delivery_metadata: metadata}) do
+      {:ok, delivered} -> record_delivered(delivery, delivered)
+      :error -> :ok
+    end
   end
 
   defp apply_result(delivery, {:error, metadata}) do
@@ -184,8 +189,8 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     |> Ash.Changeset.filter(expr(claimed_at == ^delivery.claimed_at))
     |> Ash.update(authorize?: false)
     |> case do
-      {:ok, _} ->
-        :ok
+      {:ok, record} ->
+        {:ok, record}
 
       {:error, reason} ->
         Logger.debug(
@@ -193,8 +198,32 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
             "(stale claim or transient error): #{inspect(reason)}"
         )
 
-        :ok
+        :error
     end
+  end
+
+  # `duration_ms` is the source-change → ack latency: the source Event's
+  # `created_at` (stamped in the source transaction) to `delivered_at`.
+  defp record_delivered(delivery, delivered) do
+    :telemetry.execute(
+      [:ash_integration, :delivery, :delivered],
+      %{
+        count: 1,
+        attempts: delivery.attempts,
+        duration_ms:
+          DateTime.diff(delivered.delivered_at, delivery.event.created_at, :millisecond)
+      },
+      %{
+        event_delivery_id: delivery.id,
+        event_type: delivery.event_type,
+        event_key: delivery.event_key,
+        subscription_id: delivery.subscription_id,
+        connection_id: delivery.connection_id,
+        transport: delivery.connection.transport_config.type
+      }
+    )
+
+    :ok
   end
 
   # ── Pure decision (unit-testable) ──────────────────────────────────────────────

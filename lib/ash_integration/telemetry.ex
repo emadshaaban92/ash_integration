@@ -1,0 +1,57 @@
+defmodule AshIntegration.Telemetry do
+  @moduledoc """
+  Reference for the `[:ash_integration, …]` `:telemetry` events the outbound
+  pipeline emits. See the [Observability guide](observability.html) for each
+  event's measurements and metadata.
+
+  Attach to all of them with `events/0`:
+
+      :telemetry.attach_many(
+        "my-app-ash-integration",
+        AshIntegration.Telemetry.events(),
+        &MyApp.Telemetry.handle/4,
+        nil
+      )
+
+  ## Events
+
+    * `[:ash_integration, :capture, :isolated_failure]` — an isolated `capture`
+      raise; the change never reached the outbox.
+    * `[:ash_integration, :dispatch, :poison]` — an Event hit the dispatch ceiling.
+    * `[:ash_integration, :coalesce, :events_dropped]` — pending deliveries
+      collapsed by latest-state coalescing.
+    * `[:ash_integration, :delivery, :parked]` — a build failure parked a delivery
+      (`failure_kind` `:transform`/`:project`); re-emitted on a reprocess re-park.
+    * `[:ash_integration, :delivery, :delivered]` — the target acknowledged a send
+      (`duration_ms` is the source-change → ack latency).
+    * `[:ash_integration, :delivery, :poison]` — a delivery hit the delivery ceiling.
+    * `[:ash_integration, :dedup, :suppressed]` — a delivery suppressed (body unchanged).
+    * `[:ash_integration, :connection, :suspended]` /
+      `[:ash_integration, :subscription, :suspended]` — auto-suspension on crossing
+      `auto_suspension_threshold`.
+    * `[:ash_integration, :connection, :unsuspended]` /
+      `[:ash_integration, :subscription, :resumed]` — the inverse `unsuspend` action.
+    * `[:ash_integration, :signing, :blank_secret]` — a delivery went out unsigned.
+  """
+
+  @events [
+    [:ash_integration, :capture, :isolated_failure],
+    [:ash_integration, :dispatch, :poison],
+    [:ash_integration, :coalesce, :events_dropped],
+    [:ash_integration, :delivery, :parked],
+    [:ash_integration, :delivery, :delivered],
+    [:ash_integration, :delivery, :poison],
+    [:ash_integration, :dedup, :suppressed],
+    [:ash_integration, :connection, :suspended],
+    [:ash_integration, :subscription, :suspended],
+    [:ash_integration, :connection, :unsuspended],
+    [:ash_integration, :subscription, :resumed],
+    [:ash_integration, :signing, :blank_secret]
+  ]
+
+  @doc """
+  Every `[:ash_integration, …]` event the library emits, for a one-call
+  `:telemetry.attach_many/4`.
+  """
+  def events, do: @events
+end

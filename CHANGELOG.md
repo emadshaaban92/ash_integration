@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Telemetry for three outbound state changes that were previously uninstrumented,
+  each emitted at the site where the state changes (a reprocess re-park re-emits;
+  a cancelled/suppressed delivery never emits `:delivered`):
+  - `[:ash_integration, :delivery, :parked]` — a build failure (`failure_kind`
+    `:transform`/`:project`), at dispatch and on a reprocess re-park.
+  - `[:ash_integration, :connection|:subscription, :suspended]` and the inverse
+    `:unsuspended`/`:resumed`.
+  - `[:ash_integration, :delivery, :delivered]` — a successful send, with
+    `attempts` and source-change → ack `duration_ms`.
+- `AshIntegration.Telemetry` (events reference + `events/0`) and an
+  [Observability guide](guides/observability.md) enumerating every event.
+
 ## [0.2.0]
 
 ### Changed

@@ -52,11 +52,7 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
   defp rerun(%{event: event} = delivery) do
     case Registry.producer_for(event.event_type) do
       nil ->
-        update!(delivery, :park, %{
-          delivery: nil,
-          last_error: "No producer registered for event type #{event.event_type}"
-        })
-
+        park!(delivery, "No producer registered for event type #{event.event_type}", :project)
         {:error, :no_producer}
 
       producer ->
@@ -76,7 +72,7 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
       # dispatch) so a fix-and-reprocess can still recover it, rather than
       # cancelling it terminally.
       {:error, reason} ->
-        update!(delivery, :park, %{delivery: nil, last_error: "project error: #{reason}"})
+        park!(delivery, "project error: #{reason}", :project)
         {:error, reason}
 
       {:deliver, data} ->
@@ -103,7 +99,7 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
         {:ok, :pending}
 
       {:error, lua_error} ->
-        update!(delivery, :park, %{delivery: nil, last_error: "Transform error: #{lua_error}"})
+        park!(delivery, "Transform error: #{lua_error}", :transform)
         {:error, lua_error}
     end
   end
@@ -161,6 +157,25 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
       subject: event.source_resource_id,
       data: data
     })
+  end
+
+  # Re-park and re-emit `:parked` (mirrors the dispatch-time park in `Specs`).
+  defp park!(delivery, reason, failure_kind) do
+    update!(delivery, :park, %{delivery: nil, last_error: reason})
+
+    :telemetry.execute(
+      [:ash_integration, :delivery, :parked],
+      %{count: 1},
+      %{
+        event_id: delivery.event_id,
+        event_type: delivery.event_type,
+        event_key: delivery.event_key,
+        subscription_id: delivery.subscription_id,
+        connection_id: delivery.connection_id,
+        reason: reason,
+        failure_kind: failure_kind
+      }
+    )
   end
 
   defp update!(delivery, action, params) do

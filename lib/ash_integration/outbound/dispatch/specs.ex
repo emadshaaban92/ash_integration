@@ -22,7 +22,7 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
   alias AshIntegration.Outbound.Delivery.Resolver
   alias AshIntegration.Outbound.Wire.Envelope
 
-  @type spec :: %{attrs: map(), coalesce?: boolean()}
+  @type spec :: %{:attrs => map(), :coalesce? => boolean(), optional(:failure_kind) => atom()}
 
   @doc """
   Run the producer's batched `project/3` **once** over the whole `(type, version)`
@@ -54,7 +54,7 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
   """
   @spec specs_for_event(map(), [map()], {:park_all, String.t()} | {:decision, term()}) :: [spec()]
   def specs_for_event(event, subscriptions, {:park_all, reason}) do
-    Enum.map(subscriptions, &park_spec(event, &1, reason))
+    Enum.map(subscriptions, &park_spec(event, &1, reason, :project))
   end
 
   def specs_for_event(event, subscriptions, {:decision, decision}) do
@@ -85,7 +85,7 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
   # redaction). Fail-closed, recoverable via reprocess.
   defp apply_decision(event, subscriptions, other) do
     reason = "project returned an invalid decision: #{inspect(other)}"
-    Enum.map(subscriptions, &park_spec(event, &1, reason))
+    Enum.map(subscriptions, &park_spec(event, &1, reason, :project))
   end
 
   defp apply_sub_decision(event, sub, :deliver), do: [materialize_spec(event, sub, event.data)]
@@ -100,7 +100,8 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
       park_spec(
         event,
         sub,
-        "project returned an invalid per-subscription decision: #{inspect(other)}"
+        "project returned an invalid per-subscription decision: #{inspect(other)}",
+        :project
       )
     ]
   end
@@ -123,7 +124,7 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
         pending_spec(event, subscription, delivery, body_hash)
 
       {:error, lua_error} ->
-        park_spec(event, subscription, "Transform error: #{lua_error}")
+        park_spec(event, subscription, "Transform error: #{lua_error}", :transform)
     end
   end
 
@@ -144,11 +145,13 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
     }
   end
 
-  defp parked_spec(event, subscription, reason) do
-    spec(event, subscription, %{delivery: nil, state: :parked, last_error: reason})
+  # `failure_kind` (`:project`/`:transform`) is carried on the spec so the caller
+  # can emit `:parked` telemetry after the row is persisted (see DispatchEvent).
+  defp park_spec(event, subscription, reason, failure_kind) do
+    event
+    |> spec(subscription, %{delivery: nil, state: :parked, last_error: reason})
+    |> Map.put(:failure_kind, failure_kind)
   end
-
-  defp park_spec(event, subscription, reason), do: parked_spec(event, subscription, reason)
 
   defp cancelled_spec(event, subscription, reason) do
     spec(event, subscription, %{delivery: nil, state: :cancelled, last_error: reason})

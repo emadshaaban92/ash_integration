@@ -139,7 +139,8 @@ Outcomes:
 
 - **`project` raises / returns a bad decision**, or the **transform raises** → the
   delivery is created `parked` with `last_error` (a build failure); it blocks its
-  lane until reprocessed. The event is still considered dispatched.
+  lane until reprocessed. The event is still considered dispatched. Emits
+  `[:ash_integration, :delivery, :parked]` (`failure_kind` `:project`/`:transform`).
 - **Transform skips** (`transform` returns `nil`) → a `cancelled` delivery for the audit trail.
 - **Infra failure mid-materialize** (DB unavailable) → `dispatched_at` is left
   NULL; the lease expires and the relay re-emits the event. Re-materialization is
@@ -452,6 +453,11 @@ oldest event for a key parks that key's lane at the connection until it recovers
 — the ordering guarantee forbids delivering a later event ahead of a stuck
 earlier one for the same key. This is the head-of-line tradeoff extended to
 suspension.
+
+Crossing the threshold emits `[:ash_integration, :connection, :suspended]` or
+`[:ash_integration, :subscription, :suspended]`; the inverse `unsuspend` action
+emits `:unsuspended` / `:resumed`. See the
+[Observability guide](observability.md).
 
 ## Recency (Last-Write-Wins)
 
