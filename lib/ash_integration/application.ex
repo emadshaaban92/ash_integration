@@ -2,7 +2,7 @@ defmodule AshIntegration.Application do
   @moduledoc false
   # Minimal always-on OTP application for the library. It starts ONLY the
   # `Task.Supervisor` that isolates untrusted Lua transform execution
-  # (`AshIntegration.Outbound.Delivery.LuaSandbox`) from its caller.
+  # (`AshIntegration.Outbound.Delivery.Transform.Runtime.Lua`) from its caller.
   #
   # This is deliberately independent of the runtime pipeline `enabled?` switch and
   # of `AshIntegration.Supervisor`: a transform can be run from delivery, dispatch,

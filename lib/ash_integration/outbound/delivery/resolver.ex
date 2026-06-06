@@ -36,7 +36,7 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   raised or produced an invalid descriptor → the event parks).
   """
 
-  alias AshIntegration.Outbound.Delivery.LuaSandbox
+  alias AshIntegration.Outbound.Delivery.Transform
   alias AshIntegration.Transport.Egress
   alias AshIntegration.Transport.Utils
   alias AshIntegration.Outbound.Wire.Envelope
@@ -52,16 +52,24 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     %Ash.Union{type: transport, value: config} = connection.transport_config
     preseed = preseed(transport, config, subscription, envelope, created_at)
     # The transform is optional — a nil/blank script is a no-op (send the
-    # pre-seeded defaults).
-    script = subscription.transform_script || ""
+    # pre-seeded defaults). The runtime is chosen per-subscription; fall back to
+    # the default if the column is unset or wasn't loaded.
+    script = subscription.transform_source || ""
+    runtime = transform_runtime(subscription)
 
-    case LuaSandbox.execute(script, envelope, result: preseed) do
+    case Transform.Runtime.execute(runtime, script, envelope, preseed) do
       {:ok, :skip} -> :skip
       {:ok, result} when is_map(result) -> finalize(transport, config, result, created_at)
       {:ok, _scalar} -> {:error, "transform must set `result` to a table"}
       {:error, message} -> {:error, message}
     end
   end
+
+  defp transform_runtime(%{transform_runtime: runtime})
+       when is_atom(runtime) and not is_nil(runtime),
+       do: runtime
+
+  defp transform_runtime(_subscription), do: Transform.Runtime.default_runtime()
 
   # ── Pre-seed (config + route + event → the transform's starting `result`) ────
 

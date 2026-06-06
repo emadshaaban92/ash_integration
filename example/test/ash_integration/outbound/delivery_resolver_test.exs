@@ -138,7 +138,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
       assert d["body"] == nil
     end
 
-    test "a nil transform_script is a no-op (sends the defaults)", %{owner: owner} do
+    test "a nil transform_source is a no-op (sends the defaults)", %{owner: owner} do
       dest = http_connection!(owner)
       sub = subscription!(dest, "widget.updated", nil)
 
@@ -390,7 +390,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
     |> Ash.create!(authorize?: false)
   end
 
-  defp subscription!(dest, event_type, transform_script) do
+  defp subscription!(dest, event_type, transform_source) do
     Subscription
     |> Ash.Changeset.for_create(
       :create,
@@ -398,7 +398,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
         connection_id: dest.id,
         event_type: event_type,
         version: 1,
-        transform_script: transform_script
+        transform_source: transform_source
       },
       authorize?: false
     )

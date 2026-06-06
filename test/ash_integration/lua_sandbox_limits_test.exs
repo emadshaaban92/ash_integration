@@ -3,7 +3,7 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
   # fast and light.
   use ExUnit.Case, async: false
 
-  alias AshIntegration.Outbound.Delivery.LuaSandbox
+  alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua
 
   setup do
     original = Application.get_env(:ash_integration, :lua_sandbox)
@@ -35,22 +35,22 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
     end
     """
 
-    assert {:error, message} = LuaSandbox.execute(bomb, %{})
+    assert {:error, message} = Lua.execute(bomb, %{})
     assert is_binary(message)
 
     # The caller (this test process) is unharmed and the sandbox still works for a
     # well-behaved script afterwards — proving crash isolation + recovery.
-    assert {:ok, %{"ok" => true}} = LuaSandbox.execute(~S|result = {ok = true}|, %{})
+    assert {:ok, %{"ok" => true}} = Lua.execute(~S|result = {ok = true}|, %{})
   end
 
   test "a tight infinite loop is killed by the reduction budget" do
-    assert {:error, message} = LuaSandbox.execute("while true do end", %{})
+    assert {:error, message} = Lua.execute("while true do end", %{})
     assert is_binary(message)
     assert message =~ "reduction" or message =~ "timed out"
   end
 
   test "a legitimate script still runs under the tightened budgets" do
     assert {:ok, %{"doubled" => 84}} =
-             LuaSandbox.execute(~S|result = {doubled = event.n * 2}|, %{"n" => 42})
+             Lua.execute(~S|result = {doubled = event.n * 2}|, %{"n" => 42})
   end
 end

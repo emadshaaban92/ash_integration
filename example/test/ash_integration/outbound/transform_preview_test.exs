@@ -1,6 +1,6 @@
-defmodule Example.Outbound.TransformTestTest do
+defmodule Example.Outbound.TransformPreviewTest do
   @moduledoc """
-  Tests the operator **transform test** (`AshIntegration.Outbound.Delivery.TransformTest`):
+  Tests the operator **transform preview** (`AshIntegration.Outbound.Delivery.Transform.Preview`):
   it builds a sample event from the producer's `example/1` and runs the transform,
   returning input + output. It must NOT deliver anything, persist an Event, or
   touch suspension counters. (The legacy real-record preview was removed: `produce/3`
@@ -10,7 +10,7 @@ defmodule Example.Outbound.TransformTestTest do
 
   require Ash.Query
 
-  alias AshIntegration.Outbound.Delivery.TransformTest
+  alias AshIntegration.Outbound.Delivery.Transform
   alias Example.Outbound.{Connection, Subscription}
 
   setup do
@@ -22,9 +22,9 @@ defmodule Example.Outbound.TransformTestTest do
     owner: owner,
     connection: dest
   } do
-    sub = create_subscription!(dest, transform_script: "-- noop")
+    sub = create_subscription!(dest, transform_source: "-- noop")
 
-    assert {:ok, result} = TransformTest.run(sub.id, owner)
+    assert {:ok, result} = Transform.Preview.run(sub.id, owner)
     assert result.outcome == :ok
     # The sample is the producer's example/1 (not a real record — preview is read-only).
     refute result.source.real?
@@ -45,9 +45,9 @@ defmodule Example.Outbound.TransformTestTest do
   } do
     create_widget!(owner)
     dest = signing_connection!(owner)
-    sub = create_subscription!(dest, transform_script: "-- noop")
+    sub = create_subscription!(dest, transform_source: "-- noop")
 
-    assert {:ok, %{outcome: :ok, output: output}} = TransformTest.run(sub.id, owner)
+    assert {:ok, %{outcome: :ok, output: output}} = Transform.Preview.run(sub.id, owner)
     assert output["url"]
     # Even with a signing secret configured, the design-time descriptor carries no
     # signature — it (like auth) is computed live at delivery, not snapshotted.
@@ -56,9 +56,9 @@ defmodule Example.Outbound.TransformTestTest do
 
   test "no delivery, no Event row, no counter bumps", %{owner: owner, connection: dest} do
     create_widget!(owner)
-    sub = create_subscription!(dest, transform_script: "-- noop")
+    sub = create_subscription!(dest, transform_source: "-- noop")
 
-    assert {:ok, %{outcome: :ok}} = TransformTest.run(sub.id, owner)
+    assert {:ok, %{outcome: :ok}} = Transform.Preview.run(sub.id, owner)
 
     assert Ash.count!(Example.Outbound.Event, authorize?: false) == 0
     assert Ash.count!(Example.Outbound.Log, authorize?: false) == 0
@@ -68,25 +68,25 @@ defmodule Example.Outbound.TransformTestTest do
 
   test "a transform that skips reports :skipped with no output", %{owner: owner, connection: dest} do
     create_widget!(owner)
-    sub = create_subscription!(dest, transform_script: "result = nil")
+    sub = create_subscription!(dest, transform_source: "result = nil")
 
-    assert {:ok, result} = TransformTest.run(sub.id, owner)
+    assert {:ok, result} = Transform.Preview.run(sub.id, owner)
     assert result.outcome == :skipped
     assert result.output == nil
   end
 
   test "a transform error is reported with the message", %{owner: owner, connection: dest} do
     create_widget!(owner)
-    sub = create_subscription!(dest, transform_script: "this is not valid lua {{{")
+    sub = create_subscription!(dest, transform_source: "this is not valid lua {{{")
 
-    assert {:ok, result} = TransformTest.run(sub.id, owner)
+    assert {:ok, result} = Transform.Preview.run(sub.id, owner)
     assert result.outcome == :error
     assert result.error
     assert result.output == nil
   end
 
   test "returns {:error, :not_found} for an unreadable subscription", %{owner: owner} do
-    assert TransformTest.run(Ash.UUIDv7.generate(), owner) == {:error, :not_found}
+    assert Transform.Preview.run(Ash.UUIDv7.generate(), owner) == {:error, :not_found}
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ defmodule Example.Outbound.TransformTestTest do
           connection_id: dest.id,
           event_type: "widget.updated",
           version: 1,
-          transform_script: "-- noop"
+          transform_source: "-- noop"
         },
         Map.new(overrides)
       )

@@ -23,10 +23,25 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
      # OPTIONAL: a nil/blank script is a no-op that sends the resolved defaults, so
      # the attribute is nilable (Ash's string cast trims "" to nil) and the
      # resolver treats nil as an empty script.
-     |> add_attribute_if_not_exists(:transform_script, :string,
+     |> add_attribute_if_not_exists(:transform_source, :string,
        allow_nil?: true,
        public?: true,
        constraints: [max_length: 10_240]
+     )
+     # Which transform runtime interprets `transform_source`. Today Lua is the
+     # only engine (see `AshIntegration.Outbound.Delivery.Transform.Runtime`); the
+     # attribute exists so a second language (a WASM guest, …) is an additive
+     # change — a new `one_of` member + behaviour impl — rather than a schema
+     # migration after the fact. Defaults to `:lua` so existing scripts keep
+     # their meaning.
+     |> add_attribute_if_not_exists(:transform_runtime, :atom,
+       allow_nil?: false,
+       public?: true,
+       default: :lua,
+       # Derive the persistable set from the runtime registry's single source of
+       # truth so it can't drift from the dispatchable set (`runtimes/0`). Fully
+       # qualified: `Transformer` is aliased to `Spark.Dsl.Transformer` here.
+       constraints: [one_of: AshIntegration.Outbound.Delivery.Transform.Runtime.runtimes()]
      )
      |> add_attribute_if_not_exists(:notify_on_every_change, :boolean,
        default: false,
@@ -349,7 +364,8 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
   @standard_accept [
     :event_type,
     :version,
-    :transform_script,
+    :transform_source,
+    :transform_runtime,
     :notify_on_every_change,
     :route_config,
     :connection_id

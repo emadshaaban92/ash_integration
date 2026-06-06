@@ -106,7 +106,7 @@ defmodule Example.Outbound.EventDispatchTest do
 
   test "a transform that errors parks the event (parked state, nil payload, last_error)",
        %{connection: dest} do
-    s1 = create_subscription!(dest, "widget.updated", transform_script: "error('boom')")
+    s1 = create_subscription!(dest, "widget.updated", transform_source: "error('boom')")
 
     create_widget!(%{name: "w", stock: 1})
     drain_dispatch!()
@@ -200,7 +200,7 @@ defmodule Example.Outbound.EventDispatchTest do
   test "a transform that skips creates a cancelled event for audit",
        %{connection: dest} do
     # `result = nil` → the transform skips the event.
-    s1 = create_subscription!(dest, "widget.updated", transform_script: "result = nil")
+    s1 = create_subscription!(dest, "widget.updated", transform_source: "result = nil")
 
     create_widget!(%{name: "w", stock: 1})
     drain_dispatch!()
@@ -262,7 +262,7 @@ defmodule Example.Outbound.EventDispatchTest do
     # `echoed_id` can equal the row id is if the id Lua saw == the id written.
     s1 =
       create_subscription!(dest, "widget.updated",
-        transform_script: "result.body = { echoed_id = event.id }"
+        transform_source: "result.body = { echoed_id = event.id }"
       )
 
     create_widget!(%{name: "w", stock: 1})
@@ -346,7 +346,7 @@ defmodule Example.Outbound.EventDispatchTest do
         connection_id: dest.id,
         event_type: event_type,
         version: 1,
-        transform_script: Keyword.get(opts, :transform_script, "-- noop"),
+        transform_source: Keyword.get(opts, :transform_source, "-- noop"),
         notify_on_every_change: Keyword.get(opts, :notify_on_every_change, false)
       },
       authorize?: false

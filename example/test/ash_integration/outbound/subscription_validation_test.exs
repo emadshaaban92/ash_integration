@@ -66,7 +66,7 @@ defmodule Example.Outbound.SubscriptionValidationTest do
         connection_id: dest.id,
         event_type: "ghost.event",
         version: 1,
-        transform_script: "result = event"
+        transform_source: "result = event"
       })
 
     log =
@@ -129,7 +129,7 @@ defmodule Example.Outbound.SubscriptionValidationTest do
         connection_id: dest.id,
         event_type: event_type,
         version: version,
-        transform_script: "result = event",
+        transform_source: "result = event",
         route_config: route_config
       },
       authorize?: false
@@ -164,7 +164,7 @@ defmodule Example.Outbound.SubscriptionValidationTest do
         connection_id: dest.id,
         event_type: event_type,
         version: version,
-        transform_script: "result = event"
+        transform_source: "result = event"
       },
       authorize?: false
     )

@@ -98,7 +98,7 @@ defmodule Example.Outbound.EventProjectTest do
         connection_id: dest.id,
         event_type: "widget.scoped",
         version: 1,
-        transform_script: "-- noop"
+        transform_source: "-- noop"
       },
       authorize?: false
     )

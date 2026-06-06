@@ -106,7 +106,7 @@ if Connection |> Ash.read!(authorize?: false) |> Enum.empty?() do
         connection_id: connection.id,
         event_type: event_type,
         version: 1,
-        transform_script: script,
+        transform_source: script,
         route_config: %{type: :http, path: path, method: method}
       },
       authorize?: false

@@ -183,7 +183,7 @@ defmodule Example.Outbound.SubscriptionIndexLiveTest do
         connection_id: dest.id,
         event_type: event_type,
         version: 1,
-        transform_script: "-- noop"
+        transform_source: "-- noop"
       },
       authorize?: false
     )

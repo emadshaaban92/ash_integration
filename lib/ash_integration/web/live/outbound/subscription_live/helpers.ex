@@ -58,7 +58,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Helpers do
     event_type = current_value(form, "event_type")
     version = current_version(form)
     sample = if event_type && version, do: sample_event(event_type, version)
-    script = current_value(form, "transform_script")
+    script = current_value(form, "transform_source")
     connection = preview_connection(socket, form)
 
     Phoenix.Component.assign(socket,
@@ -84,7 +84,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Helpers do
   def transform_preview(script, sample, connection, route) do
     subscription =
       struct(AshIntegration.subscription_resource(),
-        transform_script: present(script) || "-- noop",
+        transform_source: present(script) || "-- noop",
         route_config: preview_route_config(connection, route)
       )
 

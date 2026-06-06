@@ -1,6 +1,6 @@
-defmodule AshIntegration.Outbound.Delivery.TransformTest do
+defmodule AshIntegration.Outbound.Delivery.Transform.Preview do
   @moduledoc """
-  Operator-triggered **transform test** for a saved subscription.
+  Operator-triggered **transform preview** for a saved subscription.
 
   It builds a sample event for the subscription's `(event_type, version)` and runs
   the subscription's Lua transform, returning the transform **input** and its
@@ -32,7 +32,7 @@ defmodule AshIntegration.Outbound.Delivery.TransformTest do
   alias AshIntegration.Outbound.Declare.Registry
 
   @doc """
-  Run a transform test for `subscription` (a record or its id), authorized as
+  Run a transform preview for `subscription` (a record or its id), authorized as
   `actor`. See the module doc for the result shape.
   """
   def run(subscription, actor) do
