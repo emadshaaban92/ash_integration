@@ -381,15 +381,24 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
               type="checkbox"
               label="Suppress unchanged deliveries"
             />
-            <p class="text-xs text-base-content/50 mt-1">
-              Skip a delivery whose <strong>body</strong>
-              is identical to the one last delivered for the same event key — a value
-              that bounces back (e.g. stock <code class="text-xs">5 → 6 → 5</code>) still sends.
-              Withheld deliveries are recorded as <code class="text-xs">suppressed</code>
-              (not <code class="text-xs">delivered</code>), so "last delivered" stays an honest
-              signal. Set <code class="text-xs">result.dedup_on</code>
-              in the transform to compare on something other than the body (e.g. a header).
-            </p>
+            <ul class="text-xs text-base-content/60 mt-1 list-disc list-inside space-y-0.5">
+              <li>
+                Skips a delivery whose <strong>body</strong>
+                matches the one last delivered for the same event key.
+              </li>
+              <li>
+                A value that bounces back (stock <code class="text-xs">5 → 6 → 5</code>) still sends.
+              </li>
+              <li>
+                Withheld deliveries are recorded as <code class="text-xs">suppressed</code>, not
+                <code class="text-xs">delivered</code>
+                — so "last delivered" stays accurate.
+              </li>
+              <li>
+                Set <code class="text-xs">result.dedup_on</code>
+                in the transform to compare on something other than the body (e.g. a header).
+              </li>
+            </ul>
           </div>
         </div>
 
