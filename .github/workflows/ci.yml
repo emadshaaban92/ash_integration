@@ -127,7 +127,9 @@ jobs:
         working-directory: example
     services:
       db:
-        image: postgres:16
+        # PostgreSQL 18+: migrations default primary keys to the built-in
+        # uuidv7() function, which does not exist on PG 17 and earlier.
+        image: postgres:18
         env:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: admin
