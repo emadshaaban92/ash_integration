@@ -169,10 +169,23 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
           <.field :if={@delivery.event} label="Subject (source id)" mono>
             {@delivery.event.source_resource_id}
           </.field>
+          <.field :if={@delivery.body_hash} label="Body hash (dedup)" mono>
+            {String.slice(@delivery.body_hash, 0, 16)}…
+          </.field>
         </div>
       </div>
 
-      <div :if={@delivery.last_error} class="alert alert-error mb-4">
+      <div :if={@delivery.state == :suppressed} class="alert alert-info mb-4">
+        <.icon name="hero-no-symbol" />
+        <span class="text-sm">
+          <strong>Suppressed</strong>
+          — the body was identical to the last delivered body for this event key, so
+          nothing was sent. The consumer is already up to date; this is not a failure
+          and did not touch the connection's health.
+        </span>
+      </div>
+
+      <div :if={@delivery.last_error && @delivery.state != :suppressed} class="alert alert-error mb-4">
         <.icon name="hero-exclamation-triangle" />
         <span class="font-mono text-sm">{@delivery.last_error}</span>
       </div>

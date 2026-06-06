@@ -11,7 +11,13 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   # delivery still blocks its `(connection, event_key)` lane (it's a candidate
   # "head"; see the scheduler). `:reprocess` moves it back to `:pending`; `:park`
   # moves it (back) in.
-  @states [:pending, :parked, :scheduled, :delivered, :cancelled]
+  # `:suppressed` is a terminal state for content-addressed suppression: the
+  # delivery was resolved and found byte-identical to the last DELIVERED body on
+  # its lane, so NO bytes were sent. It leaves the lane exactly like `:delivered`,
+  # but is a distinct bucket so it never pollutes the operational meaning of
+  # `:delivered` ("when did bytes last actually go out?"). See `Dedup` + the
+  # content-suppression design doc.
+  @states [:pending, :parked, :scheduled, :delivered, :suppressed, :cancelled]
 
   @impl true
   def after?(_), do: false
@@ -33,8 +39,9 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
      # (build-failed) or skipped delivery.
      |> add_attribute_if_not_exists(:delivery, :map, allow_nil?: true, public?: true)
      # Canonical content hash of a delivery's body (or a transform-set `dedup_on`),
-     # used by content-addressed suppression (`suppress_unchanged`). Schema only here
-     # — nil and unused until the suppression feature populates and reads it.
+     # computed at materialize for `suppress_unchanged` subscriptions (nil otherwise,
+     # and for parked/cancelled rows). The scheduler compares it against the lane's
+     # last DELIVERED body to decide content suppression (`Dedup`).
      |> add_attribute_if_not_exists(:body_hash, :string, allow_nil?: true, public?: true)
      |> add_attribute_if_not_exists(:state, :atom,
        allow_nil?: false,
@@ -86,6 +93,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
      |> add_parked_action_if_not_exists()
      |> add_schedule_action_if_not_exists()
      |> add_deliver_action_if_not_exists()
+     |> add_suppress_action_if_not_exists()
      |> add_record_attempt_error_action_if_not_exists()
      |> add_cancel_action_if_not_exists()
      |> add_reprocess_action_if_not_exists()
@@ -472,6 +480,34 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     end
   end
 
+  # Content-suppression terminal transition: `pending → suppressed`. The scheduler
+  # calls this instead of `:schedule` when the head's body equals the lane's last
+  # delivered body — so a suppressed row never becomes `:scheduled`, never claimed.
+  # It writes a `:suppressed` log row but — unlike `:deliver` — does NOT reset the
+  # failure counters (a suppression touches no transport, so it proves nothing about
+  # endpoint health; resetting would mask a degrading target). The scheduler pushes
+  # the `state == :pending` precondition at the call site (as it does for `:schedule`).
+  defp add_suppress_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :suppress) do
+      dsl_state
+    else
+      {:ok, action} =
+        Transformer.build_entity(Dsl, [:actions], :update,
+          name: :suppress,
+          accept: [:last_error],
+          require_atomic?: false,
+          changes: [
+            set_state(:suppressed),
+            Transformer.build_entity!(Dsl, [:actions, :update], :change,
+              change: AshIntegration.Outbound.Delivery.Changes.OnDeliverySuppressed
+            )
+          ]
+        )
+
+      Transformer.add_entity(dsl_state, [:actions], action, type: :append)
+    end
+  end
+
   defp add_record_attempt_error_action_if_not_exists(dsl_state) do
     if Info.action(dsl_state, :record_attempt_error) do
       dsl_state
@@ -529,7 +565,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :update,
           name: :reprocess,
-          accept: [:delivery, :last_error],
+          accept: [:delivery, :body_hash, :last_error],
           require_atomic?: false,
           changes: [set_state(:pending)]
         )
@@ -624,6 +660,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
         {:read_all, [action: :read]},
         {:schedule, [action: :schedule]},
         {:deliver, [action: :deliver]},
+        {:suppress, [action: :suppress]},
         {:record_attempt_error, [action: :record_attempt_error]},
         {:cancel, [action: :cancel]},
         {:reprocess, [action: :reprocess]},

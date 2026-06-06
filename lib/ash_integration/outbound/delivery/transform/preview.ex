@@ -96,7 +96,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Preview do
       :skip ->
         {:ok, %{outcome: :skipped, input: input, output: nil, source: sample.source}}
 
-      {:ok, delivery} ->
+      {:ok, delivery, _body_hash} ->
         {:ok, %{outcome: :ok, input: input, output: delivery, source: sample.source}}
 
       {:error, error} ->

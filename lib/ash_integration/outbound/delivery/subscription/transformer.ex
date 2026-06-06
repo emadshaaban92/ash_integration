@@ -48,10 +48,11 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
        public?: true,
        always_select?: true
      )
-     # Opt in to content-addressed suppression: a delivery whose body is identical
-     # to the last one delivered on its `(subscription, event_key)` lane is withheld.
-     # Schema only here — the suppression logic lands in a follow-up; default off so
-     # existing subscriptions are unchanged.
+     # Opt in to content-addressed suppression: a delivery whose body (or transform-
+     # set `dedup_on`) is byte-identical to the last DELIVERED body on its
+     # `(subscription, event_key)` lane is withheld (decided at schedule time →
+     # state `:suppressed`, no transport). Orthogonal to `notify_on_every_change`;
+     # default off so existing subscriptions are unchanged.
      |> add_attribute_if_not_exists(:suppress_unchanged, :boolean,
        default: false,
        public?: true,

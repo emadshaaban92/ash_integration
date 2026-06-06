@@ -97,7 +97,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Helpers do
       :skip ->
         {:ok, :skip}
 
-      {:ok, descriptor} ->
+      {:ok, descriptor, _body_hash} ->
         {:ok, Jason.encode!(descriptor, pretty: true)}
 
       {:error, message} ->

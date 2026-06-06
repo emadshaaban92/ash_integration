@@ -96,8 +96,9 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
         update!(delivery, :cancel, %{last_error: "Skipped by transform"})
         {:ok, :cancelled}
 
-      {:ok, resolved} ->
-        update!(delivery, :reprocess, %{delivery: resolved, last_error: nil})
+      {:ok, resolved, body_hash} ->
+        update!(delivery, :reprocess, %{delivery: resolved, body_hash: body_hash, last_error: nil})
+
         Scheduler.notify()
         {:ok, :pending}
 

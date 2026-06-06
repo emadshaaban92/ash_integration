@@ -197,6 +197,11 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
           <.field label="Coalescing">
             {if @subscription.notify_on_every_change, do: "Every change", else: "Latest state only"}
           </.field>
+          <.field label="Suppress unchanged">
+            {if @subscription.suppress_unchanged,
+              do: "On — identical bodies withheld",
+              else: "Off"}
+          </.field>
         </div>
       </div>
 

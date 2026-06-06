@@ -29,7 +29,9 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
         total_connections: count(conn, actor),
         total_event_types: map_size(AshIntegration.Outbound.Declare.Registry.catalog()),
         delivered_24h:
-          count(Ash.Query.filter(log, status == :success and created_at >= ^since), actor)
+          count(Ash.Query.filter(log, status == :success and created_at >= ^since), actor),
+        suppressed_24h:
+          count(Ash.Query.filter(log, status == :suppressed and created_at >= ^since), actor)
       }
     )
   end
@@ -84,7 +86,13 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
         <div class="stat">
           <div class="stat-title">Delivered (24h)</div>
           <div class="stat-value">{stat(@stats.delivered_24h)}</div>
-          <div class="stat-desc">successful deliveries in the last 24h</div>
+          <div class="stat-desc">bytes-on-the-wire deliveries in the last 24h</div>
+        </div>
+
+        <div class="stat">
+          <div class="stat-title">Suppressed (24h)</div>
+          <div class="stat-value">{stat(@stats.suppressed_24h)}</div>
+          <div class="stat-desc">unchanged deliveries withheld (not sent)</div>
         </div>
 
         <div class="stat">

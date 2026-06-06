@@ -371,7 +371,7 @@ defmodule Example.Outbound.TransportHttpTest do
         data: data
       })
 
-    {:ok, delivery} =
+    {:ok, delivery, _body_hash} =
       AshIntegration.Outbound.Delivery.Resolver.resolve(
         subscription.connection,
         subscription,

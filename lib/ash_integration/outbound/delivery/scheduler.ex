@@ -20,11 +20,20 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   Connections that are suspended are skipped entirely. All of this is decided in
   a single set-based query (`find_schedulable_events/1`), so blocked lanes are
   simply absent from each pass rather than visited-and-skipped.
+
+  **Content suppression** is decided here too (`suppress_unchanged`): when a ready
+  head's body is identical to its lane's last delivered body, it is promoted
+  `pending → :suppressed` instead of `:scheduled` — so an unchanged state never
+  becomes a delivery, never reaches the relay, and never occupies the lane's
+  in-flight slot. This is the natural place for it: the slot is free, so the prior
+  head is terminal and "the last delivered body" is already known.
   """
   use GenServer
 
   require Logger
   import Ash.Expr
+
+  alias AshIntegration.Outbound.Delivery.Dedup
 
   @idle_interval :timer.seconds(10)
   @min_run_interval_ms 1_000
@@ -80,39 +89,82 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   `(connection_id, event_key)` lane. Public so tests can drive it directly.
 
   `find_schedulable_events/1` already excludes blocked lanes (parked or
-  suspended head, in-flight slot taken), so every id it returns is deliverable.
+  suspended head, in-flight slot taken), so every id it returns is promotable.
   We loop only while a full batch came back **and** we made progress, so a
-  persistent schedule failure can't spin.
+  persistent failure can't spin.
+
+  Promoting a head either **schedules** it (a delivery job for the relay) or, when
+  the subscription opted into `suppress_unchanged` and the head's body is identical
+  to the lane's last delivered body, **suppresses** it (`pending → :suppressed`,
+  no delivery — see `promote/1`). A suppressed head frees the lane just like a
+  delivered one, so the next head promotes on the following pass.
   """
   def sweep do
     ids = find_schedulable_events(@batch_size)
-    scheduled = Enum.count(ids, &(schedule_event(&1) == :scheduled))
+    progress = Enum.count(ids, &(promote(&1) in [:scheduled, :suppressed]))
 
-    if length(ids) >= @batch_size and scheduled > 0, do: sweep(), else: :ok
+    if length(ids) >= @batch_size and progress > 0, do: sweep(), else: :ok
   end
 
-  # Promote one event `pending → scheduled`, guarded on it still being `:pending`
-  # (the `Ash.Changeset.filter` pushes `WHERE … state = 'pending'` into the
-  # UPDATE). That closes the read→write race: between the query above and here,
-  # coalescing may have cancelled it or another scheduler may have grabbed it — a
-  # clean no-op either way, not a resurrect.
-  # The partial unique index is the backstop against two in-flight per lane.
-  defp schedule_event(event_id) do
+  # Promote one ready head: `:suppress` it when its content is unchanged since the
+  # lane's last delivered body, otherwise `:schedule` it. Both are guarded on the
+  # row still being `:pending` (the `Ash.Changeset.filter` pushes `WHERE … state =
+  # 'pending'` into the UPDATE) — closing the read→write race: between the query
+  # above and here, coalescing may have cancelled it or another scheduler may have
+  # grabbed it, a clean no-op either way, not a resurrect. The partial unique index
+  # is the backstop against two in-flight per lane.
+  #
+  # Deciding suppression HERE is correct and cheap: the lane has no in-flight row
+  # (the query required the slot free), so the previous head is already terminal and
+  # "the last delivered body" is determinate. A suppressed head never becomes
+  # `:scheduled`, so it never enters the delivery relay, never claims a lease, never
+  # bumps `attempts`, and never occupies the lane's one in-flight slot.
+  defp promote(event_id) do
     case Ash.get(AshIntegration.event_delivery_resource(), event_id, authorize?: false) do
-      {:ok, event} ->
-        event
-        |> Ash.Changeset.for_update(:schedule, %{}, authorize?: false)
-        |> Ash.Changeset.filter(expr(state == :pending))
-        |> Ash.update(authorize?: false)
-        |> case do
-          {:ok, _} -> :scheduled
-          {:error, _} -> :skipped
-        end
+      {:ok, delivery} ->
+        apply_promotion(delivery, if(suppress?(delivery), do: :suppress, else: :schedule))
 
       {:error, _} ->
         :skipped
     end
   end
+
+  defp apply_promotion(delivery, action) do
+    delivery
+    |> Ash.Changeset.for_update(action, %{}, authorize?: false)
+    |> Ash.Changeset.filter(expr(state == :pending))
+    |> Ash.update(authorize?: false)
+    |> case do
+      {:ok, _} -> promoted_result(action)
+      {:error, _} -> :skipped
+    end
+  end
+
+  defp promoted_result(:suppress), do: :suppressed
+  defp promoted_result(:schedule), do: :scheduled
+
+  # A row carries a `body_hash` only when its subscription opted into
+  # `suppress_unchanged` (the Resolver computes it for those alone), so the column's
+  # presence scopes the check. Suppress iff that hash equals the lane's last
+  # delivered body. Any lookup error falls back to "don't suppress" (schedule) —
+  # suppression must never cause a missed delivery.
+  defp suppress?(%{body_hash: hash} = delivery) when is_binary(hash) do
+    Dedup.last_delivered_hash(delivery) == hash
+  rescue
+    e ->
+      # Fail open: a baseline-lookup fault must never block a delivery. But log it —
+      # a persistent fault would otherwise silently disable suppression with no
+      # signal at all.
+      Logger.warning(
+        "Scheduler: suppression baseline lookup failed for delivery #{delivery.id} " <>
+          "(subscription #{delivery.subscription_id}, key #{delivery.event_key}); " <>
+          "scheduling normally. #{Exception.message(e)}"
+      )
+
+      false
+  end
+
+  defp suppress?(_delivery), do: false
 
   @doc false
   # One set-based query returns the **event id to schedule** for every ready lane:

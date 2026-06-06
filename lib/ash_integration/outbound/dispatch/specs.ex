@@ -119,8 +119,8 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
       :skip ->
         cancelled_spec(event, subscription, "Skipped by transform")
 
-      {:ok, delivery} ->
-        pending_spec(event, subscription, delivery)
+      {:ok, delivery, body_hash} ->
+        pending_spec(event, subscription, delivery, body_hash)
 
       {:error, lua_error} ->
         park_spec(event, subscription, "Transform error: #{lua_error}")
@@ -132,9 +132,14 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
   # Only pending deliveries can supersede a sibling, and a `notify_on_every_change`
   # subscription opts out of coalescing entirely — so we bake the decision in here,
   # where the subscription is in hand, rather than re-loading it inside the txn.
-  defp pending_spec(event, subscription, delivery) do
+  defp pending_spec(event, subscription, delivery, body_hash) do
     %{
-      attrs: Map.merge(base_attrs(event, subscription), %{delivery: delivery, state: :pending}),
+      attrs:
+        Map.merge(base_attrs(event, subscription), %{
+          delivery: delivery,
+          body_hash: body_hash,
+          state: :pending
+        }),
       coalesce?: not subscription.notify_on_every_change
     }
   end

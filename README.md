@@ -16,6 +16,7 @@ Declare named, versioned **event types** that your resource actions contribute t
 - **[Event-driven delivery](guides/delivery-pipeline.md)** — an immutable `Event` log is the source of truth (a transactional outbox); two Broadway relays claim rows directly — one fans events out, one delivers them — with no external job queue to wire
 - **At-least-once semantics** — events are never lost, even if a claim is lost or a node crashes
 - **Ordering & latest-state coalescing** — per-`(connection, event_key)` ordering enforced by a partial unique index (database-level correctness), with the same key driving latest-state coalescing
+- **Content suppression** — opt a subscription into `suppress_unchanged` to withhold a delivery whose body matches the last delivered one (a recurring value still sends); this also gives field-level subscription for free (project the fields you care about), surfaced as a distinct `suppressed` state
 - **Two-level suspension** — transport failures auto-suspend the connection, response rejections auto-suspend just the subscription (events keep accumulating, no data loss)
 - **Reprocess** — re-run Lua transforms across stuck (parked) events after fixing a script
 - **Delivery logs** — full request/response logging with configurable retention
@@ -506,6 +507,14 @@ function transform(event, defaults)
   if event.data.status == "draft" then
     return nil
   end
+  return defaults
+end
+
+-- Content suppression (when the subscription has suppress_unchanged): by default
+-- the dedup hash is over the body only. Set dedup_on to compare on something else
+-- (e.g. a header, or a subset of the body); it is stripped from the wire payload.
+function transform(event, defaults)
+  defaults.dedup_on = { stock = event.data.stock }
   return defaults
 end
 ```

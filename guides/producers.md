@@ -205,6 +205,17 @@ scoping/redaction, which can't run at T0 because the subscription set doesn't ex
 yet) or what you explicitly accept as T1. Document, per producer, which fields fall
 on which side.
 
+## Field-level subscription (projection + suppression)
+
+There is no "watched fields" setting — and there doesn't need to be. Because the
+delivered **body** is per-subscription (your `project` redaction and the
+subscription's Lua transform produce it), narrowing the body to the fields a
+consumer cares about, combined with the subscription's `suppress_unchanged: true`,
+*is* field-level subscription: a change to any field outside the projection yields
+an identical body and is suppressed. "Only tell me when these fields change" =
+"project those fields + suppress unchanged." See
+[Content Suppression](delivery-pipeline.md#content-suppression-suppress_unchanged).
+
 ## Schema Versioning
 
 A version's optional **schema** is a module exposing `example/0`, used to preview
