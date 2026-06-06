@@ -33,7 +33,6 @@ defmodule Example.Outbound.TransformPreviewTest do
     assert result.input.event_key == "widget-id"
     # The output is the fully-resolved transport-shaped descriptor: routing (URL),
     # the pre-seeded wire headers, and the body — exactly what dispatch would send.
-    assert result.output["transport"] == "http"
     assert result.output["url"] == "http://localhost:9999/webhook"
     assert result.output["method"] == "post"
     assert result.output["headers"]["x-event-type"] == "widget.updated"

@@ -29,7 +29,6 @@ defmodule Example.Outbound.DeliveryResolverTest do
 
       {:ok, d} = resolve(dest, sub, %{"hello" => "world"})
 
-      assert d["transport"] == "http"
       assert d["method"] == "post"
       assert d["url"] == "http://localhost:9999/webhook"
       assert d["headers"]["x-event-type"] == "widget.updated"
@@ -313,7 +312,6 @@ defmodule Example.Outbound.DeliveryResolverTest do
 
       {:ok, d} = resolve(dest, sub, %{"q" => 1}, event_key: "w-1", created_at: created_at)
 
-      assert d["transport"] == "kafka"
       assert d["topic"] == "events"
       assert d["key"] == "w-1"
       assert d["timestamp"] == DateTime.to_unix(created_at, :millisecond)

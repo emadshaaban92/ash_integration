@@ -183,7 +183,6 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
          {:ok, url} <- resolve_url(config, result) do
       {:ok,
        %{
-         "transport" => "http",
          "method" => method,
          "url" => url,
          "headers" => headers,
@@ -198,7 +197,6 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
          {:ok, timestamp} <- normalize_timestamp(result["timestamp"], created_at) do
       {:ok,
        %{
-         "transport" => "kafka",
          "topic" => topic,
          "key" => to_string(result["key"]),
          "timestamp" => timestamp,
