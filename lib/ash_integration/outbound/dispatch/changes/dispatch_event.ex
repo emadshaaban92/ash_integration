@@ -57,21 +57,52 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
   defp dispatch_plan(%{source_context: %{dispatch_plan: plan}}) when is_map(plan), do: plan
   defp dispatch_plan(_context), do: %{}
 
-  # Insert every spec (bang — a genuine DB failure raises and rolls back the whole
-  # batch), then coalesce the pending ones. Coalescing runs after all inserts so a
-  # batch carrying several same-key events settles to the newest.
+  # Insert every spec in ONE bulk INSERT per batch (one DB round-trip instead of N),
+  # then coalesce the pending ones. Coalescing runs after all inserts so a batch
+  # carrying several same-key events settles to the newest.
+  #
+  # `notify?: false` is the direct way to say "we don't want these notifications":
+  # the rows are created inside the dispatch transaction (parent `:dispatch` is also
+  # `notify?: false` — see `Relay.dispatch/2`) and nothing consumes EventDelivery
+  # notifications, so this skips generating them entirely — no structs allocated only
+  # to be discarded, and none of the "Missed N notifications" noise that would
+  # otherwise surface in host applications' own test runs.
+  #
+  # `sorted?: true` aligns `records` with the input order so each delivery maps back
+  # to its spec's `coalesce?` flag. `stop_on_error?: true` + raising on a non-success
+  # status preserves the bang contract: a genuine DB failure rolls back the whole
+  # batch (leaving the event undispatched for the lease to re-emit).
+  defp materialize_all!([]), do: :ok
+
   defp materialize_all!(specs) do
-    specs
-    |> Enum.map(fn %{attrs: attrs, coalesce?: coalesce?} -> {insert!(attrs), coalesce?} end)
-    |> Enum.each(fn {delivery, coalesce?} ->
-      if coalesce? and delivery.state == :pending, do: coalesce_superseded!(delivery)
-    end)
+    result =
+      Ash.bulk_create(
+        Enum.map(specs, & &1.attrs),
+        AshIntegration.event_delivery_resource(),
+        :create,
+        return_records?: true,
+        return_errors?: true,
+        sorted?: true,
+        stop_on_error?: true,
+        notify?: false,
+        authorize?: false
+      )
+
+    case result do
+      %Ash.BulkResult{status: :success, records: deliveries} ->
+        coalesce_pending!(specs, deliveries)
+
+      %Ash.BulkResult{errors: errors} ->
+        raise "EventDelivery bulk insert failed: #{inspect(errors)}"
+    end
   end
 
-  defp insert!(attrs) do
-    AshIntegration.event_delivery_resource()
-    |> Ash.Changeset.for_create(:create, attrs, authorize?: false)
-    |> Ash.create!(authorize?: false)
+  defp coalesce_pending!(specs, deliveries) do
+    specs
+    |> Enum.zip(deliveries)
+    |> Enum.each(fn {%{coalesce?: coalesce?}, delivery} ->
+      if coalesce? and delivery.state == :pending, do: coalesce_superseded!(delivery)
+    end)
   end
 
   # ── Coalescing (latest-state) — per (subscription_id, event_key) ────────────
