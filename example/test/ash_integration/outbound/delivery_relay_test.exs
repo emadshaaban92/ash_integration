@@ -255,6 +255,40 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
+  describe "handle_batch/4 (Broadway contract)" do
+    test "returns every received message, even on a mixed deliver + no-op batch", %{
+      connection: conn
+    } do
+      # Broadway requires `handle_batch/4` to return ALL messages it was given. The
+      # relay applies the suspended/`:noop` rows' outcomes for their side effects only
+      # and must still pass them through — dropping any makes Broadway log an error per
+      # batch and skips their normal ack.
+      stub_webhook_success()
+      s = create_subscription!(conn)
+      scheduled_delivery!(s, "p-deliver")
+      scheduled_delivery!(s, "p-noop")
+
+      # Both rows share a connection, so they form one batch (batch_key). Flip one row
+      # in-hand to a non-:scheduled state so the batch mixes a :deliver with a :noop
+      # (the "cancelled/already-delivered between claim and execution" case).
+      messages =
+        Dispatcher.claim(10)
+        |> Enum.sort_by(& &1.event_key)
+        |> then(fn [deliver, noop] -> [deliver, %{noop | state: :cancelled}] end)
+        |> Enum.map(&message/1)
+        |> Enum.map(&Relay.handle_message(:default, &1, %{}))
+
+      assert [:deliver, :noop] == Enum.map(messages, &Relay.decision(&1.data))
+
+      returned = Relay.handle_batch(:default, messages, %{}, %{})
+
+      # All received messages come back, with their status untouched (the relay never
+      # uses Broadway status for retry — backoff/poison live in the DB).
+      assert MapSet.new(returned, & &1.data.id) == MapSet.new(messages, & &1.data.id)
+      assert Enum.all?(returned, &(&1.status == :ok))
+    end
+  end
+
   describe "the real async pipeline" do
     test "an isolated start_supervised! relay claims and delivers a row end-to-end", %{
       connection: conn
@@ -270,6 +304,11 @@ defmodule Example.Outbound.DeliveryRelayTest do
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────
+
+  # A Broadway message wrapping a claimed delivery, as the producer would emit it.
+  defp message(delivery) do
+    %Broadway.Message{data: delivery, acknowledger: Broadway.NoopAcknowledger.init()}
+  end
 
   defp eventually(fun, retries \\ 40) do
     cond do
