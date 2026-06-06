@@ -323,7 +323,7 @@ defmodule Example.Outbound.EventSchedulerTest do
         connection_id: dest.id,
         event_type: event_type,
         version: 1,
-        transform_script: "result = event"
+        transform_source: "result = event"
       },
       authorize?: false
     )

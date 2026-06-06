@@ -42,7 +42,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
           "connection_id" => default_conn_id,
           "event_type" => default_type,
           "version" => default_version
-          # transform_script intentionally omitted — it's optional and defaults to
+          # transform_source intentionally omitted — it's optional and defaults to
           # nil (a no-op that sends the resolved delivery defaults).
         }
       )
@@ -297,7 +297,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
           </div>
 
           <.input
-            field={f[:transform_script]}
+            field={f[:transform_source]}
             type="textarea"
             label="Transform Script (optional)"
             placeholder={"-- Leave blank to send the defaults, or mutate `result`, e.g.:\nresult.body = { id = event.data.id }\nresult.headers[\"x-tenant\"] = event.data.tenant"}

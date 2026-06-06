@@ -250,7 +250,7 @@ defmodule Example.Outbound.RetentionTest do
         connection_id: dest.id,
         event_type: "widget.updated",
         version: 1,
-        transform_script: "result = event"
+        transform_source: "result = event"
       },
       authorize?: false
     )

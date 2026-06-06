@@ -113,7 +113,7 @@ defmodule Example.Outbound.CrossResourceEventKeyTest do
         connection_id: dest.id,
         event_type: event_type,
         version: 1,
-        transform_script: "result = event",
+        transform_source: "result = event",
         notify_on_every_change: Keyword.get(opts, :notify_on_every_change, false)
       },
       authorize?: false

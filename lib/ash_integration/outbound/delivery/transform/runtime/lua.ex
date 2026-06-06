@@ -1,4 +1,4 @@
-defmodule AshIntegration.Outbound.Delivery.LuaSandbox do
+defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   @max_script_size 10_240
   @default_timeout_ms 5_000
   # ~100M reductions ≈ a fraction of a second of runaway CPU before the kill (the
@@ -12,6 +12,11 @@ defmodule AshIntegration.Outbound.Delivery.LuaSandbox do
 
   @moduledoc """
   Sandboxed Lua execution environment for outbound transform scripts.
+
+  This is the `:lua` implementation of the
+  `AshIntegration.Outbound.Delivery.Transform.Runtime` behaviour — the in-process,
+  luerl-backed transform engine. The resolver reaches it through that
+  behaviour (never by name), so a future runtime can slot in beside it.
 
   Transform scripts are **operator-authored but untrusted at runtime** (a typo, a
   pathological loop, or hostile event data flowing into the script). Execution is
@@ -29,7 +34,11 @@ defmodule AshIntegration.Outbound.Delivery.LuaSandbox do
     a sandbox crash/kill surfaces as an error to the caller instead of taking the
     caller down with it.
 
-  Limits are configurable (with safe defaults):
+  The three resource axes are expressed in the runtime-neutral
+  `AshIntegration.Outbound.Delivery.Transform.Limits` vocabulary and mapped
+  onto luerl's native flags here (`max_steps → max_reductions`,
+  `max_memory_words → :max_heap_size`, `timeout_ms → max_time`). Limits are
+  configurable (with safe defaults):
 
       config :ash_integration,
         lua_sandbox: [
@@ -39,21 +48,48 @@ defmodule AshIntegration.Outbound.Delivery.LuaSandbox do
         ]
 
   Scripts receive event data as a global `event` table and produce output by
-  mutating a global `result` variable. The caller may **pre-seed** `result` (via
-  the `:result` option) with the transport-shaped delivery defaults, so a no-op
+  mutating a global `result` variable. The caller may **pre-seed** `result` (the
+  `defaults` argument) with the transport-shaped delivery defaults, so a no-op
   script sends those defaults and the script only has to express overrides. If the
   script sets `result` to nil, the event is skipped.
   """
 
-  def execute(script, event_data, opts \\ [])
+  @behaviour AshIntegration.Outbound.Delivery.Transform.Runtime
 
-  def execute(script, _event_data, _opts) when byte_size(script) > @max_script_size do
+  alias AshIntegration.Outbound.Delivery.Transform.Limits
+
+  @doc """
+  Convenience entry point: run `script` against `event_data` using the
+  config-driven default limits. `opts` may carry `:result` to pre-seed the
+  `result` global. Prefer `AshIntegration.Outbound.Delivery.Transform.Runtime` for
+  dispatch; this arity keeps the direct, limit-free call ergonomic.
+  """
+  def execute(script, event_data, opts \\ []) when is_list(opts) do
+    execute(script, event_data, Keyword.get(opts, :result), default_limits())
+  end
+
+  @impl true
+  def default_limits do
+    %Limits{
+      timeout_ms: timeout_ms(),
+      max_steps: max_reductions(),
+      max_memory_words: max_heap_words()
+    }
+  end
+
+  @impl true
+  def validate(script) when byte_size(script) > @max_script_size do
     {:error, "script exceeds maximum size of #{@max_script_size} bytes"}
   end
 
-  def execute(script, event_data, opts) do
-    preseed = Keyword.get(opts, :result)
+  def validate(_script), do: :ok
 
+  @impl true
+  def execute(script, _event, _defaults, _limits) when byte_size(script) > @max_script_size do
+    {:error, "script exceeds maximum size of #{@max_script_size} bytes"}
+  end
+
+  def execute(script, event, defaults, %Limits{} = limits) do
     task =
       Task.Supervisor.async_nolink(AshIntegration.TaskSupervisor, fn ->
         # The luerl runner's own `:max_heap_size` only bounds script *execution*.
@@ -61,34 +97,41 @@ defmodule AshIntegration.Outbound.Delivery.LuaSandbox do
         # here in the Task, after the runner returns — so a script that builds a
         # within-budget-but-huge `result` could balloon this process's heap, outside
         # that ceiling. Cap the Task heap too (kill: true → surfaces as `{:exit, _}`).
-        Process.flag(:max_heap_size, %{size: max_heap_words(), kill: true, error_logger: false})
-        run_sandboxed(script, event_data, preseed)
+        Process.flag(:max_heap_size, %{
+          size: limits.max_memory_words,
+          kill: true,
+          error_logger: false
+        })
+
+        run_sandboxed(script, event, defaults, limits)
       end)
 
     # Outer wall-clock backstop, slightly longer than the inner luerl `max_time`
     # so the sandbox returns its own classified resource error first. Because the
     # task is `async_nolink`, a brutal-kill or crash here comes back as `{:exit, _}`
     # — never propagated to (and crashing) the caller.
-    case Task.yield(task, timeout_ms() + 1_000) || Task.shutdown(task, :brutal_kill) do
+    case Task.yield(task, limits.timeout_ms + 1_000) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       {:exit, _reason} -> {:error, "transform sandbox crashed or was killed"}
-      nil -> {:error, "script execution timed out after #{timeout_ms()}ms"}
+      nil -> {:error, "script execution timed out after #{limits.timeout_ms}ms"}
     end
   end
 
   # Runs inside the async_nolink task. The actual Lua evaluation happens in a
   # FURTHER luerl-spawned runner (carrying the reduction + heap limits); this
   # function only builds the pre-seeded state and classifies the outcome.
-  defp run_sandboxed(script, event_data, preseed) do
+  defp run_sandboxed(script, event, defaults, %Limits{} = limits) do
     lua =
       Lua.new()
-      |> set_global(:event, event_data)
-      |> set_preseed(preseed)
+      |> set_global(:event, event)
+      |> set_preseed(defaults)
 
     flags = %{
-      max_reductions: max_reductions(),
-      max_time: timeout_ms(),
-      spawn_opts: [{:max_heap_size, %{size: max_heap_words(), kill: true, error_logger: false}}]
+      max_reductions: limits.max_steps,
+      max_time: limits.timeout_ms,
+      spawn_opts: [
+        {:max_heap_size, %{size: limits.max_memory_words, kill: true, error_logger: false}}
+      ]
     }
 
     case :luerl_sandbox.run(script, flags, lua.state) do

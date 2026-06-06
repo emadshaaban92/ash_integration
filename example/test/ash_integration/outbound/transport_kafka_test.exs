@@ -159,7 +159,7 @@ defmodule Example.Outbound.TransportKafkaTest do
         connection_id: dest.id,
         event_type: "stock.changed",
         version: 1,
-        transform_script: "-- noop"
+        transform_source: "-- noop"
       },
       authorize?: false
     )

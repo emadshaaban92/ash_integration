@@ -165,7 +165,7 @@ defmodule Example.Outbound.DeliveryShowLiveTest do
     |> Ash.create!(authorize?: false)
   end
 
-  defp create_subscription!(dest, event_type, transform_script \\ "-- noop") do
+  defp create_subscription!(dest, event_type, transform_source \\ "-- noop") do
     Subscription
     |> Ash.Changeset.for_create(
       :create,
@@ -173,7 +173,7 @@ defmodule Example.Outbound.DeliveryShowLiveTest do
         connection_id: dest.id,
         event_type: event_type,
         version: 1,
-        transform_script: transform_script
+        transform_source: transform_source
       },
       authorize?: false
     )
@@ -188,7 +188,7 @@ defmodule Example.Outbound.DeliveryShowLiveTest do
 
   defp fix_transform!(sub, script) do
     sub
-    |> Ash.Changeset.for_update(:update, %{transform_script: script}, authorize?: false)
+    |> Ash.Changeset.for_update(:update, %{transform_source: script}, authorize?: false)
     |> Ash.update!(authorize?: false)
   end
 end

@@ -62,7 +62,10 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
   def handle_event("test", _params, socket) do
     actor = socket.assigns.current_user
 
-    case AshIntegration.Outbound.Delivery.TransformTest.run(socket.assigns.subscription.id, actor) do
+    case AshIntegration.Outbound.Delivery.Transform.Preview.run(
+           socket.assigns.subscription.id,
+           actor
+         ) do
       {:ok, result} ->
         {:noreply,
          socket
@@ -70,7 +73,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
          |> put_flash(test_level(result.outcome), test_message(result))}
 
       _ ->
-        {:noreply, put_flash(socket, :error, "Could not run the transform test")}
+        {:noreply, put_flash(socket, :error, "Could not run the transform preview")}
     end
   end
 
@@ -253,13 +256,13 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
 
       <div class="card card-border border-base-300 p-4 mb-4">
         <h3 class="font-semibold mb-2">Transform</h3>
-        <div :if={blank?(@subscription.transform_script)} class="text-sm text-base-content/50">
+        <div :if={blank?(@subscription.transform_source)} class="text-sm text-base-content/50">
           No transform — delivers the resolved route defaults unchanged.
         </div>
         <pre
-          :if={!blank?(@subscription.transform_script)}
+          :if={!blank?(@subscription.transform_source)}
           class="bg-base-200 rounded-box p-3 text-xs overflow-x-auto"
-        ><code>{@subscription.transform_script}</code></pre>
+        ><code>{@subscription.transform_source}</code></pre>
       </div>
 
       <div :if={@test_result} class="card card-border border-base-300 p-4 mb-4">

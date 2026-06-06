@@ -348,7 +348,7 @@ defmodule Example.Outbound.DispatchRelayTest do
     |> Ash.create!(authorize?: false)
   end
 
-  defp create_subscription!(conn, event_type, transform_script \\ "-- noop") do
+  defp create_subscription!(conn, event_type, transform_source \\ "-- noop") do
     Subscription
     |> Ash.Changeset.for_create(
       :create,
@@ -356,7 +356,7 @@ defmodule Example.Outbound.DispatchRelayTest do
         connection_id: conn.id,
         event_type: event_type,
         version: 1,
-        transform_script: transform_script
+        transform_source: transform_source
       },
       authorize?: false
     )

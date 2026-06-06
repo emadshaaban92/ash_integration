@@ -322,7 +322,7 @@ defmodule Example.Outbound.TransportHttpTest do
           connection_id: dest.id,
           event_type: "widget.updated",
           version: 1,
-          transform_script: "-- noop"
+          transform_source: "-- noop"
         },
         Map.new(overrides)
       )

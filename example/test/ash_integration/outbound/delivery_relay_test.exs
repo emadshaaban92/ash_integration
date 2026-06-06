@@ -303,7 +303,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
         connection_id: conn.id,
         event_type: "widget.updated",
         version: 1,
-        transform_script: "-- noop"
+        transform_source: "-- noop"
       },
       authorize?: false
     )
