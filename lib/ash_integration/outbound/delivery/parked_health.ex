@@ -15,7 +15,10 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
   #     for the dashboard + resource views (standing/queryable signal).
   #   * `evaluate_parked_suspend/1` — only when the opt-in parked-suspend is enabled —
   #     auto-suspends a subscription whose standing parked backlog has crossed
-  #     `AshIntegration.parked_suspension_threshold/0`. The real-time
+  #     `AshIntegration.parked_suspension_threshold/0`. It is driven POST-COMMIT
+  #     (the dispatch relay after its `:dispatch` transaction, the reprocessor after
+  #     its run) — never inside the dispatch transaction — so its count/update can't
+  #     extend or poison that transaction. The real-time
   #     `[:ash_integration, :delivery, :parked]` telemetry is emitted at the park
   #     sites themselves (`DispatchEvent.after_batch`, `Reprocessor.park!`).
   #
@@ -66,22 +69,30 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
   end
 
   @doc """
-  Evaluate the opt-in parked-suspend against freshly-parked deliveries (a single
-  record or a list, as returned by the dispatch bulk insert / the reprocessor).
-  Non-parked rows are ignored, so callers can pass the whole bulk result.
+  Evaluate the opt-in parked-suspend for the subscriptions that just had deliveries
+  parked, given their ids (a single id or a list; nils/dups are tolerated). Each
+  subscription's STANDING parked backlog is re-counted, and any that has crossed
+  `AshIntegration.parked_suspension_threshold/0` is suspended.
 
-  The `[:ash_integration, :delivery, :parked]` telemetry itself is emitted at the
-  park sites (dispatch `DispatchEvent.after_batch`, `Reprocessor.park!`) — this
-  function only handles the standing-backlog auto-suspend (default OFF → no-op).
-  Never raises into its caller (a health side effect must not roll back a dispatch
-  batch); failures are logged and swallowed.
+  Drive this POST-COMMIT — after the dispatch `:dispatch` transaction (the relay)
+  or a reprocess run — never inside the dispatch transaction; the count/update here
+  must not extend or poison that transaction. The
+  `[:ash_integration, :delivery, :parked]` telemetry itself is emitted at the park
+  sites (`DispatchEvent.after_batch`, `Reprocessor.park!`); this function only
+  handles the standing-backlog auto-suspend (default OFF → no-op). Never raises
+  into its caller; failures are logged and swallowed.
   """
-  @spec evaluate_parked_suspend(map() | [map()]) :: :ok
-  def evaluate_parked_suspend(delivery_or_deliveries) do
-    delivery_or_deliveries
-    |> List.wrap()
-    |> Enum.filter(&(Map.get(&1, :state) == :parked))
-    |> maybe_parked_suspend()
+  @spec evaluate_parked_suspend(binary() | [binary() | nil]) :: :ok
+  def evaluate_parked_suspend(subscription_id_or_ids) do
+    if AshIntegration.parked_suspension_enabled?() do
+      threshold = AshIntegration.parked_suspension_threshold()
+
+      subscription_id_or_ids
+      |> List.wrap()
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.each(&maybe_suspend_subscription(&1, threshold))
+    end
 
     :ok
   rescue
@@ -92,30 +103,13 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
 
   # ── Opt-in parked-suspend (default OFF) ───────────────────────────────────
 
-  defp maybe_parked_suspend([]), do: :ok
-
-  defp maybe_parked_suspend(parked) do
-    if AshIntegration.parked_suspension_enabled?() do
-      threshold = AshIntegration.parked_suspension_threshold()
-
-      parked
-      |> Enum.map(& &1.subscription_id)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-      |> Enum.each(&maybe_suspend_subscription(&1, threshold))
-    end
-
-    :ok
-  end
-
   # Park is subscription-shaped (the transform belongs to the subscription, and a
   # parked head blocks only that subscription's lane), so the opt-in halt acts on
   # the SUBSCRIPTION — the narrower blast radius — never the whole connection. The
   # connection's parked health stays purely visible/alertable.
   defp maybe_suspend_subscription(subscription_id, threshold) do
-    if count_parked_for_subscription(subscription_id) >= threshold do
-      parked_suspend(subscription_id)
-    end
+    count = count_parked_for_subscription(subscription_id)
+    if count >= threshold, do: parked_suspend(subscription_id, count)
   end
 
   defp count_parked_for_subscription(subscription_id) do
@@ -128,9 +122,8 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
   # auto-suspend (OnDeliveryFailure): exactly one concurrent crosser wins and logs;
   # the loser is a clean no-op. Crucially it does NOT bump/clear
   # `consecutive_failures` — parked-suspend is its own dimension.
-  defp parked_suspend(subscription_id) do
+  defp parked_suspend(subscription_id, count) do
     resource = AshIntegration.subscription_resource()
-    count = count_parked_for_subscription(subscription_id)
 
     reason =
       "Auto-suspended: #{count} parked deliveries (broken transform/producer — reprocess to clear)"
@@ -139,11 +132,10 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
     |> Ash.get!(subscription_id, authorize?: false)
     |> Ash.Changeset.for_update(:suspend, %{reason: reason}, authorize?: false)
     |> Ash.Changeset.filter(Ash.Expr.expr(suspended == false))
-    # `return_notifications?: true` (then discard): this can run inside the dispatch
-    # batch transaction (the park site). Nothing consumes subscription suspension
-    # notifications, and returning them keeps Ash from warning about "missed
-    # notifications" — mirroring the dispatch path, which likewise discards its
-    # EventDelivery notifications.
+    # `return_notifications?: true` (then discard): nothing consumes subscription
+    # suspension notifications, and returning them keeps Ash from warning about
+    # "missed notifications" — mirroring the dispatch path, which likewise discards
+    # its EventDelivery notifications.
     |> Ash.update(authorize?: false, return_notifications?: true)
     |> case do
       {:ok, _record, _notifications} ->

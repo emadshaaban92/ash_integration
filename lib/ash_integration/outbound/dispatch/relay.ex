@@ -43,6 +43,7 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
   """
   use Broadway
 
+  alias AshIntegration.Outbound.Delivery.ParkedHealth
   alias AshIntegration.Outbound.Dispatch.RelayProducer
   alias AshIntegration.Outbound.Dispatch.Specs
   alias AshIntegration.Outbound.Dispatch.Dispatcher
@@ -155,16 +156,37 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
 
   @impl true
   def handle_batch(:default, messages, _batch_info, _context) do
-    case run_dispatch(messages) do
-      :ok ->
-        messages
+    dispatched =
+      case run_dispatch(messages) do
+        :ok ->
+          messages
 
-      {:error, _reason} ->
-        # The whole-batch transaction rolled back (infra). Retry each event in its
-        # own single-row transaction so a poison row fails alone and its batchmates
-        # still dispatch.
-        Enum.map(messages, &retry_one/1)
-    end
+        {:error, _reason} ->
+          # The whole-batch transaction rolled back (infra). Retry each event in its
+          # own single-row transaction so a poison row fails alone and its batchmates
+          # still dispatch.
+          Enum.map(messages, &retry_one/1)
+      end
+
+    # POST-COMMIT: evaluate the opt-in parked-suspend for any subscription that just
+    # had deliveries parked (default OFF → no-op). Kept out of the change's
+    # `after_batch` so its count/update never runs inside the dispatch transaction —
+    # only committed (non-failed) messages are considered.
+    evaluate_parked_suspend(dispatched)
+
+    dispatched
+  end
+
+  # Subscriptions whose just-committed dispatch produced a `:parked` delivery, read
+  # off the specs (their `attrs` carry `state`/`subscription_id`). Failed messages
+  # rolled back, so their parked rows don't exist — skip them.
+  defp evaluate_parked_suspend(messages) do
+    messages
+    |> Enum.filter(&match?(%Message{status: :ok}, &1))
+    |> Enum.flat_map(fn %Message{data: %{specs: specs}} -> specs end)
+    |> Enum.filter(&(&1.attrs.state == :parked))
+    |> Enum.map(& &1.attrs.subscription_id)
+    |> ParkedHealth.evaluate_parked_suspend()
   end
 
   # One `bulk_update(:dispatch)` over the batch: stamps `dispatched_at` and
