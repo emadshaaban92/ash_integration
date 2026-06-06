@@ -49,6 +49,7 @@ defmodule AshIntegration.Connection.Transformer do
      |> add_subscriptions_relationship_if_not_exists()
      |> add_deliveries_relationship_if_not_exists()
      |> add_owner_relationship_if_not_exists()
+     |> add_parked_aggregates_if_not_exists()
      |> add_identity_if_not_exists(:name, [:name])
      |> add_activate_action_if_not_exists()
      |> add_deactivate_action_if_not_exists()
@@ -176,6 +177,51 @@ defmodule AshIntegration.Connection.Transformer do
         )
 
       Transformer.add_entity(dsl_state, [:relationships], relationship, type: :append)
+    end
+  end
+
+  # Standing parked-backlog health across all of the connection's subscriptions
+  # (`ParkedHealth`): `parked_count` (count of `:parked` deliveries) +
+  # `oldest_parked_at` (min `created_at` of them). Query-time aggregates filtered to
+  # `state == :parked`; added-if-not-exists so hosts can override. The connection's
+  # parked health is purely visible/alertable — the opt-in parked-suspend acts on
+  # subscriptions, never the connection.
+  defp add_parked_aggregates_if_not_exists(dsl_state) do
+    dsl_state
+    |> add_parked_count_aggregate_if_not_exists()
+    |> add_oldest_parked_at_aggregate_if_not_exists()
+  end
+
+  defp add_parked_count_aggregate_if_not_exists(dsl_state) do
+    if Info.aggregate(dsl_state, :parked_count) do
+      dsl_state
+    else
+      {:ok, aggregate} =
+        Transformer.build_entity(Dsl, [:aggregates], :count,
+          name: :parked_count,
+          relationship_path: :deliveries,
+          filter: [state: :parked],
+          public?: true
+        )
+
+      Transformer.add_entity(dsl_state, [:aggregates], aggregate, type: :append)
+    end
+  end
+
+  defp add_oldest_parked_at_aggregate_if_not_exists(dsl_state) do
+    if Info.aggregate(dsl_state, :oldest_parked_at) do
+      dsl_state
+    else
+      {:ok, aggregate} =
+        Transformer.build_entity(Dsl, [:aggregates], :min,
+          name: :oldest_parked_at,
+          relationship_path: :deliveries,
+          field: :created_at,
+          filter: [state: :parked],
+          public?: true
+        )
+
+      Transformer.add_entity(dsl_state, [:aggregates], aggregate, type: :append)
     end
   end
 

@@ -2,6 +2,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
   @moduledoc false
   use AshIntegration.Web, :live_view
 
+  alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
   alias AshIntegration.Web.Outbound.Helpers
   alias AshIntegration.Web.Outbound.SubscriptionLive.FormComponent
 
@@ -40,7 +41,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
 
     page =
       AshIntegration.subscription_resource()
-      |> Ash.Query.load([:connection, :last_delivered_at])
+      |> Ash.Query.load([:connection, :last_delivered_at, :parked_count, :oldest_parked_at])
       |> Helpers.read_page!(actor: actor, page: [limit: 20, offset: offset, count: true])
 
     assign(socket,
@@ -156,7 +157,12 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
                   {sub.connection && sub.connection.name}
                 </.link>
               </td>
-              <td><.active_badge active={sub.active} /></td>
+              <td>
+                <div class="flex items-center gap-1">
+                  <.active_badge active={sub.active} />
+                  <DeliveryHelpers.health_badge record={sub} />
+                </div>
+              </td>
               <td>
                 <span class={[
                   "badge badge-sm",

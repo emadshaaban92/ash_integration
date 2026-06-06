@@ -20,6 +20,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `attempts` and source-change → ack `duration_ms`.
 - `AshIntegration.Telemetry` (events reference + `events/0`) and an
   [Observability guide](guides/observability.md) enumerating every event.
+- **A standing parked-health dimension** so a chronically-parked subscription or
+  connection finally surfaces as non-healthy instead of reading green. Park stays a
+  recoverable build failure (a broken transform/`project`) — its semantics, and the
+  transport/response `consecutive_failures` suspension, are unchanged — but it is no
+  longer invisible:
+  - New `parked_count` (count of `:parked` deliveries) and `oldest_parked_at` (their
+    min `created_at`) aggregates on both the subscription and connection resources,
+    filtered to `state == :parked`. Query-time (no migration), added-if-not-exists
+    so hosts can override. The connection's span all its subscriptions.
+  - A derived health status (`:healthy | :degraded | :parked`) via
+    `AshIntegration.Outbound.Delivery.ParkedHealth.status/1`, configurable with
+    `parked_health_threshold` (default `10`): zero parked is healthy, a backlog
+    below the threshold is degraded, at/above is parked.
+  - The dashboard gains a standing **"Parked"** stat (next to "Suppressed (24h)");
+    the subscription/connection index + detail pages show the parked count and a
+    degraded/parked badge. Load failures surface (they are not swallowed; cf. #14).
+    The real-time signal is the `[:ash_integration, :delivery, :parked]` telemetry
+    above; these aggregates are the standing/queryable one.
+  - **Opt-in parked-suspend (default OFF):** with
+    `config :ash_integration, parked_suspension: [enabled?: true, count_threshold: 50]`,
+    a subscription whose standing parked backlog crosses the threshold is
+    auto-suspended — a *distinct* suspension that is reprocess- + `unsuspend`-
+    resumable and **never** bumps `consecutive_failures` (so it is never conflated
+    with the failure-counter suspend). Off by default: a parked head already blocks
+    only its own lane, so the conservative default is visible/alertable with no
+    auto-halt. When it fires it reuses the `[:ash_integration, :subscription,
+    :suspended]` event with `failure_class: "parked"` (and `parked_count` in
+    measurements), so a suspension monitor catches the opt-in halt.
 
 ## [0.2.0]
 

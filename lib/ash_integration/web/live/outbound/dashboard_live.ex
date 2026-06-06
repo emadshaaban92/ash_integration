@@ -17,6 +17,7 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
     actor = socket.assigns.current_user
     sub = AshIntegration.subscription_resource()
     conn = AshIntegration.connection_resource()
+    delivery = AshIntegration.event_delivery_resource()
     log = AshIntegration.delivery_log_resource()
     since = DateTime.add(DateTime.utc_now(), -24, :hour)
 
@@ -31,7 +32,11 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
         delivered_24h:
           count(Ash.Query.filter(log, status == :success and created_at >= ^since), actor),
         suppressed_24h:
-          count(Ash.Query.filter(log, status == :suppressed and created_at >= ^since), actor)
+          count(Ash.Query.filter(log, status == :suppressed and created_at >= ^since), actor),
+        # Parked is a STANDING backlog, not a 24h window: a build failure (broken
+        # transform/producer) parks deliveries that sit until reprocess. Counts the
+        # current `:parked` rows — the blind spot this view used to miss entirely.
+        parked: count(Ash.Query.filter(delivery, state == :parked), actor)
       }
     )
   end
@@ -93,6 +98,14 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
           <div class="stat-title">Suppressed (24h)</div>
           <div class="stat-value">{stat(@stats.suppressed_24h)}</div>
           <div class="stat-desc">unchanged deliveries withheld (not sent)</div>
+        </div>
+
+        <div class="stat">
+          <div class="stat-title">Parked</div>
+          <div class={["stat-value", pos?(@stats.parked) && "text-error"]}>
+            {stat(@stats.parked)}
+          </div>
+          <div class="stat-desc">build failures awaiting reprocess (broken transform)</div>
         </div>
 
         <div class="stat">

@@ -27,7 +27,10 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
   defp load_subscription(socket, id) do
     actor = socket.assigns.current_user
 
-    case Ash.get(AshIntegration.subscription_resource(), id, actor: actor, load: [:connection]) do
+    case Ash.get(AshIntegration.subscription_resource(), id,
+           actor: actor,
+           load: [:connection, :parked_count, :oldest_parked_at]
+         ) do
       {:ok, subscription} ->
         socket
         |> assign(subscription: subscription, page_title: subscription.event_type)
@@ -156,6 +159,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
           <span :if={@subscription.suspended} class="badge badge-sm badge-error gap-1 ml-1">
             <.icon name="hero-pause-mini" class="size-3" /> Suspended
           </span>
+          <span class="ml-1"><DeliveryHelpers.health_badge record={@subscription} /></span>
         </:subtitle>
         <:actions>
           <button class="btn btn-ghost btn-sm" phx-click="test">
@@ -215,6 +219,15 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
                 @subscription.consecutive_failures > 0 && "text-warning"
               ]}>
                 {@subscription.consecutive_failures}
+              </div>
+            </div>
+            <div>
+              <div class="text-base-content/50">Parked deliveries</div>
+              <div class={["font-medium", @subscription.parked_count > 0 && "text-error"]}>
+                {@subscription.parked_count}
+                <span :if={@subscription.oldest_parked_at} class="text-base-content/50 font-normal">
+                  (oldest {Helpers.format_datetime(@subscription.oldest_parked_at)})
+                </span>
               </div>
             </div>
             <div :if={@subscription.suspended}>

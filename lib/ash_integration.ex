@@ -129,6 +129,50 @@ defmodule AshIntegration do
     Keyword.get(config(), :auto_suspension_threshold, 50)
   end
 
+  @doc """
+  Parked-backlog count at/above which a connection/subscription's derived health
+  reads `:parked` (chronically parked — UNHEALTHY) rather than `:degraded` (some
+  parking — investigate). Below it, any parked delivery reads `:degraded`; zero
+  parked reads `:healthy`. See `AshIntegration.Outbound.Delivery.ParkedHealth`.
+
+  This is a **display/alerting** dimension only — it never halts delivery and is
+  independent of the transport/response `consecutive_failures` suspension. Park
+  stays a recoverable build failure cleared by `reprocess`. Defaults to `10`.
+  """
+  def parked_health_threshold do
+    Keyword.get(config(), :parked_health_threshold, 10)
+  end
+
+  # ── Opt-in parked-suspend (default OFF) ───────────────────────────────────
+  # A chronically-parked subscription is already visible/alertable via the parked
+  # health dimension (aggregates + `[:ash_integration, :delivery, :parked]`
+  # telemetry). Opting in lets a sustained parked backlog ALSO auto-suspend the
+  # subscription — a DISTINCT "parked-suspend" that:
+  #
+  #   * is recoverable via `reprocess` + `unsuspend` (like every suspension), and
+  #   * NEVER bumps `consecutive_failures` — it is not a transport/response failure,
+  #     so it must not be conflated with the failure-counter suspend.
+  #
+  # Default OFF: a parked head already blocks only its own lane, so the conservative
+  # default is purely visible/alertable with no auto-halt. Turn it on with:
+  #
+  #     config :ash_integration,
+  #       parked_suspension: [enabled?: true, count_threshold: 50]
+
+  @doc "Whether a sustained parked backlog auto-suspends the subscription. Default `false`."
+  def parked_suspension_enabled? do
+    Keyword.get(parked_suspension_config(), :enabled?, false)
+  end
+
+  @doc "Standing parked-delivery count that triggers the opt-in parked-suspend. Default `50`."
+  def parked_suspension_threshold do
+    Keyword.get(parked_suspension_config(), :count_threshold, 50)
+  end
+
+  defp parked_suspension_config do
+    Keyword.get(config(), :parked_suspension, [])
+  end
+
   def http_max_timeout_ms do
     Keyword.get(config(), :http_max_timeout_ms, 60_000)
   end

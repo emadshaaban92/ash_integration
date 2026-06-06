@@ -10,6 +10,7 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
   """
   require Ash.Query
 
+  alias AshIntegration.Outbound.Delivery.ParkedHealth
   alias AshIntegration.Outbound.Delivery.Resolver
   alias AshIntegration.Outbound.Wire.Envelope
   alias AshIntegration.Outbound.Delivery.Scheduler
@@ -159,9 +160,12 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
     })
   end
 
-  # Re-park and re-emit `:parked` (mirrors the dispatch-time park in `Specs`).
+  # Re-park a delivery whose reprocess still failed, re-emit `:parked` (the
+  # authoritative emit, carrying `failure_kind`; mirrors the dispatch-time park in
+  # `Specs`), then evaluate the opt-in parked-suspend on the now-parked row — the
+  # standing backlog it belongs to is still broken. Park semantics are unchanged.
   defp park!(delivery, reason, failure_kind) do
-    update!(delivery, :park, %{delivery: nil, last_error: reason})
+    updated = update!(delivery, :park, %{delivery: nil, last_error: reason})
 
     :telemetry.execute(
       [:ash_integration, :delivery, :parked],
@@ -176,6 +180,8 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
         failure_kind: failure_kind
       }
     )
+
+    ParkedHealth.evaluate_parked_suspend(updated)
   end
 
   defp update!(delivery, action, params) do

@@ -25,6 +25,8 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
 
   require Logger
 
+  alias AshIntegration.Outbound.Delivery.ParkedHealth
+
   @impl true
   # `batch_change/3` (not `change/3`): Ash only invokes `after_batch/3` for changes
   # that also define a batch change, and `batch_change` serves both the single and
@@ -92,6 +94,9 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
       %Ash.BulkResult{status: :success, records: deliveries} ->
         coalesce_pending!(specs, deliveries)
         emit_parked(specs, deliveries)
+        # Park is unchanged data here; this only evaluates the opt-in parked-suspend
+        # on the standing backlog (default OFF → no-op). Never raises into the batch.
+        ParkedHealth.evaluate_parked_suspend(deliveries)
 
       %Ash.BulkResult{errors: errors} ->
         raise "EventDelivery bulk insert failed: #{inspect(errors)}"

@@ -7,6 +7,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
   # here, pre-filled with this connection.
   use AshIntegration.Web, :live_view
 
+  alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
   alias AshIntegration.Web.Outbound.Helpers
   alias AshIntegration.Web.Outbound.SubscriptionLive.FormComponent, as: SubscriptionForm
 
@@ -33,7 +34,10 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
   defp load_connection(socket, id) do
     actor = socket.assigns.current_user
 
-    case Ash.get(AshIntegration.connection_resource(), id, actor: actor, load: [:owner]) do
+    case Ash.get(AshIntegration.connection_resource(), id,
+           actor: actor,
+           load: [:owner, :parked_count, :oldest_parked_at]
+         ) do
       {:ok, connection} ->
         socket
         |> assign(connection: connection, page_title: connection.name)
@@ -57,6 +61,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
     subscriptions =
       case AshIntegration.subscription_resource()
            |> Ash.Query.for_read(:for_connection, %{connection_id: connection.id}, actor: actor)
+           |> Ash.Query.load([:parked_count, :oldest_parked_at])
            |> Ash.read(actor: actor) do
         {:ok, results} when is_list(results) -> results
         {:ok, %{results: results}} -> results
@@ -106,6 +111,10 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
 
       <.page_header>
         {@connection.name}
+        <:subtitle>
+          <.active_badge active={@connection.active} />
+          <span class="ml-1"><DeliveryHelpers.health_badge record={@connection} /></span>
+        </:subtitle>
         <:actions>
           <.link navigate={path(:deliveries, @connection.id)} class="btn btn-ghost btn-sm">
             <.icon name="hero-paper-airplane-mini" /> Deliveries
@@ -147,6 +156,15 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
           <div>
             <div class="text-base-content/50">Consecutive Failures</div>
             <div class="font-medium">{@connection.consecutive_failures}</div>
+          </div>
+          <div>
+            <div class="text-base-content/50">Parked deliveries</div>
+            <div class={["font-medium", @connection.parked_count > 0 && "text-error"]}>
+              {@connection.parked_count}
+              <span :if={@connection.oldest_parked_at} class="text-base-content/50 font-normal">
+                (oldest {Helpers.format_datetime(@connection.oldest_parked_at)})
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -192,7 +210,12 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
               </span>
               <span :if={!sub.notify_on_every_change} class="text-base-content/50">latest only</span>
             </td>
-            <td><.active_badge active={sub.active} /></td>
+            <td>
+              <div class="flex items-center gap-1">
+                <.active_badge active={sub.active} />
+                <DeliveryHelpers.health_badge record={sub} />
+              </div>
+            </td>
             <td>
               <span class={[
                 "badge badge-sm",
