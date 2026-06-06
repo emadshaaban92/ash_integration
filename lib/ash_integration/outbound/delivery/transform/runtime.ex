@@ -74,7 +74,9 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime do
 
   @doc """
   Cheap, side-effect-free check that `source` is well-formed enough to save
-  (size/parse). Optional — a runtime that can't pre-validate omits it.
+  (size/parse). Wired into the subscription's create/update validations (see
+  `AshIntegration.Outbound.Delivery.Validations.TransformSource`). Optional — a
+  runtime that can't pre-validate omits it and saves are accepted.
   """
   @callback validate(source()) :: :ok | {:error, String.t()}
 

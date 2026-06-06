@@ -319,7 +319,143 @@ defmodule Example.Outbound.DeliveryResolverTest do
     end
   end
 
+  # The transform script is validated at SAVE time (not just at dispatch) by
+  # delegating to the runtime through the Transformer seam, so a malformed script
+  # is a clean field error on the form rather than a parked delivery later.
+  describe "save-time transform validation" do
+    alias AshIntegration.Outbound.Delivery.Transform.Preview
+    alias AshIntegration.Outbound.Delivery.Validations.TransformSource
+
+    test "rejects a script the runtime can't accept, as a transform_source field error",
+         %{owner: owner} do
+      # Inject the value past the DSL `max_length` cast (which would otherwise
+      # intercept it first) so the rejection comes from the runtime's own
+      # validator — proving the Transformer delegation path, not the redundant
+      # attribute constraint.
+      changeset =
+        put_attribute(create_changeset(owner, nil), :transform_source, oversized_script())
+
+      assert {:error, field: :transform_source, message: message} =
+               TransformSource.validate(changeset, [], %{})
+
+      assert message =~ "maximum size"
+    end
+
+    test "accepts a well-formed script", %{owner: owner} do
+      changeset = create_changeset(owner, "result = event")
+      assert :ok = TransformSource.validate(changeset, [], %{})
+    end
+
+    test "a nil script is a no-op and valid", %{owner: owner} do
+      changeset = create_changeset(owner, nil)
+      assert :ok = TransformSource.validate(changeset, [], %{})
+    end
+
+    test "the create action rejects a syntactically invalid script", %{owner: owner} do
+      dest = http_connection!(owner)
+
+      assert {:error, error} =
+               Subscription
+               |> Ash.Changeset.for_create(
+                 :create,
+                 %{
+                   connection_id: dest.id,
+                   event_type: "widget.updated",
+                   version: 1,
+                   transform_source: "result = {"
+                 },
+                 authorize?: false
+               )
+               |> Ash.create(authorize?: false)
+
+      assert Exception.message(error) =~ "does not parse"
+    end
+
+    test "the create action rejects a script that raises against the producer example",
+         %{owner: owner} do
+      dest = http_connection!(owner)
+
+      assert {:error, error} =
+               create_subscription(dest, "widget.updated", "error('boom')")
+
+      # The smoke gate ran error('boom') against WidgetUpdated.example/1 and caught
+      # the raise at save — it never reaches dispatch to park a delivery.
+      assert Exception.message(error) =~ "boom"
+    end
+
+    test "the create action rejects a script that attempts denied IO", %{owner: owner} do
+      dest = http_connection!(owner)
+
+      # io.* is removed from the sandbox, so this is syntactically valid but cannot
+      # run — exactly the class parse can't see and the smoke run does.
+      assert {:error, %Ash.Error.Invalid{errors: errors}} =
+               create_subscription(dest, "widget.updated", "io.write('x')")
+
+      assert Enum.any?(errors, &(Map.get(&1, :field) == :transform_source))
+    end
+
+    test "the create action accepts a script that runs cleanly on the example",
+         %{owner: owner} do
+      dest = http_connection!(owner)
+
+      assert {:ok, _sub} =
+               create_subscription(dest, "widget.updated", "result.headers['x-ok'] = 'yes'")
+    end
+
+    test "the smoke gate no-ops when there is no example/1 to run against" do
+      # With no representative sample, the smoke layer degrades to the parse floor
+      # — an otherwise-erroring script is not rejected here. (An unregistered
+      # event_type has no producer, so example/1 resolves to nil; the create action
+      # would separately reject the unknown type, so exercise the branch directly.)
+      assert :ok =
+               Preview.smoke(
+                 %{
+                   event_type: "unregistered.event",
+                   version: 1,
+                   transform_source: "error('boom')"
+                 },
+                 nil
+               )
+    end
+  end
+
   # ── Helpers ───────────────────────────────────────────────────────────────
+
+  defp create_changeset(owner, transform_source) do
+    dest = http_connection!(owner)
+
+    params =
+      %{connection_id: dest.id, event_type: "widget.updated", version: 1}
+      |> maybe_put(:transform_source, transform_source)
+
+    Ash.Changeset.for_create(Subscription, :create, params, authorize?: false)
+  end
+
+  # Run the real create action and return the raw result, for end-to-end checks
+  # of the save-time gate.
+  defp create_subscription(connection, event_type, transform_source) do
+    Subscription
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        connection_id: connection.id,
+        event_type: event_type,
+        version: 1,
+        transform_source: transform_source
+      },
+      authorize?: false
+    )
+    |> Ash.create(authorize?: false)
+  end
+
+  # Set an attribute directly on the changeset, bypassing casting/constraints —
+  # used to drive a value the DSL `max_length` would otherwise reject before it
+  # reaches the runtime's own validator.
+  defp put_attribute(changeset, attribute, value) do
+    %{changeset | attributes: Map.put(changeset.attributes, attribute, value)}
+  end
+
+  defp oversized_script, do: String.duplicate("x", 10_241)
 
   defp resolve(connection, subscription, data, opts \\ []) do
     created_at = Keyword.get(opts, :created_at, DateTime.utc_now())

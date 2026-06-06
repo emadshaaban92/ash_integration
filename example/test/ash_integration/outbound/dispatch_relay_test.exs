@@ -102,7 +102,19 @@ defmodule Example.Outbound.DispatchRelayTest do
       # lane blocks the other. s_bad's transform raises; s_ok is a no-op.
       conn_bad = create_connection!(owner)
       conn_ok = create_connection!(owner)
-      s_bad = create_subscription!(conn_bad, "widget.updated", "error('boom')")
+      # Seed s_bad past the save-time smoke gate (which now rejects a script that
+      # raises on the producer's example/1) to reach the dispatch-time park path.
+      s_bad =
+        Ash.Seed.seed!(Subscription, %{
+          connection_id: conn_bad.id,
+          event_type: "widget.updated",
+          version: 1,
+          transform_source: "error('boom')",
+          active: true,
+          suspended: false,
+          consecutive_failures: 0
+        })
+
       s_ok = create_subscription!(conn_ok, "widget.updated")
 
       create_widget!(%{name: "w", stock: 1})

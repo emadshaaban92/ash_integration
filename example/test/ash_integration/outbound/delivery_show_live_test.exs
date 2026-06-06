@@ -75,7 +75,7 @@ defmodule Example.Outbound.DeliveryShowLiveTest do
   describe "reprocess" do
     test "re-runs a fixed transform and re-queues a parked delivery", %{conn: conn, user: user} do
       # Park it the realistic way: a transform that errors at dispatch.
-      sub = create_subscription!(create_connection!(user), "widget.updated", ~s|error("boom")|)
+      sub = seed_subscription!(create_connection!(user), "widget.updated", ~s|error("boom")|)
       create_widget!(%{name: "w", stock: 1})
       drain_dispatch!()
 
@@ -116,7 +116,7 @@ defmodule Example.Outbound.DeliveryShowLiveTest do
     end
 
     test "a parked delivery offers reprocess", %{conn: conn, user: user} do
-      sub = create_subscription!(create_connection!(user), "widget.updated", ~s|error("boom")|)
+      sub = seed_subscription!(create_connection!(user), "widget.updated", ~s|error("boom")|)
       create_widget!(%{name: "w", stock: 1})
       drain_dispatch!()
 
@@ -178,6 +178,21 @@ defmodule Example.Outbound.DeliveryShowLiveTest do
       authorize?: false
     )
     |> Ash.create!(authorize?: false)
+  end
+
+  # Plant a subscription whose transform raises at dispatch, past the save-time
+  # smoke gate (it rejects a script that errors on the producer's example/1).
+  # These reprocess-UI tests need a parked delivery to act on.
+  defp seed_subscription!(dest, event_type, transform_source) do
+    Ash.Seed.seed!(Subscription, %{
+      connection_id: dest.id,
+      event_type: event_type,
+      version: 1,
+      transform_source: transform_source,
+      active: true,
+      suspended: false,
+      consecutive_failures: 0
+    })
   end
 
   defp create_widget!(attrs) do

@@ -82,7 +82,19 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     {:error, "script exceeds maximum size of #{@max_script_size} bytes"}
   end
 
-  def validate(_script), do: :ok
+  # Parse (compile) the chunk WITHOUT running it. This is the early check we can
+  # make with certainty: it catches syntax errors at save time, with no false
+  # negatives. A script that parses can still fail at runtime on real event data
+  # — by design that parks the delivery for reprocessing rather than being
+  # rejected here — so this deliberately stops at "does it parse".
+  def validate(script) do
+    case Lua.parse_chunk(script) do
+      {:ok, _chunk} -> :ok
+      {:error, errors} -> {:error, "script does not parse: #{format_errors(errors)}"}
+    end
+  end
+
+  defp format_errors(errors), do: errors |> List.wrap() |> Enum.map_join("; ", &to_string/1)
 
   @impl true
   def execute(script, _event, _defaults, _limits) when byte_size(script) > @max_script_size do

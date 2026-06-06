@@ -20,7 +20,7 @@ defmodule Example.Outbound.ReprocessorTest do
 
   test "reprocessing a parked event re-runs the fixed transform and unblocks it",
        %{connection: dest} do
-    sub = create_subscription!(dest, "widget.updated", ~s|error("boom")|)
+    sub = seed_subscription!(dest, "widget.updated", ~s|error("boom")|)
 
     create_widget!(%{name: "w", stock: 1})
     drain_dispatch!()
@@ -80,7 +80,7 @@ defmodule Example.Outbound.ReprocessorTest do
   end
 
   test "a transform that skips on reprocess cancels the event", %{connection: dest} do
-    sub = create_subscription!(dest, "widget.updated", ~s|error("boom")|)
+    sub = seed_subscription!(dest, "widget.updated", ~s|error("boom")|)
     create_widget!(%{name: "w", stock: 1})
     drain_dispatch!()
 
@@ -108,7 +108,7 @@ defmodule Example.Outbound.ReprocessorTest do
   end
 
   test "bulk reprocess returns counts and clears parked events", %{connection: dest} do
-    sub = create_subscription!(dest, "widget.updated", ~s|error("boom")|)
+    sub = seed_subscription!(dest, "widget.updated", ~s|error("boom")|)
     create_widget!(%{name: "a", stock: 1})
     create_widget!(%{name: "b", stock: 1})
     drain_dispatch!()
@@ -149,6 +149,22 @@ defmodule Example.Outbound.ReprocessorTest do
       authorize?: false
     )
     |> Ash.create!(authorize?: false)
+  end
+
+  # Plant a subscription whose transform raises at dispatch, PAST the save-time
+  # smoke gate (which now rejects a script that errors on the producer's
+  # example/1 through the create action). These recovery tests need a parked
+  # event, so seeding bypasses validations to set up that state directly.
+  defp seed_subscription!(dest, event_type, transform_source) do
+    Ash.Seed.seed!(Subscription, %{
+      connection_id: dest.id,
+      event_type: event_type,
+      version: 1,
+      transform_source: transform_source,
+      active: true,
+      suspended: false,
+      consecutive_failures: 0
+    })
   end
 
   defp create_connection!(owner) do

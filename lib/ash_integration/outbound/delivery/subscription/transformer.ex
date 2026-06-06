@@ -102,6 +102,7 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
      |> add_unsuspend_action_if_not_exists()
      |> add_event_type_validation_if_not_exists()
      |> add_route_validation_if_not_exists()
+     |> add_transform_source_validation_if_not_exists()
      |> add_default_accept_if_not_set()
      |> add_defaults_if_not_set()
      |> add_create_action_if_not_exists()
@@ -348,6 +349,15 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
   # transport type. Cheap: early-outs unless `route_config` is changing.
   defp add_route_validation_if_not_exists(dsl_state) do
     add_module_validation_if_not_exists(dsl_state, @route_validation)
+  end
+
+  @transform_source_validation AshIntegration.Outbound.Delivery.Validations.TransformSource
+
+  # Reject a `transform_source` its `transform_runtime` can't accept (and that
+  # fails the example smoke-run), at save time. Cheap: early-outs unless
+  # `transform_source` is changing.
+  defp add_transform_source_validation_if_not_exists(dsl_state) do
+    add_module_validation_if_not_exists(dsl_state, @transform_source_validation)
   end
 
   defp add_module_validation_if_not_exists(dsl_state, module) do

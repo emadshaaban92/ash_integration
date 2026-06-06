@@ -50,22 +50,44 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Preview do
   defp subscription_id(%{id: id}), do: id
   defp subscription_id(id) when is_binary(id), do: id
 
-  defp run_loaded(subscription) do
-    sample = build_sample(subscription)
-    created_at = DateTime.utc_now()
+  @doc """
+  Save-time **smoke gate** for a subscription's transform: run the script
+  against the producer's `example/1` — exactly the same sample this preview uses
+  — and report whether it executes cleanly. Wired into the create/update
+  validation (see `AshIntegration.Outbound.Delivery.Validations.TransformSource`)
+  so a script that raises on its own producer's example is rejected at save
+  rather than parking every delivery for the subscription.
 
-    input =
-      Envelope.transform_input(%{
-        # Preview-only synthetic id — this envelope never hits the database, so
-        # app-side generation is fine here (real Events get DB-generated ids).
-        id: Ash.UUIDv7.generate(),
-        type: subscription.event_type,
-        version: subscription.version,
-        event_key: sample.event_key,
-        created_at: created_at,
-        subject: sample.subject,
-        data: sample.data
-      })
+  `subscription` may be a persisted record or an unpersisted preview struct (the
+  validation passes the latter); `connection` is the loaded connection record.
+
+  Returns:
+
+    * `:ok` — the transform produced a table or skipped on the example, **or**
+      the producer declares no `example/1` (there is no representative sample to
+      run against, so the cheaper parse-check stays the only floor — we don't
+      fabricate a failure from an empty payload);
+    * `{:error, message}` — the transform raised, hit a denied op, or returned a
+      non-table on the example.
+
+  Like `Resolver.smoke/4` (which it delegates to) this stops before `finalize`:
+  it validates the script, not the wire descriptor or the egress policy.
+  """
+  def smoke(subscription, connection) do
+    case producer_example(subscription) do
+      nil ->
+        :ok
+
+      _example ->
+        created_at = DateTime.utc_now()
+        {input, _sample} = sample_envelope(subscription, created_at)
+        Resolver.smoke(connection, subscription, input, created_at)
+    end
+  end
+
+  defp run_loaded(subscription) do
+    created_at = DateTime.utc_now()
+    {input, sample} = sample_envelope(subscription, created_at)
 
     # Resolve the full transport-shaped descriptor (incl. the pre-seeded wire
     # headers the author can override/remove and the computed signature) exactly
@@ -80,6 +102,28 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Preview do
       {:error, error} ->
         {:ok, %{outcome: :error, input: input, output: nil, error: error, source: sample.source}}
     end
+  end
+
+  # The sample transform-input envelope for `subscription`, built from the
+  # producer's `example/1`. Shared by the operator preview and the save-time
+  # smoke gate so both run against an identical input. Returns `{input, sample}`.
+  defp sample_envelope(subscription, created_at) do
+    sample = build_sample(subscription)
+
+    input =
+      Envelope.transform_input(%{
+        # Preview-only synthetic id — this envelope never hits the database, so
+        # app-side generation is fine here (real Events get DB-generated ids).
+        id: Ash.UUIDv7.generate(),
+        type: subscription.event_type,
+        version: subscription.version,
+        event_key: sample.event_key,
+        created_at: created_at,
+        subject: sample.subject,
+        data: sample.data
+      })
+
+    {input, sample}
   end
 
   # The sample payload comes from the producer's `example/1` (it mirrors
