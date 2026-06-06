@@ -104,25 +104,32 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
 
   @impl true
   def handle_batch(:default, messages, _batch_info, _context) do
-    {deliverable, handled} = Enum.split_with(messages, &(decision(&1.data) == :deliver))
+    {deliverable, non_deliver} = Enum.split_with(messages, &(decision(&1.data) == :deliver))
 
     # Suspension / no-op rows: apply their non-send outcome, never marked failed.
-    Enum.each(handled, &apply_non_deliver/1)
-
+    Enum.each(non_deliver, &apply_non_deliver/1)
     run_deliveries(deliverable)
+
+    # Broadway's `handle_batch/4` contract requires every received message back, or
+    # it logs an error per batch. The relay never uses Broadway message status for
+    # retry — retry/backoff/poison are all managed in the DB (`next_attempt_at`,
+    # `attempts`-on-claim) and the acknowledger only notifies the scheduler — so each
+    # message passes through with its status unchanged; the outcomes above are applied
+    # purely for their side effects, and we return the original list.
+    messages
   end
 
   # The deliverable rows share one connection (batch_key), so one `deliver_batch/2`
   # call covers them; results come back keyed by delivery id and are demuxed per row.
-  defp run_deliveries([]), do: []
+  defp run_deliveries([]), do: :ok
 
   defp run_deliveries(messages) do
     connection = hd(messages).data.connection
     deliveries = Enum.map(messages, & &1.data)
     results = Transport.deliver_batch(connection, deliveries)
 
-    Enum.map(messages, fn %Message{data: delivery} = message ->
-      apply_result(message, delivery, Map.get(results, delivery.id))
+    Enum.each(messages, fn %Message{data: delivery} ->
+      apply_result(delivery, Map.get(results, delivery.id))
     end)
   end
 
@@ -135,12 +142,11 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     end
   end
 
-  defp apply_result(message, delivery, {:ok, metadata}) do
+  defp apply_result(delivery, {:ok, metadata}) do
     finalize(delivery, :deliver, %{delivery_metadata: metadata})
-    message
   end
 
-  defp apply_result(message, delivery, {:error, metadata}) do
+  defp apply_result(delivery, {:error, metadata}) do
     error_message = Map.get(metadata, :error_message, "Unknown error")
     poison? = Dispatcher.poison?(delivery)
 
@@ -157,14 +163,14 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     })
 
     if poison?, do: Dispatcher.record_poison(delivery, error_message)
-    message
+    :ok
   end
 
   # `deliver_batch/2` must return a result for every id; a missing one is a transport
   # contract bug. Treat it as a retryable failure so the lease re-emits the row,
   # rather than silently dropping it.
-  defp apply_result(message, delivery, nil) do
-    apply_result(message, delivery, {:error, %{error_message: "transport returned no result"}})
+  defp apply_result(delivery, nil) do
+    apply_result(delivery, {:error, %{error_message: "transport returned no result"}})
   end
 
   # Apply a state-transition action, fenced on the lease token (`claimed_at` the
