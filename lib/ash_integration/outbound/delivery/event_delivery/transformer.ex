@@ -112,7 +112,8 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
      |> add_index_if_not_exists([:connection_id])
      |> add_partial_unique_index_if_not_exists()
      |> add_schedulable_lane_index_if_not_exists()
-     |> add_delivery_claim_index_if_not_exists()}
+     |> add_delivery_claim_index_if_not_exists()
+     |> add_dedup_baseline_index_if_not_exists()}
   end
 
   # ── Attributes ──────────────────────────────────────────────────────────
@@ -792,6 +793,43 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
           name: index_name,
           fields: [:connection_id, :event_id],
           where: "state = 'scheduled'"
+        )
+
+      Transformer.add_entity(dsl_state, [:postgres, :custom_indexes], index, type: :append)
+    end
+  end
+
+  # Serves the content-suppression baseline lookup (`Dedup.last_delivered_hash/1`):
+  # the newest `:delivered` row strictly older than the head on its
+  # `(subscription_id, event_key)` lane —
+  #
+  #   WHERE subscription_id = $1 AND event_key = $2 AND state = 'delivered'
+  #     AND event_id < $3 ORDER BY event_id DESC LIMIT 1 (SELECT body_hash)
+  #
+  # run once per suppression-eligible head on every scheduler pass. Leading the
+  # equality columns then `event_id` last makes the range + `ORDER BY event_id DESC
+  # LIMIT 1` a single backward index scan; the existing `(subscription_id,
+  # event_key, state)` index would have to sort the matched rows. Partial on
+  # `state = 'delivered'` (the only baseline) keeps it off delivered/cancelled
+  # history, and `INCLUDE (body_hash)` — the lone selected column — makes it an
+  # index-only scan, no heap fetch.
+  defp add_dedup_baseline_index_if_not_exists(dsl_state) do
+    index_name = "idx_event_deliveries_dedup_baseline"
+
+    existing =
+      dsl_state
+      |> Transformer.get_entities([:postgres, :custom_indexes])
+      |> Enum.find(&(&1.name == index_name))
+
+    if existing do
+      dsl_state
+    else
+      {:ok, index} =
+        Transformer.build_entity(AshPostgres.DataLayer, [:postgres, :custom_indexes], :index,
+          name: index_name,
+          fields: [:subscription_id, :event_key, :event_id],
+          where: "state = 'delivered'",
+          include: ["body_hash"]
         )
 
       Transformer.add_entity(dsl_state, [:postgres, :custom_indexes], index, type: :append)
