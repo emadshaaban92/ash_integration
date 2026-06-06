@@ -124,7 +124,7 @@ each `(event_type, version)` **batch** it:
    (authorize + route + redact). A `{:skip, _}` decision creates **no**
    `EventDelivery`; the immutable Event remains as the audit.
 2. For each delivering subscription, resolves the transport-shaped delivery
-   descriptor (the Lua transform mutates the route's pre-seeded `result`) and
+   descriptor (the Lua `transform(event, defaults)` returns the route's pre-seeded `defaults`) and
    snapshots it on the `EventDelivery` — body (as a term), headers, and routing.
    It is replayed on every retry; reprocess re-derives it. The **signature** and
    **auth** are *not* part of the snapshot: both are injected live at delivery
@@ -139,7 +139,7 @@ Outcomes:
 - **`project` raises / returns a bad decision**, or the **transform raises** → the
   delivery is created `parked` with `last_error` (a build failure); it blocks its
   lane until reprocessed. The event is still considered dispatched.
-- **Transform skips** (`result = nil`) → a `cancelled` delivery for the audit trail.
+- **Transform skips** (`transform` returns `nil`) → a `cancelled` delivery for the audit trail.
 - **Infra failure mid-materialize** (DB unavailable) → `dispatched_at` is left
   NULL; the lease expires and the relay re-emits the event. Re-materialization is
   idempotent via the `(event_id, subscription_id)` unique identity.

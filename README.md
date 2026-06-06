@@ -443,7 +443,7 @@ Both transports lead with the event type on the wire and support HMAC-SHA256 pay
 
 ## Lua Transform Scripts
 
-Each subscription has a Lua transform script that can customize delivery. It reads the event from a global `event` table and mutates a global, **pre-seeded, transport-shaped** `result` table — the delivery descriptor for the route. A no-op script sends the pre-seeded defaults; the script only expresses overrides.
+Each subscription has a Lua transform script that can customize delivery. The script exposes a `transform(event, defaults)` function: it reads the **read-only** `event` envelope and returns the (possibly modified) `defaults` table — the **pre-seeded, transport-shaped** delivery descriptor for the route. Returning `nil` skips the delivery. The no-op transform just returns `defaults` unchanged — `function transform(event, defaults) return defaults end` — and so does a subscription with no transform at all (a `nil`/blank `transform_source`, or a script that defines no `transform` function). The function only expresses overrides.
 
 The `event` table is the canonical payload envelope (read-only input):
 
@@ -457,41 +457,56 @@ event.subject     -- the triggering record id
 event.data        -- the produced payload
 ```
 
-`result` is pre-seeded with everything the route would send, shaped per transport:
+`defaults` is pre-seeded with everything the route would send, shaped per transport:
 
 ```
 -- HTTP
-result.method   -- "post" (default) | "put" | "patch" | "delete"
-result.path     -- joined onto the connection's base_url
-result.url      -- set this to a FULL absolute URL to bypass base_url + path
-result.headers  -- the wire metadata (x-event-id, x-event-type, …), content-type,
-                --   and the connection's static headers — all overridable/removable
-result.body     -- the body (defaults to event.data)
+defaults.method   -- "post" (default) | "put" | "patch" | "delete"
+defaults.path     -- joined onto the connection's base_url
+defaults.url      -- set this to a FULL absolute URL to bypass base_url + path
+defaults.headers  -- the wire metadata (x-event-id, x-event-type, …), content-type,
+                  --   and the connection's static headers — all overridable/removable
+defaults.body     -- the body (defaults to event.data)
 
 -- Kafka
-result.topic, result.key, result.headers (bare, un-prefixed),
-result.value     -- the body (defaults to event.data)
-result.timestamp -- native record timestamp, epoch ms (defaults to event.created_at)
+defaults.topic, defaults.key, defaults.headers (bare, un-prefixed),
+defaults.value     -- the body (defaults to event.data)
+defaults.timestamp -- native record timestamp, epoch ms (defaults to event.created_at)
 ```
 
 ```lua
--- No-op (the default): send the pre-seeded defaults
--- (nothing to do)
+-- No-op (the default): return the pre-seeded defaults unchanged.
+-- (Equivalently, leave transform_source nil/blank and define no function.)
+function transform(event, defaults)
+  return defaults
+end
 
 -- Customize the body
-result.body = { order_id = event.data.id, at = event.created_at }
+function transform(event, defaults)
+  defaults.body = { order_id = event.data.id, at = event.created_at }
+  return defaults
+end
 
 -- Override or REMOVE a wire header (yes, including x-event-id)
-result.headers["x-tenant"] = event.data.tenant
-result.headers["x-event-id"] = nil
+function transform(event, defaults)
+  defaults.headers["x-tenant"] = event.data.tenant
+  defaults.headers["x-event-id"] = nil
+  return defaults
+end
 
 -- Dynamic routing
-result.path = "/orders/" .. event.data.id          -- HTTP, joined onto base_url
-result.url  = "https://other.example/hook"          -- HTTP, absolute override
+function transform(event, defaults)
+  defaults.path = "/orders/" .. event.data.id        -- HTTP, joined onto base_url
+  defaults.url  = "https://other.example/hook"        -- HTTP, absolute override
+  return defaults
+end
 
--- Skip: produces a cancelled event, no delivery
-if event.data.status == "draft" then
-  result = nil
+-- Skip: return nil → produces a cancelled event, no delivery
+function transform(event, defaults)
+  if event.data.status == "draft" then
+    return nil
+  end
+  return defaults
 end
 ```
 

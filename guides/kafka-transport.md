@@ -88,15 +88,15 @@ order — the same key the pipeline uses for ordering and latest-state coalescin
 
 ## Payload Signing
 
-When `signing_secret` is set, a `signature` Kafka header is added with the same HMAC-SHA256 format used by the HTTP transport. See [HTTP Transport](http-transport.md#payload-signing) for verification details. As on HTTP, the signature is computed **live at delivery** over the encoded `result.value` with a send-time timestamp (never stored; recomputed per attempt), so rotating the `signing_secret` takes effect immediately without reprocessing.
+When `signing_secret` is set, a `signature` Kafka header is added with the same HMAC-SHA256 format used by the HTTP transport. See [HTTP Transport](http-transport.md#payload-signing) for verification details. As on HTTP, the signature is computed **live at delivery** over the encoded `defaults.value` with a send-time timestamp (never stored; recomputed per attempt), so rotating the `signing_secret` takes effect immediately without reprocessing.
 
 ## Message Format
 
-Each Kafka message is the resolved `result` for the route, replayed verbatim:
+Each Kafka message is the resolved `defaults` for the route, replayed verbatim:
 
-- **Key**: `result.key` (defaults to the event key; used for partitioning)
-- **Value**: JSON-encoded `result.value` (defaults to `event.data`). An empty value — `nil`, or an empty Lua table (`{}`/`[]` are indistinguishable in Lua) — is produced as an **empty record value** (`<<>>`), not `"{}"`. You therefore can't emit a literal empty JSON object/array as the value; wrap it in a field if a consumer requires one.
-- **Timestamp**: the native record timestamp (`ts`, epoch ms) — `result.timestamp`, defaulting to the event's `created_at` so the record carries **event time**, not produce time. (If the topic is configured `message.timestamp.type=LogAppendTime`, the broker overrides it.)
+- **Key**: `defaults.key` (defaults to the event key; used for partitioning)
+- **Value**: JSON-encoded `defaults.value` (defaults to `event.data`). An empty value — `nil`, or an empty Lua table (`{}`/`[]` are indistinguishable in Lua) — is produced as an **empty record value** (`<<>>`), not `"{}"`. You therefore can't emit a literal empty JSON object/array as the value; wrap it in a field if a consumer requires one.
+- **Timestamp**: the native record timestamp (`ts`, epoch ms) — `defaults.timestamp`, defaulting to the event's `created_at` so the record carries **event time**, not produce time. (If the topic is configured `message.timestamp.type=LogAppendTime`, the broker overrides it.)
 - **Headers** (bare, un-prefixed — leading with the event type):
   - `event-id` — the event's UUIDv7 (use it to deduplicate)
   - `event-type` — the event type, e.g. `product.created`
@@ -108,7 +108,7 @@ Each Kafka message is the resolved `result` for the route, replayed verbatim:
   - `signature` — HMAC signature (if a signing secret is set)
   - Any custom headers from config (lowest priority — cannot shadow the above)
 
-All header values, the topic/key, and the timestamp pre-seed the transform's `result`, so a subscription can override or remove any of them.
+All header values, the topic/key, and the timestamp pre-seed the transform's `defaults`, so a subscription can override or remove any of them.
 
 ## Connection Management
 
