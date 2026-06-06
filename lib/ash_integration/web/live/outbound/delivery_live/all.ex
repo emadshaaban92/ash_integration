@@ -17,7 +17,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
   alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
   alias AshIntegration.Web.Outbound.Helpers
 
-  @states ~w(pending parked scheduled delivered cancelled)
+  @states ~w(pending parked scheduled delivered suppressed cancelled)
 
   @impl true
   def mount(_params, _session, socket) do

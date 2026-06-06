@@ -374,6 +374,23 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
               for audit). Enable this to send <strong>one delivery per change</strong>.
             </p>
           </div>
+
+          <div class="card card-border border-base-300 p-4 mt-4">
+            <.input
+              field={f[:suppress_unchanged]}
+              type="checkbox"
+              label="Suppress unchanged deliveries"
+            />
+            <p class="text-xs text-base-content/50 mt-1">
+              Skip a delivery whose <strong>body</strong>
+              is identical to the one last delivered for the same event key — a value
+              that bounces back (e.g. stock <code class="text-xs">5 → 6 → 5</code>) still sends.
+              Withheld deliveries are recorded as <code class="text-xs">suppressed</code>
+              (not <code class="text-xs">delivered</code>), so "last delivered" stays an honest
+              signal. Set <code class="text-xs">result.dedup_on</code>
+              in the transform to compare on something other than the body (e.g. a header).
+            </p>
+          </div>
         </div>
 
         <div class="modal-action">

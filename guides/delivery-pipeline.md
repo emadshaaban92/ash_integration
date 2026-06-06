@@ -93,7 +93,8 @@ not a state machine — it is captured once and fanned out):
 | `pending`   | Created with its cached descriptor, waiting for the scheduler. |
 | `parked`    | A **build failure**: `project` or the transform raised (or returned a bad shape), so the delivery was still created with `delivery: nil` and `last_error`. The scheduler never delivers it, but an *older* parked delivery still blocks its `(connection, event_key)` lane until an operator reprocesses it. |
 | `scheduled` | A delivery job exists. **Only `scheduled` deliveries hold the one-in-flight slot** for their `(connection, event_key)`. |
-| `delivered` | Successfully delivered to the target. |
+| `delivered` | Successfully delivered to the target (bytes went out). |
+| `suppressed` | Withheld by content suppression: the body was identical to the last delivered body for the key, so nothing was sent. Terminal, leaves the lane like `delivered`, but a distinct bucket so it never reads as a real send. See [Content Suppression](#content-suppression-suppress_unchanged). |
 | `cancelled` | Superseded by coalescing, skipped by the transform, or manually cancelled. Leaves the ordering lane (kept for audit, reaped by cleanup). |
 
 `reprocess` and `park` are **actions**, not states: reprocessing re-runs
@@ -340,6 +341,76 @@ bound to a single `(event_type, version)`, so it's structurally impossible.
 **Opting out — a delivery per change:** set `notify_on_every_change: true` on the
 subscription. Nothing is coalesced — every change produces its own delivery, each
 capturing the payload snapshotted at dispatch time.
+
+## Content Suppression (`suppress_unchanged`)
+
+Coalescing collapses a *pile-up* of queued changes to the latest. **Content
+suppression** is the complementary axis: it withholds a delivery whose **body** is
+byte-identical to the **last one actually delivered** for the same
+`(subscription, event_key)` — so a change that doesn't change *what this subscriber
+sees* sends nothing. Opt in per subscription with `suppress_unchanged: true`
+(default off).
+
+```elixir
+# Only re-notify when the projected body actually changes.
+suppress_unchanged: true
+```
+
+This is also how you get **field-level subscription** without any extra DSL: the
+body is per-subscription (your `project` redaction + Lua transform produce it), so
+if your transform narrows the body to just the fields a consumer cares about, a
+change to any *other* field yields an identical body and is suppressed. "Tell me
+only when these fields change" *is* "project those fields + suppress unchanged."
+
+**Last delivered, not ever delivered.** The comparison is only ever against the
+immediately-previous *delivered* body, so a value that recurs still sends:
+
+```
+stock 5 → deliver   (baseline 5)
+stock 5 → suppress  (identical to last delivered)
+stock 6 → deliver   (baseline 6)
+stock 5 → deliver   (differs from 6 — a real change again)
+```
+
+**A suppressed delivery is its own terminal state, `:suppressed` — not
+`:delivered`.** This keeps `delivered` meaning *"bytes went out"*, so "last
+delivered" stays an honest health signal: a quiet, all-suppressing lane shows an
+old last-delivered and a fresh last-suppressed, never false-green. A suppression
+writes a `:suppressed` delivery-log row, emits
+`[:ash_integration, :dedup, :suppressed]` telemetry, and — because it touched no
+transport — **does not reset the failure counters** (it's neutral to connection
+health). The dashboard surfaces it as a distinct badge, a state filter, and a
+"Suppressed (24h)" stat.
+
+**Comparing on something other than the body — `dedup_on`.** By default the
+hash is over the body only (HTTP `defaults.body` / Kafka `defaults.value`); headers are
+excluded because the default `x-event-id` is unique per event and would defeat
+suppression. If meaningful state lives in a header, or you want to *exclude* a noisy
+body field, set `dedup_on` on the table the transform returns to the exact identity
+to compare on (it is consumed for the hash and stripped from the wire payload):
+
+```lua
+-- suppress on stock alone; a changing `updated_at` in the body won't force a send
+function transform(event, defaults)
+  defaults.dedup_on = { stock = event.data.stock }
+  return defaults
+end
+```
+
+**Composes with both delivery modes.** `suppress_unchanged` is orthogonal to
+`notify_on_every_change`: combine them for "every *distinct* state" (no coalescing
+of pile-ups, but identical consecutive states still suppressed).
+
+**The boundary — dedup is not delta detection.** Suppression fires on *"the body is
+identical to the last delivered body."* It cannot express *"fire when field X
+transitions but send the whole record"* — the whole record differs for unrelated
+reasons, so it would always send. That's delta detection (needs a persisted
+before-image) and is out of scope.
+
+**Edge — no baseline.** A first delivery, or one whose baseline `:delivered` row was
+already reaped by retention, has nothing to compare against and simply delivers
+(then re-establishes the baseline). At-least-once already permits the occasional
+redundant send, so this degrades safely.
 
 ## Suspension & Failure Isolation
 

@@ -85,6 +85,7 @@ defmodule AshIntegration.Web.Components do
         :success -> "badge-success"
         :failed -> "badge-error"
         :skipped -> "badge-warning"
+        :suppressed -> "badge-neutral"
         _ -> "badge-ghost"
       end
     ]}>

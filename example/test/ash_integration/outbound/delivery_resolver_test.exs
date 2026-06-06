@@ -536,7 +536,12 @@ defmodule Example.Outbound.DeliveryResolverTest do
         data: data
       })
 
-    Resolver.resolve(connection, subscription, envelope, created_at)
+    # The resolver returns `{:ok, descriptor, body_hash}`; these tests predate the
+    # suppression hash and assert on the descriptor, so normalize to `{:ok, descriptor}`.
+    case Resolver.resolve(connection, subscription, envelope, created_at) do
+      {:ok, descriptor, _body_hash} -> {:ok, descriptor}
+      other -> other
+    end
   end
 
   defp create_user! do

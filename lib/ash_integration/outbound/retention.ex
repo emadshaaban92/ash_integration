@@ -163,7 +163,9 @@ defmodule AshIntegration.Outbound.Retention do
     threshold = DateTime.add(now, -days, :day)
 
     AshIntegration.event_delivery_resource()
-    |> Ash.Query.filter(state in [:delivered, :cancelled] and updated_at < ^threshold)
+    |> Ash.Query.filter(
+      state in [:delivered, :suppressed, :cancelled] and updated_at < ^threshold
+    )
   end
 
   defp log_query(now, days) do

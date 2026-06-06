@@ -29,7 +29,7 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
      |> add_attribute_if_not_exists(:status, :atom,
        allow_nil?: false,
        public?: true,
-       constraints: [one_of: [:success, :failed, :skipped]]
+       constraints: [one_of: [:success, :failed, :skipped, :suppressed]]
      )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_subscription_relationship_if_not_exists()

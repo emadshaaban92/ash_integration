@@ -33,10 +33,15 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   `defaults.headers` is pre-seeded with the wire-metadata headers, `content-type`,
   and the connection's static headers — ALL overridable and removable.
 
-  Returns `{:ok, descriptor}`, `:skip`, or `{:error, message}` (the transform
-  raised or produced an invalid descriptor → the event parks).
+  Returns `{:ok, descriptor, body_hash}`, `:skip`, or `{:error, message}` (the
+  transform raised or produced an invalid descriptor → the event parks).
+  `body_hash` is the canonical content hash for suppression (`Dedup`) — non-nil
+  only for `suppress_unchanged` subscriptions, nil otherwise. A transform-set
+  `result.dedup_on` is consumed here (as the hash target) and stripped from the
+  descriptor, so it never reaches the wire.
   """
 
+  alias AshIntegration.Outbound.Delivery.Dedup
   alias AshIntegration.Outbound.Delivery.Transform
   alias AshIntegration.Transport.Egress
   alias AshIntegration.Transport.Utils
@@ -59,10 +64,25 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     runtime = transform_runtime(subscription)
 
     case Transform.Runtime.execute(runtime, script, envelope, preseed) do
-      {:ok, :skip} -> :skip
-      {:ok, result} when is_map(result) -> finalize(transport, config, result, created_at)
-      {:ok, _scalar} -> {:error, "transform must return a table or nil"}
-      {:error, message} -> {:error, message}
+      {:ok, :skip} ->
+        :skip
+
+      {:ok, result} when is_map(result) ->
+        # `dedup_on` is a control field, never a wire field — strip it from the
+        # returned table before the descriptor is built so it can never reach the
+        # transport, then use it (if set) as the suppression hash target.
+        {dedup_on, result} = Map.pop(result, "dedup_on")
+
+        with {:ok, descriptor} <- finalize(transport, config, result, created_at),
+             {:ok, body_hash} <- maybe_hash(subscription, descriptor, dedup_on) do
+          {:ok, descriptor, body_hash}
+        end
+
+      {:ok, _scalar} ->
+        {:error, "transform must return a table or nil"}
+
+      {:error, message} ->
+        {:error, message}
     end
   end
 
@@ -103,6 +123,18 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
        do: runtime
 
   defp transform_runtime(_subscription), do: Transform.Runtime.default_runtime()
+
+  # Compute the canonical dedup hash only for `suppress_unchanged` subscriptions;
+  # nil otherwise (the common case pays nothing). A non-encodable `dedup_on` is a
+  # transform bug → `{:error, _}` so the delivery parks with a readable message
+  # (the same trust-boundary treatment as other invalid transform output).
+  defp maybe_hash(%{suppress_unchanged: true}, descriptor, dedup_on) do
+    {:ok, Dedup.hash(Dedup.target(descriptor, dedup_on))}
+  rescue
+    e -> {:error, "dedup_on is not encodable: #{Exception.message(e)}"}
+  end
+
+  defp maybe_hash(_subscription, _descriptor, _dedup_on), do: {:ok, nil}
 
   # ── Pre-seed (config + route + event → the transform's `defaults` argument) ────
 

@@ -206,7 +206,7 @@ defmodule Example.Outbound.TransportKafkaTest do
         data: data
       })
 
-    {:ok, delivery} =
+    {:ok, delivery, _body_hash} =
       AshIntegration.Outbound.Delivery.Resolver.resolve(
         sub.connection,
         sub,

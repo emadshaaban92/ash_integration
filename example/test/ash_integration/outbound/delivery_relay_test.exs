@@ -446,7 +446,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
         data: data
       })
 
-    {:ok, delivery} =
+    {:ok, delivery, _body_hash} =
       AshIntegration.Outbound.Delivery.Resolver.resolve(
         subscription.connection,
         subscription,
