@@ -119,6 +119,38 @@ defmodule Example.Outbound.EventDispatchTest do
     assert event.last_error =~ "Transform error"
   end
 
+  test "egress: an unresolvable base_url stays deliverable while a transform-set private URL parks",
+       %{connection: _default} do
+    # Build-time distinction (guard on): an unresolvable base_url stays :pending (a
+    # transport case, fails at send), while a transform-set SSRF URL parks here.
+    owner = create_user!()
+
+    dead = create_connection!(owner, base_url: "https://wms.digitalhub.example.invalid/hook")
+    s_dead = create_subscription!(dead, "widget.updated")
+
+    public = create_connection!(owner, base_url: "https://1.1.1.1/hook")
+
+    s_ssrf =
+      create_subscription!(public, "widget.updated",
+        transform_script: ~s|result.url = "http://169.254.169.254/latest"|
+      )
+
+    create_widget!(%{name: "w", stock: 1})
+    # The guard runs in the resolver during dispatch, so enable it for the drain.
+    with_egress_blocking(fn -> drain_dispatch!() end)
+
+    # The unresolvable endpoint is deliverable (not parked), carrying a descriptor.
+    [dead_delivery] = events_for(s_dead)
+    assert dead_delivery.state == :pending
+    assert dead_delivery.delivery["url"] == "https://wms.digitalhub.example.invalid/hook"
+
+    # The SSRF target parks at dispatch, no descriptor.
+    [ssrf_delivery] = events_for(s_ssrf)
+    assert ssrf_delivery.state == :parked
+    assert is_nil(ssrf_delivery.delivery)
+    assert ssrf_delivery.last_error =~ "egress blocked"
+  end
+
   test "a deactivated connection stops new events for all its subscriptions",
        %{connection: dest} do
     # `active` is the manual soft-delete (§5.6): deactivating the connection stops
@@ -272,7 +304,7 @@ defmodule Example.Outbound.EventDispatchTest do
     |> Ash.create!(authorize?: false)
   end
 
-  defp create_connection!(owner) do
+  defp create_connection!(owner, opts \\ []) do
     Connection
     |> Ash.Changeset.for_create(
       :create,
@@ -281,7 +313,7 @@ defmodule Example.Outbound.EventDispatchTest do
         owner_id: owner.id,
         transport_config: %{
           type: :http,
-          base_url: "http://localhost:9999/webhook",
+          base_url: Keyword.get(opts, :base_url, "http://localhost:9999/webhook"),
           auth: %{type: "none"},
           timeout_ms: 5000
         }
@@ -289,6 +321,21 @@ defmodule Example.Outbound.EventDispatchTest do
       authorize?: false
     )
     |> Ash.create!(authorize?: false)
+  end
+
+  # Run `fun` with the SSRF egress guard turned ON (the suite default is off).
+  defp with_egress_blocking(fun) do
+    original = Application.get_env(:ash_integration, :egress)
+    Application.put_env(:ash_integration, :egress, block_private?: true)
+
+    try do
+      fun.()
+    after
+      case original do
+        nil -> Application.delete_env(:ash_integration, :egress)
+        value -> Application.put_env(:ash_integration, :egress, value)
+      end
+    end
   end
 
   defp create_subscription!(dest, event_type, opts \\ []) do

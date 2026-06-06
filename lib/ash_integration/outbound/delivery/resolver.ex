@@ -143,23 +143,31 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   defp normalize_topic(_other),
     do: {:error, "no Kafka topic configured on the subscription or connection"}
 
-  # `result.url`, when set, is a full absolute override that bypasses the
-  # base_url + path join entirely; otherwise the path is joined onto the
-  # connection's base URL (resolved to the final absolute URL and snapshotted).
-  # The resolved URL is run through the SSRF egress policy here so a transform
-  # pointing at a private/loopback/metadata host parks the delivery with a clear
-  # error at dispatch instead of being sent. (Delivery re-checks at send time as a
-  # backstop against DNS rebinding — see the HTTP transport.)
+  # `result.url`, when set, is a transform-authored absolute override that bypasses
+  # the base_url + path join; otherwise the path is joined onto the connection's
+  # base_url. The candidate URL is checked against the egress policy by source ×
+  # category:
+  #
+  #   * base_url host UNRESOLVABLE — a connectivity condition on the connection's
+  #     own endpoint, not an authoring bug. Left deliverable so the send-time egress
+  #     gate fails it as a `:transport` error, bumping the connection counter and
+  #     driving suspension instead of silently parking with the counter at 0.
+  #   * anything else blocked PARKS (a build/authoring failure to fix + reprocess):
+  #     a transform-set private/loopback/metadata URL (SSRF), a base_url resolving
+  #     to a blocked address, or a malformed URL.
+  #
+  # Delivery pins + re-checks the URL at send time (see `Egress.pin/1`).
   defp resolve_url(config, result) do
-    url =
+    {url, override?} =
       case result["url"] do
-        url when is_binary(url) and url != "" -> url
-        _ -> Utils.build_url(config.base_url, result["path"])
+        url when is_binary(url) and url != "" -> {url, true}
+        _ -> {Utils.build_url(config.base_url, result["path"]), false}
       end
 
-    case Egress.validate(url) do
+    case Egress.classify(url) do
       :ok -> {:ok, url}
-      {:error, reason} -> {:error, reason}
+      {:error, :unresolvable, _message} when not override? -> {:ok, url}
+      {:error, _category, message} -> {:error, message}
     end
   end
 

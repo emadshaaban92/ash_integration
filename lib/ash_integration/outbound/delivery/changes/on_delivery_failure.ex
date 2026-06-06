@@ -6,8 +6,8 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
   # The transport classifies each failure in `delivery_metadata["failure_class"]`:
   #
   #   * `"transport"` — couldn't reach the target (conn refused, DNS/TLS, timeout,
-  #     broker down) → bump the CONNECTION counter, auto-suspend the connection
-  #     at threshold (pauses all its subscriptions).
+  #     broker down, or an unresolvable connection `base_url` caught by the send-time
+  #     egress gate) → bump the CONNECTION counter, auto-suspend at threshold.
   #   * `"response"` — the target responded with a rejection (e.g. HTTP 4xx/5xx)
   #     → bump THIS SUBSCRIPTION's counter, auto-suspend just it (other event
   #     types to the connection keep flowing).

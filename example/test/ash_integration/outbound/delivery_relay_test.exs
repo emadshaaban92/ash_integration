@@ -137,6 +137,38 @@ defmodule Example.Outbound.DeliveryRelayTest do
 
       assert reload(d).state == :pending
     end
+
+    test "an unresolvable endpoint (base_url NXDOMAIN) bumps the CONNECTION counter (transport)",
+         %{owner: owner} do
+      # An unresolvable base_url is a :transport failure at send, so the CONNECTION
+      # counter bumps (not the subscription's) — the dead endpoint surfaces normally.
+      dead = create_connection!(owner, base_url: "https://wms.digitalhub.example.invalid/hook")
+      s = create_subscription!(dead)
+      d = scheduled_delivery!(s)
+
+      with_egress_blocking(fn -> drain_delivery!() end)
+
+      reloaded = reload(d)
+      assert reloaded.last_error =~ "egress blocked"
+      # The CONNECTION counter bumped (transport), NOT the subscription's (response).
+      assert reload(dead).consecutive_failures == 1
+      assert reload(s).consecutive_failures == 0
+    end
+
+    test "an unresolvable endpoint drives the connection to auto-suspension at threshold",
+         %{owner: owner} do
+      dead = create_connection!(owner, base_url: "https://wms.digitalhub.example.invalid/hook")
+      s = create_subscription!(dead)
+      d = scheduled_delivery!(s)
+
+      # Threshold of 1: a single endpoint-transport failure auto-suspends.
+      with_suspension_threshold(1, fn ->
+        with_egress_blocking(fn -> drain_delivery!() end)
+      end)
+
+      assert reload(dead).suspended
+      refute is_nil(reload(d).last_error)
+    end
   end
 
   describe "terminal (poison) — never auto-resolved (#60/#74)" do
@@ -276,7 +308,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
     |> Ash.create!(authorize?: false)
   end
 
-  defp create_connection!(owner) do
+  defp create_connection!(owner, opts \\ []) do
     Connection
     |> Ash.Changeset.for_create(
       :create,
@@ -285,7 +317,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
         owner_id: owner.id,
         transport_config: %{
           type: :http,
-          base_url: "http://localhost:9999/webhook",
+          base_url: Keyword.get(opts, :base_url, "http://localhost:9999/webhook"),
           auth: %{type: "none"},
           timeout_ms: 5000
         }
@@ -293,6 +325,36 @@ defmodule Example.Outbound.DeliveryRelayTest do
       authorize?: false
     )
     |> Ash.create!(authorize?: false)
+  end
+
+  # Run `fun` with the egress guard ON (the suite default is off), then restore it.
+  defp with_egress_blocking(fun) do
+    original = Application.get_env(:ash_integration, :egress)
+    Application.put_env(:ash_integration, :egress, block_private?: true)
+
+    try do
+      fun.()
+    after
+      case original do
+        nil -> Application.delete_env(:ash_integration, :egress)
+        value -> Application.put_env(:ash_integration, :egress, value)
+      end
+    end
+  end
+
+  # Temporarily lower the auto-suspension threshold for a test, restoring it after.
+  defp with_suspension_threshold(threshold, fun) do
+    original = Application.get_env(:ash_integration, :auto_suspension_threshold)
+    Application.put_env(:ash_integration, :auto_suspension_threshold, threshold)
+
+    try do
+      fun.()
+    after
+      case original do
+        nil -> Application.delete_env(:ash_integration, :auto_suspension_threshold)
+        value -> Application.put_env(:ash_integration, :auto_suspension_threshold, value)
+      end
+    end
   end
 
   defp create_subscription!(conn) do

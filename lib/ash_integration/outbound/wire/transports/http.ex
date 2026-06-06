@@ -48,34 +48,34 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
   defp do_deliver(event, config, body, auth, signature) do
     delivery = event.delivery
 
-    # Re-validate the snapshotted URL against the egress policy right before the
-    # send — a backstop against DNS rebinding between dispatch and delivery, and
-    # against snapshots materialized before the policy existed. The resolver
-    # already parked anything that fails this at dispatch time.
-    case AshIntegration.Transport.Egress.validate(delivery["url"]) do
-      :ok -> do_send(event, config, body, auth, signature)
-      {:error, reason} -> egress_error(reason)
+    # Pin the snapshotted URL to a validated IP right before the send — the live SSRF
+    # gate against DNS rebinding (the checked address is the connected address). An
+    # unresolvable base_url fails here as a `:transport` error, driving suspension.
+    case AshIntegration.Transport.Egress.pin(delivery["url"]) do
+      {:ok, url, connect_options} ->
+        do_send(event, config, body, auth, signature, url, connect_options)
+
+      {:error, _category, reason} ->
+        egress_error(reason)
     end
   end
 
-  defp do_send(event, config, body, auth, signature) do
+  defp do_send(event, config, body, auth, signature, url, connect_options) do
     delivery = event.delivery
     req_options = Application.get_env(:ash_integration, :req_options, [])
 
     case Req.request(
            [
              method: method(delivery["method"]),
-             url: delivery["url"],
+             url: url,
              body: body,
              headers: headers(auth, delivery["headers"], signature),
              receive_timeout: timeout(event.subscription.route_config, config),
              retry: false,
-             # Never follow redirects. Egress.validate only checked the snapshotted
-             # URL; a 3xx to an internal address (e.g. 169.254.169.254) would bypass
-             # that check entirely. A webhook target answering a delivery with a
-             # redirect is a misconfiguration, not a route worth chasing.
+             # Never follow redirects: a 3xx to an internal address would re-resolve
+             # and bypass the pin. A redirect from a webhook target is a misconfig.
              redirect: false
-           ] ++ req_options
+           ] ++ merge_connect_options(req_options, connect_options)
          ) do
       {:ok, %Req.Response{status: status, body: resp}} when status in 200..299 ->
         {:ok, %{response_status: status, response_body: Utils.body_to_string(resp)}}
@@ -111,6 +111,14 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
   # non-retryable transport failure rather than looping.
   defp egress_error(reason) do
     {:error, %{failure_class: :transport, error_message: reason, retryable: false}}
+  end
+
+  # Fold the pin's `connect_options` into any operator-set `req_options`, pin wins.
+  defp merge_connect_options(req_options, []), do: req_options
+
+  defp merge_connect_options(req_options, connect_options) do
+    {existing, rest} = Keyword.pop(req_options, :connect_options, [])
+    [{:connect_options, Keyword.merge(existing, connect_options)} | rest]
   end
 
   # Both secret-derived headers are injected LIVE here (never in the event row or
