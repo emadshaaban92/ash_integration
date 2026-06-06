@@ -1,6 +1,8 @@
 defmodule AshIntegration.Outbound.SourceDslTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureIO
+
   alias AshIntegration.Outbound.Declare.Source.Info
 
   defmodule ProductProducer do
@@ -136,6 +138,10 @@ defmodule AshIntegration.Outbound.SourceDslTest do
       use Ash.Resource,
         domain: AshIntegration.Outbound.SourceDslTest.Domain,
         data_layer: Ash.DataLayer.Simple,
+        # This resource intentionally never joins the domain (we only compile it to
+        # trip the verifier), so skip the domain-inclusion check that would otherwise
+        # warn on every run.
+        validate_domain_inclusion?: false,
         extensions: [AshIntegration.Outbound.Declare.Source]
 
       outbound_events do
@@ -157,13 +163,18 @@ defmodule AshIntegration.Outbound.SourceDslTest do
     end
     """
 
-    {_result, diagnostics} =
-      Code.with_diagnostics(fn ->
-        try do
-          Code.compile_string(bad)
-        rescue
-          _ -> :error
-        end
+    # The verifier runs in the parallel-checker phase, which prints the rejection
+    # to :stderr independently of `Code.with_diagnostics`. Swallow that expected
+    # noise with `with_io/2` while still asserting on the returned diagnostics.
+    {{_result, diagnostics}, _stderr} =
+      with_io(:stderr, fn ->
+        Code.with_diagnostics(fn ->
+          try do
+            Code.compile_string(bad)
+          rescue
+            _ -> :error
+          end
+        end)
       end)
 
     messages = Enum.map(diagnostics, & &1.message)
@@ -180,6 +191,10 @@ defmodule AshIntegration.Outbound.SourceDslTest do
       use Ash.Resource,
         domain: AshIntegration.Outbound.SourceDslTest.Domain,
         data_layer: Ash.DataLayer.Simple,
+        # This resource intentionally never joins the domain (we only compile it to
+        # trip the verifier), so skip the domain-inclusion check that would otherwise
+        # warn on every run.
+        validate_domain_inclusion?: false,
         extensions: [AshIntegration.Outbound.Declare.Source]
 
       outbound_events do
@@ -200,13 +215,17 @@ defmodule AshIntegration.Outbound.SourceDslTest do
     end
     """
 
-    {_result, diagnostics} =
-      Code.with_diagnostics(fn ->
-        try do
-          Code.compile_string(bad)
-        rescue
-          _ -> :error
-        end
+    # See the note above: swallow the parallel-checker's :stderr print while still
+    # asserting on the diagnostics it returns.
+    {{_result, diagnostics}, _stderr} =
+      with_io(:stderr, fn ->
+        Code.with_diagnostics(fn ->
+          try do
+            Code.compile_string(bad)
+          rescue
+            _ -> :error
+          end
+        end)
       end)
 
     messages = Enum.map(diagnostics, & &1.message)

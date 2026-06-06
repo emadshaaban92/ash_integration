@@ -10,7 +10,6 @@ defmodule Example.Outbound.EventSchedulerTest do
   use Example.DataCase, async: false
 
   require Ash.Query
-  import Ecto.Query, only: [where: 3]
 
   alias AshIntegration.Outbound.Delivery.Scheduler
   alias Example.Outbound.{Connection, Log, EventDelivery, Subscription}
