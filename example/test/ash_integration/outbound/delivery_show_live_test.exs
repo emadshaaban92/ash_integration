@@ -116,7 +116,7 @@ defmodule Example.Outbound.DeliveryShowLiveTest do
     end
 
     test "a parked delivery offers reprocess", %{conn: conn, user: user} do
-      sub = seed_subscription!(create_connection!(user), "widget.updated", ~s|error("boom")|)
+      seed_subscription!(create_connection!(user), "widget.updated", ~s|error("boom")|)
       create_widget!(%{name: "w", stock: 1})
       drain_dispatch!()
 
