@@ -132,7 +132,7 @@ defmodule Example.Outbound.EventDispatchTest do
 
     s_ssrf =
       create_subscription!(public, "widget.updated",
-        transform_script: ~s|result.url = "http://169.254.169.254/latest"|
+        transform_source: ~s|result.url = "http://169.254.169.254/latest"|
       )
 
     create_widget!(%{name: "w", stock: 1})
