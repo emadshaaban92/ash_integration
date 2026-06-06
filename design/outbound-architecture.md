@@ -436,6 +436,43 @@ A suspended subscription holding a lane's oldest event **parks that key's lane**
 until it recovers — the §8 head-of-line tradeoff extended to suspension:
 correctness over liveness, scoped to the one key.
 
+### 10.1 Parked health (the build-failure blind spot)
+
+Park (the `build` row above) is deliberately *not* a suspension: a broken transform
+is a fixable producer/script bug, recoverable via `reprocess`, so conflating it with
+"endpoint down" would be wrong. But that left a blind spot — a subscription whose
+transform parks 100% of its deliveries kept `suspended`/`consecutive_failures` clean
+and read green everywhere. Parking now surfaces as a **separate health dimension**,
+without overloading the failure counters or changing when/why a delivery parks:
+
+- **Aggregates.** Subscription and Connection carry `parked_count` (count of
+  `:parked` deliveries) and `oldest_parked_at` (their min `created_at` — how long
+  the head has been stuck). Query-time, filtered to `state == :parked`; the
+  connection's span all its subscriptions. A *load* failure surfaces loudly (it is
+  not swallowed into a zero — the #14 lesson).
+- **Derived status.** `ParkedHealth.status/1` maps the backlog to
+  `:healthy | :degraded | :parked` against `parked_health_threshold` (default 10):
+  zero is healthy, below the threshold is degraded, at/above is parked. The
+  dashboard gets a standing "Parked" stat; the index/detail pages a degraded/parked
+  badge. This is the standing/queryable signal; `[:ash_integration, :delivery,
+  :parked]` telemetry (one per parked row, with `failure_kind`, emitted
+  *post-commit* at the dispatch + reprocess park sites) is the real-time one.
+- **Opt-in parked-suspend (default OFF).** Whether sustained parking should *also*
+  halt is a genuine tradeoff: auto-halting bounds downstream damage, but a parked
+  head already blocks only its own lane and is reprocess-driven, so the damage is
+  self-bounding. The conservative default is **visible/alertable only, no auto-halt**.
+  Hosts can opt in with `parked_suspension: [enabled?: true, count_threshold: 50]`:
+  a subscription whose standing parked backlog crosses the threshold is suspended.
+  This is a **distinct** suspension — it sets `suspended` (recoverable via
+  `reprocess` + `unsuspend`, like any other) but **never** bumps
+  `consecutive_failures`, so it is never conflated with the transport/response
+  failure-counter suspend. It acts on the *subscription* (the transform's owner, the
+  narrower blast radius), never the connection; the connection's parked health stays
+  purely visible. Like the failure-counter suspend, it is a **filtered atomic**
+  update (`suspended == false`) so concurrent crossers don't double-fire, and it
+  reuses the `[:ash_integration, :subscription, :suspended]` event tagged
+  `failure_class: "parked"` so a suspension monitor catches the opt-in halt.
+
 ## 11. The wire contract
 
 The wire **leads with the event type**; provenance (`source_resource` /

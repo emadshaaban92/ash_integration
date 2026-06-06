@@ -10,6 +10,7 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
   """
   require Ash.Query
 
+  alias AshIntegration.Outbound.Delivery.ParkedHealth
   alias AshIntegration.Outbound.Delivery.Resolver
   alias AshIntegration.Outbound.Wire.Envelope
   alias AshIntegration.Outbound.Delivery.Scheduler
@@ -23,6 +24,15 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
   it still fails (stays parked) or can't be reprocessed.
   """
   def reprocess_event(delivery) do
+    result = do_reprocess_event(delivery)
+    # Single-delivery path: evaluate the opt-in parked-suspend for just this
+    # subscription, post-reprocess (default OFF → no-op). The bulk path below skips
+    # this per-row and evaluates once for all touched subscriptions.
+    ParkedHealth.evaluate_parked_suspend(delivery.subscription_id)
+    result
+  end
+
+  defp do_reprocess_event(delivery) do
     delivery = Ash.load!(delivery, [:event, :subscription, :connection], authorize?: false)
 
     cond do
@@ -38,15 +48,25 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
   `%{reprocessed: n, failed: n}`.
   """
   def reprocess_parked_for_connection(connection_id) do
-    AshIntegration.event_delivery_resource()
-    |> Ash.Query.filter(connection_id == ^connection_id and state == :parked)
-    |> Ash.read!(authorize?: false)
-    |> Enum.reduce(%{reprocessed: 0, failed: 0}, fn delivery, acc ->
-      case reprocess_event(delivery) do
-        {:ok, _state} -> %{acc | reprocessed: acc.reprocessed + 1}
-        {:error, _reason} -> %{acc | failed: acc.failed + 1}
-      end
-    end)
+    parked =
+      AshIntegration.event_delivery_resource()
+      |> Ash.Query.filter(connection_id == ^connection_id and state == :parked)
+      |> Ash.read!(authorize?: false)
+
+    result =
+      Enum.reduce(parked, %{reprocessed: 0, failed: 0}, fn delivery, acc ->
+        case do_reprocess_event(delivery) do
+          {:ok, _state} -> %{acc | reprocessed: acc.reprocessed + 1}
+          {:error, _reason} -> %{acc | failed: acc.failed + 1}
+        end
+      end)
+
+    # One parked-suspend pass for every subscription touched (post-reprocess),
+    # instead of per re-parked row: each is re-counted and suspended only if its
+    # standing backlog still crosses the threshold. Default OFF → no-op.
+    parked |> Enum.map(& &1.subscription_id) |> ParkedHealth.evaluate_parked_suspend()
+
+    result
   end
 
   defp rerun(%{event: event} = delivery) do
@@ -159,7 +179,11 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
     })
   end
 
-  # Re-park and re-emit `:parked` (mirrors the dispatch-time park in `Specs`).
+  # Re-park a delivery whose reprocess still failed and re-emit `:parked` (the
+  # authoritative emit, carrying `failure_kind`; mirrors the dispatch-time park in
+  # `Specs`). The opt-in parked-suspend is evaluated once by the caller
+  # (`reprocess_event`/`reprocess_parked_for_connection`), not per re-parked row.
+  # Park semantics are unchanged.
   defp park!(delivery, reason, failure_kind) do
     update!(delivery, :park, %{delivery: nil, last_error: reason})
 

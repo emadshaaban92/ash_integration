@@ -93,6 +93,10 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
         coalesce_pending!(specs, deliveries)
         emit_parked(specs, deliveries)
 
+      # The opt-in parked-suspend is NOT evaluated here: it runs post-commit in
+      # the relay's `handle_batch`, so its count/update never executes inside this
+      # dispatch transaction.
+
       %Ash.BulkResult{errors: errors} ->
         raise "EventDelivery bulk insert failed: #{inspect(errors)}"
     end

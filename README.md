@@ -18,6 +18,7 @@ Declare named, versioned **event types** that your resource actions contribute t
 - **Ordering & latest-state coalescing** — per-`(connection, event_key)` ordering enforced by a partial unique index (database-level correctness), with the same key driving latest-state coalescing
 - **Content suppression** — opt a subscription into `suppress_unchanged` to withhold a delivery whose body matches the last delivered one (a recurring value still sends); this also gives field-level subscription for free (project the fields you care about), surfaced as a distinct `suppressed` state
 - **Two-level suspension** — transport failures auto-suspend the connection, response rejections auto-suspend just the subscription (events keep accumulating, no data loss)
+- **Parked health** — a broken transform parks (not suspends) its deliveries; that backlog surfaces as a derived `:healthy/:degraded/:parked` status, a dashboard stat, index/detail badges, and `[:ash_integration, :delivery, :parked]` telemetry — with an opt-in auto-suspend (default off)
 - **Reprocess** — re-run Lua transforms across stuck (parked) events after fixing a script
 - **Delivery logs** — full request/response logging with configurable retention
 - **Built-in dashboard** — LiveView UI mirroring the model: subscriptions + connections (config), the derived event-type catalog (the contract), and the runtime drill-down events → deliveries → logs, plus transform testing
@@ -86,10 +87,16 @@ read.
 config :ash_integration,
   # ...required settings above
   enabled?: true,                # Run the background pipeline on this node (default: true; set false in tests)
-  auto_suspension_threshold: 50, # Consecutive failures before auto-suspend (default: 50)
+  auto_suspension_threshold: 50, # Consecutive transport/response failures before auto-suspend (default: 50)
+  parked_health_threshold: 10,   # Parked-backlog count at/above which health reads :parked vs :degraded (default: 10)
   http_max_timeout_ms: 60_000,   # Max allowed HTTP request timeout (default: 60s)
   kafka_idle_timeout_ms: 300_000,# Kafka client idle teardown (default: 5 min)
-  query_log_level: false         # Log level for internal poll/claim SQL — false silences it (default: :debug)
+  query_log_level: false,        # Log level for internal poll/claim SQL — false silences it (default: :debug)
+  # Opt-in: also auto-suspend a subscription whose PARKED backlog crosses the
+  # threshold. Default OFF (parking is visible/alertable only). Distinct from the
+  # failure-counter suspend — never bumps consecutive_failures; clears via reprocess
+  # + unsuspend.
+  parked_suspension: [enabled?: false, count_threshold: 50]
 ```
 
 The dispatch relay, the delivery relay, and the scheduler poll the database on a
@@ -586,6 +593,10 @@ Events are ordered per `(connection, event_key)`. A **partial unique index** ens
 ### Two-Level Suspension
 
 When a target fails persistently it is **auto-suspended** (not deactivated). Transport failures (can't reach the target) suspend the **connection**, pausing all its subscriptions; response rejections suspend just that **subscription**. Suspended routes keep accumulating events — no data is lost. A successful delivery resets both counters.
+
+### Parked Health
+
+A broken transform/`project` **parks** its deliveries (build failure) — that is *not* a transport/response failure, so it never touches the suspension counters and is recovered with `reprocess`, not by waiting for an endpoint to come back. To keep that from being a silent blind spot, parking surfaces as its own health dimension: `parked_count` / `oldest_parked_at` aggregates on the subscription and connection, a derived `:healthy | :degraded | :parked` status (`ParkedHealth.status/1`, threshold via `parked_health_threshold`), a **"Parked"** dashboard stat, a degraded/parked badge on the index + detail pages, and `[:ash_integration, :delivery, :parked]` telemetry for alerting. By default this is visible/alertable only — set `parked_suspension: [enabled?: true, count_threshold: N]` to also auto-suspend a subscription whose parked backlog crosses `N` (a distinct, reprocess-/`unsuspend`-resumable suspension that never bumps `consecutive_failures`).
 
 ### Resilience
 

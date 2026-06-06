@@ -96,6 +96,7 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
      |> add_connection_relationship_if_not_exists()
      |> add_deliveries_relationship_if_not_exists()
      |> add_last_delivered_at_aggregate_if_not_exists()
+     |> add_parked_aggregates_if_not_exists()
      |> add_activate_action_if_not_exists()
      |> add_deactivate_action_if_not_exists()
      |> add_record_success_action_if_not_exists()
@@ -226,6 +227,50 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
           name: :last_delivered_at,
           relationship_path: :deliveries,
           field: :delivered_at,
+          public?: true
+        )
+
+      Transformer.add_entity(dsl_state, [:aggregates], aggregate, type: :append)
+    end
+  end
+
+  # Standing parked-backlog health, the side effect a broken transform leaves with
+  # no counter/suspension (`ParkedHealth`): `parked_count` (count of `:parked`
+  # deliveries) + `oldest_parked_at` (min `created_at` of them — how long the head
+  # has been stuck). Query-time aggregates filtered to `state == :parked`; mirror
+  # `last_delivered_at`, added-if-not-exists so hosts can override.
+  defp add_parked_aggregates_if_not_exists(dsl_state) do
+    dsl_state
+    |> add_parked_count_aggregate_if_not_exists()
+    |> add_oldest_parked_at_aggregate_if_not_exists()
+  end
+
+  defp add_parked_count_aggregate_if_not_exists(dsl_state) do
+    if Info.aggregate(dsl_state, :parked_count) do
+      dsl_state
+    else
+      {:ok, aggregate} =
+        Transformer.build_entity(Dsl, [:aggregates], :count,
+          name: :parked_count,
+          relationship_path: :deliveries,
+          filter: [state: :parked],
+          public?: true
+        )
+
+      Transformer.add_entity(dsl_state, [:aggregates], aggregate, type: :append)
+    end
+  end
+
+  defp add_oldest_parked_at_aggregate_if_not_exists(dsl_state) do
+    if Info.aggregate(dsl_state, :oldest_parked_at) do
+      dsl_state
+    else
+      {:ok, aggregate} =
+        Transformer.build_entity(Dsl, [:aggregates], :min,
+          name: :oldest_parked_at,
+          relationship_path: :deliveries,
+          field: :created_at,
+          filter: [state: :parked],
           public?: true
         )
 

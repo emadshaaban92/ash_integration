@@ -459,6 +459,55 @@ Crossing the threshold emits `[:ash_integration, :connection, :suspended]` or
 emits `:unsuspended` / `:resumed`. See the
 [Observability guide](observability.md).
 
+### Parked Health
+
+Parking (the `build` row above) is **not** a transport/response failure, so it
+never touches `consecutive_failures` and never auto-suspends on its own — a
+broken transform/producer would otherwise read fully green while parking 100% of
+its deliveries. To close that blind spot, parking surfaces as its own standing
+health dimension, derived from the `parked_count` / `oldest_parked_at` aggregates
+on the subscription and connection:
+
+- `:healthy` — no parked deliveries.
+- `:degraded` — some parked backlog, **below** `parked_health_threshold`.
+- `:parked` — backlog **at/above** `parked_health_threshold` (chronically parked).
+
+`AshIntegration.Outbound.Delivery.ParkedHealth.status/1` derives this for the
+dashboard "Parked" stat and the index/detail badges; the real-time signal is the
+`[:ash_integration, :delivery, :parked]` telemetry (one per parked row, carrying
+`failure_kind`). This dimension is **display/alerting only** — it never halts
+delivery.
+
+**Two distinct thresholds (a common point of confusion).** `parked_health_threshold`
+(default `10`) only changes the *badge colour* — it is where the health tier flips
+from `:degraded` to `:parked`. It does **not** suspend anything. Auto-suspend is a
+separate, opt-in control governed by `parked_suspension` with its own
+`count_threshold` (default `50`):
+
+```elixir
+config :ash_integration,
+  parked_health_threshold: 10,                                   # badge: :degraded → :parked
+  parked_suspension: [enabled?: true, count_threshold: 50]       # opt-in auto-suspend (default OFF)
+```
+
+So with the defaults a subscription reads a red `:parked` badge at 10 parked
+deliveries but is not auto-suspended until 50 (and only if `parked_suspension` is
+enabled at all). Set `count_threshold` ≤ `parked_health_threshold` if you want a
+chronically-parked badge to also halt the route.
+
+The opt-in parked-suspend is a **distinct** suspension: it sets `suspended` on the
+**subscription** (the transform's owner — never the connection), is recoverable via
+`reprocess` + `unsuspend` like any other, and **never** bumps `consecutive_failures`,
+so it is never conflated with the failure-counter suspend above. It is evaluated
+**post-commit** (after the dispatch transaction, and after a reprocess run), so its
+counting and the suspend write never run inside the dispatch transaction. Because
+suspended routes keep accumulating deliveries, the practical effect is to halt the
+subscription's *other* (healthy) lanes too and to raise an explicit, monitorable
+halt — it reuses `[:ash_integration, :subscription, :suspended]` tagged
+`failure_class: "parked"` (with `parked_count` in measurements). It does not stop
+new deliveries from parking; only fixing the build (then `reprocess`) clears the
+backlog.
+
 ## Recency (Last-Write-Wins)
 
 Because delivery is at-least-once and lanes can be re-scheduled, consumers do
