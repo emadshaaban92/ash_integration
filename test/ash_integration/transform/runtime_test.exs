@@ -67,6 +67,17 @@ defmodule AshIntegration.Transform.RuntimeTest do
       assert :ok = Runtime.validate(:lua, "result = {ok = true}")
     end
 
+    test "rejects a script that does not parse (syntax error caught at save)" do
+      assert {:error, message} = Runtime.validate(:lua, "result = {")
+      assert message =~ "does not parse"
+    end
+
+    test "accepts a script that parses but raises at runtime (it parks at dispatch)" do
+      # Early validation stops at "does it parse"; a runtime error is the
+      # platform's job to handle later (park + reprocess), not to reject here.
+      assert :ok = Runtime.validate(:lua, "error('boom')")
+    end
+
     test "rejects an oversized script before save" do
       assert {:error, message} = Runtime.validate(:lua, String.duplicate("x", 10_241))
       assert message =~ "maximum size"

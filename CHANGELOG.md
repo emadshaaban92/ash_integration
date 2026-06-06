@@ -31,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Save-time validation of a subscription's `transform_source`, so a broken
+  transform is rejected when saved rather than parking every delivery at
+  dispatch. Two layers, both only when the source is changing: a static
+  parse/size check via the runtime (`Transform.Runtime.validate/2`), then a
+  **smoke run** of the script against the producer's `example/1` — exactly as
+  dispatch pre-seeds it — that catches the syntactically-valid-but-unrunnable
+  class (denied `io`/`os`, `nil`-index, a typo that runs, a non-table result).
+  The smoke layer stops before the wire descriptor and the SSRF egress policy
+  (dispatch-time concerns) and no-ops when the producer declares no `example/1`.
 - A `transform_runtime` attribute on the subscription (atom, default `:lua`),
   selecting the language that interprets `transform_source` per route. Its
   `one_of` constraint is derived from the runtime registry

@@ -65,6 +65,38 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     end
   end
 
+  @doc """
+  Save-time **smoke check**: pre-seed and run the transform against `envelope`
+  exactly as `resolve/4` would, but STOP before `finalize`. It answers one
+  question — *does the script execute cleanly on this input?* — and nothing
+  about the wire descriptor.
+
+  The post-transform layers `resolve/4` applies (descriptor normalization and,
+  inside it, the SSRF **egress** policy) are deliberately NOT run here: they are
+  dispatch-time concerns, re-checked at send and meant to PARK a delivery, not
+  to block a save. Folding egress in would also reject a perfectly valid script
+  purely because its connection points at `localhost`. So this catches the
+  script-author class — a raise, a denied `io`/`os` call, a `nil` index, a typo
+  that runs, a non-table `result` — and leaves network/descriptor policy to
+  dispatch.
+
+  Returns `:ok` (the transform produced a table or skipped) or
+  `{:error, message}` (it raised, hit a denied op, or returned a non-table).
+  """
+  def smoke(connection, subscription, envelope, created_at) do
+    %Ash.Union{type: transport, value: config} = connection.transport_config
+    preseed = preseed(transport, config, subscription, envelope, created_at)
+    script = subscription.transform_source || ""
+    runtime = transform_runtime(subscription)
+
+    case Transform.Runtime.execute(runtime, script, envelope, preseed) do
+      {:ok, :skip} -> :ok
+      {:ok, result} when is_map(result) -> :ok
+      {:ok, _scalar} -> {:error, "transform must set `result` to a table"}
+      {:error, message} -> {:error, message}
+    end
+  end
+
   defp transform_runtime(%{transform_runtime: runtime})
        when is_atom(runtime) and not is_nil(runtime),
        do: runtime

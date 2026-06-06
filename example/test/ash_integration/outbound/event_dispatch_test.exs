@@ -106,7 +106,18 @@ defmodule Example.Outbound.EventDispatchTest do
 
   test "a transform that errors parks the event (parked state, nil payload, last_error)",
        %{connection: dest} do
-    s1 = create_subscription!(dest, "widget.updated", transform_source: "error('boom')")
+    # Seed past the save-time smoke gate (it now rejects a script that raises on
+    # the producer's example/1) so we can exercise the dispatch-time park path.
+    s1 =
+      Ash.Seed.seed!(Subscription, %{
+        connection_id: dest.id,
+        event_type: "widget.updated",
+        version: 1,
+        transform_source: "error('boom')",
+        active: true,
+        suspended: false,
+        consecutive_failures: 0
+      })
 
     create_widget!(%{name: "w", stock: 1})
     drain_dispatch!()

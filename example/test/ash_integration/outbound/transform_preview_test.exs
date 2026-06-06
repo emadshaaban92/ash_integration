@@ -77,7 +77,19 @@ defmodule Example.Outbound.TransformPreviewTest do
 
   test "a transform error is reported with the message", %{owner: owner, connection: dest} do
     create_widget!(owner)
-    sub = create_subscription!(dest, transform_source: "this is not valid lua {{{")
+
+    # The save-time smoke gate runs the script against the producer's example/1 —
+    # the same sample this preview uses — so a normally-created subscription can't
+    # reach the :error branch. Seed one past the gate to prove the preview still
+    # surfaces a transform error (legacy rows, or a producer example that drifted
+    # after save, can still land here).
+    sub =
+      Ash.Seed.seed!(Subscription, %{
+        connection_id: dest.id,
+        event_type: "widget.updated",
+        version: 1,
+        transform_source: "error('boom')"
+      })
 
     assert {:ok, result} = Transform.Preview.run(sub.id, owner)
     assert result.outcome == :error
