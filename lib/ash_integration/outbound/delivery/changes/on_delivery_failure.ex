@@ -46,14 +46,16 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
         bump_and_maybe_suspend(
           AshIntegration.connection_resource(),
           event.connection_id,
-          "transport"
+          "transport",
+          event.last_error
         )
 
       :response ->
         bump_and_maybe_suspend(
           AshIntegration.subscription_resource(),
           event.subscription_id,
-          "response"
+          "response",
+          event.last_error
         )
     end
   end
@@ -67,7 +69,7 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
 
   # Atomically increment the counter (RETURNING the post-increment value), then
   # auto-suspend if the threshold is reached and it isn't already suspended.
-  defp bump_and_maybe_suspend(resource, id, kind) do
+  defp bump_and_maybe_suspend(resource, id, kind, last_error) do
     table = AshPostgres.DataLayer.Info.table(resource)
 
     result =
@@ -79,7 +81,7 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
 
     case result do
       {1, [%{consecutive_failures: new_count, suspended: suspended}]} ->
-        maybe_suspend(resource, id, kind, new_count, suspended)
+        maybe_suspend(resource, id, kind, new_count, suspended, last_error)
 
       # The connection/subscription was deleted between the failed delivery and
       # this hook (racing teardown). Nothing to bump or suspend — degrade rather
@@ -94,7 +96,7 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
     end
   end
 
-  defp maybe_suspend(resource, id, kind, new_count, suspended) do
+  defp maybe_suspend(resource, id, kind, new_count, suspended, last_error) do
     threshold = AshIntegration.auto_suspension_threshold()
 
     if new_count >= threshold and not suspended do
@@ -119,6 +121,13 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
               "#{kind} failures"
           )
 
+          # Only the race winner reaches here, so this fires once per crossing.
+          :telemetry.execute(
+            [:ash_integration, suspend_domain(resource), :suspended],
+            %{consecutive_failures: new_count},
+            %{id: id, threshold: threshold, failure_class: kind, last_error: last_error}
+          )
+
         # No row matched the `suspended == false` filter: a concurrent crosser won
         # the race and already suspended it. Nothing to do (and nothing to log).
         {:error, _stale} ->
@@ -129,6 +138,11 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
 
   defp kind_label(resource) do
     if resource == AshIntegration.connection_resource(), do: "connection", else: "subscription"
+  end
+
+  # Telemetry domain segment for the suspended resource.
+  defp suspend_domain(resource) do
+    if resource == AshIntegration.connection_resource(), do: :connection, else: :subscription
   end
 
   defp create_delivery_log(event) do

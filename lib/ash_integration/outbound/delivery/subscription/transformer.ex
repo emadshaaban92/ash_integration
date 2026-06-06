@@ -302,7 +302,12 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
             set_change(:suspended, false),
             set_change(:suspended_at, nil),
             set_change(:suspension_reason, nil),
-            set_change(:consecutive_failures, 0)
+            set_change(:consecutive_failures, 0),
+            Transformer.build_entity!(Dsl, [:actions, :update], :change,
+              change:
+                {AshIntegration.Outbound.Delivery.Changes.EmitResumeTelemetry,
+                 event: [:ash_integration, :subscription, :resumed]}
+            )
           ]
         )
 

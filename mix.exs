@@ -94,6 +94,7 @@ defmodule AshIntegration.MixProject do
       extras: [
         "README.md",
         "guides/delivery-pipeline.md",
+        "guides/observability.md",
         "guides/producers.md",
         "guides/http-transport.md",
         "guides/kafka-transport.md"

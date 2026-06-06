@@ -91,10 +91,36 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
     case result do
       %Ash.BulkResult{status: :success, records: deliveries} ->
         coalesce_pending!(specs, deliveries)
+        emit_parked(specs, deliveries)
 
       %Ash.BulkResult{errors: errors} ->
         raise "EventDelivery bulk insert failed: #{inspect(errors)}"
     end
+  end
+
+  # Emit `[:ash_integration, :delivery, :parked]` from the persisted rows (after the
+  # insert), not from the pure spec builder. A reprocess re-park re-emits from the
+  # Reprocessor.
+  defp emit_parked(specs, deliveries) do
+    specs
+    |> Enum.zip(deliveries)
+    |> Enum.each(fn {spec, delivery} ->
+      if delivery.state == :parked do
+        :telemetry.execute(
+          [:ash_integration, :delivery, :parked],
+          %{count: 1},
+          %{
+            event_id: delivery.event_id,
+            event_type: delivery.event_type,
+            event_key: delivery.event_key,
+            subscription_id: delivery.subscription_id,
+            connection_id: delivery.connection_id,
+            reason: delivery.last_error,
+            failure_kind: Map.get(spec, :failure_kind)
+          }
+        )
+      end
+    end)
   end
 
   defp coalesce_pending!(specs, deliveries) do

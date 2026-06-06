@@ -596,6 +596,10 @@ When a target fails persistently it is **auto-suspended** (not deactivated). Tra
 
 See the [Delivery Pipeline guide](guides/delivery-pipeline.md) for the full model, including the event key snapshot invariant and head-of-line blocking tradeoffs.
 
+## Observability
+
+The pipeline emits `:telemetry` for every state change relevant to a feed's health, so it can be monitored without polling Postgres. `AshIntegration.Telemetry.events/0` returns every event for a one-call `:telemetry.attach_many/4`. See the [Observability guide](guides/observability.md) for the full event reference.
+
 ## License
 
 MIT
