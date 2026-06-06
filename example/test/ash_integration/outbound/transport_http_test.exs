@@ -58,7 +58,7 @@ defmodule Example.Outbound.TransportHttpTest do
     sub =
       create_subscription!(dest, route_config: %{type: :http, path: "/widgets", method: :patch})
 
-    event = create_event!(sub, data: %{"a" => 1})
+    create_event!(sub, data: %{"a" => 1})
 
     drain_delivery!()
 
@@ -73,7 +73,7 @@ defmodule Example.Outbound.TransportHttpTest do
   } do
     stub_webhook_capture(self())
 
-    event = create_event!(create_subscription!(dest), data: %{"a" => 1})
+    create_event!(create_subscription!(dest), data: %{"a" => 1})
 
     drain_delivery!()
 
@@ -90,7 +90,7 @@ defmodule Example.Outbound.TransportHttpTest do
         headers: %{"x-custom" => "keep-me", "X-Event-Type" => "spoofed"}
       )
 
-    event = create_event!(create_subscription!(dest), data: %{"a" => 1})
+    create_event!(create_subscription!(dest), data: %{"a" => 1})
 
     drain_delivery!()
 
@@ -112,12 +112,11 @@ defmodule Example.Outbound.TransportHttpTest do
 
     s1 = create_subscription!(dest)
 
-    event =
-      create_event!(s1,
-        source_resource: "widget",
-        source_resource_id: "r1",
-        source_action: "update"
-      )
+    create_event!(s1,
+      source_resource: "widget",
+      source_resource_id: "r1",
+      source_action: "update"
+    )
 
     drain_delivery!()
 
@@ -134,7 +133,7 @@ defmodule Example.Outbound.TransportHttpTest do
 
     dest = create_connection!(create_user!(), signing_secret: "topsecret")
     s1 = create_subscription!(dest)
-    event = create_event!(s1, data: %{"hello" => "world"})
+    create_event!(s1, data: %{"hello" => "world"})
 
     drain_delivery!()
 
@@ -172,7 +171,7 @@ defmodule Example.Outbound.TransportHttpTest do
 
   test "no signature header when no signing secret is configured", %{connection: dest} do
     stub_webhook_capture(self())
-    event = create_event!(create_subscription!(dest), data: %{"a" => 1})
+    create_event!(create_subscription!(dest), data: %{"a" => 1})
 
     drain_delivery!()
 
@@ -187,7 +186,7 @@ defmodule Example.Outbound.TransportHttpTest do
     stub_webhook_failure(503)
 
     s1 = create_subscription!(dest)
-    event = create_event!(s1)
+    create_event!(s1)
 
     drain_delivery!()
 
@@ -199,7 +198,7 @@ defmodule Example.Outbound.TransportHttpTest do
     stub_webhook_failure(422)
 
     s1 = create_subscription!(dest)
-    event = create_event!(s1)
+    create_event!(s1)
 
     # A 4xx is recorded as a `:response` failure (subscription counter); the row
     # stays `:scheduled` with a backoff. Two-level suspension is what halts a
@@ -215,7 +214,7 @@ defmodule Example.Outbound.TransportHttpTest do
     end)
 
     s1 = create_subscription!(dest)
-    event = create_event!(s1)
+    create_event!(s1)
 
     drain_delivery!()
 
