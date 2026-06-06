@@ -39,7 +39,7 @@ route_config: %{type: :http, path: "/products", method: :put}
 
 So `product.created` can `POST /products` while `inventory.adjusted` does `PUT /inventory` — different paths and verbs, both over **one** connection (one set of credentials, one ordering domain). A consumer with a single ingest endpoint just leaves `route_config` unset (or `path` blank) on every subscription.
 
-> **`route_config` is the static default** for the route. For a **per-event** path or a fully different destination, the Lua transform can set `result.path` (joined onto `base_url`) or `result.url` (a full absolute override) — e.g. `result.path = "/products/" .. event.data.id`. See [Lua transform scripts](../README.md#lua-transform-scripts).
+> **`route_config` is the static default** for the route. For a **per-event** path or a fully different destination, the Lua transform can set `defaults.path` (joined onto `base_url`) or `defaults.url` (a full absolute override) — e.g. `function transform(event, defaults) defaults.path = "/products/" .. event.data.id return defaults end`. See [Lua transform scripts](../README.md#lua-transform-scripts).
 
 ## Authentication
 
@@ -80,13 +80,13 @@ All auth credentials are encrypted at rest via AshCloak.
 ## Wire Contract
 
 Each request leads with the event type. The body is the resolved
-`result.body` (`Content-Type: application/json` by default), and the event
+`defaults.body` (`Content-Type: application/json` by default), and the event
 metadata travels in `x-`-prefixed headers:
 
-> **Empty body.** An empty `result.body` — `nil`, or an empty Lua table (Lua
+> **Empty body.** An empty `defaults.body` — `nil`, or an empty Lua table (Lua
 > can't distinguish `{}` from `[]`) — is sent as **no body** (no `Content-Type`
 > on the wire). A consequence: you cannot emit a literal empty JSON object/array
-> (`{}`/`[]`) as the body; wrap it in a field (e.g. `result.body = { data = {} }`)
+> (`{}`/`[]`) as the body; wrap it in a field (e.g. `defaults.body = { data = {} }`)
 > if a consumer requires one.
 
 | Header | Value |
@@ -99,7 +99,7 @@ metadata travels in `x-`-prefixed headers:
 | `x-connection-id` | The connection's id |
 | `x-signature` | HMAC signature, if a signing secret is set (see below) |
 
-These wire headers pre-seed the transform's `result.headers`, so a subscription
+These wire headers pre-seed the transform's `defaults.headers`, so a subscription
 can override or remove any of them (including `x-event-id`). The connection's
 static headers are merged in at lowest priority, so they can never shadow or
 duplicate a wire header by default. `Authorization` is the exception — it's
@@ -161,14 +161,14 @@ un-suspends. See the [Delivery Pipeline guide](delivery-pipeline.md#suspension--
 ## SSRF egress control
 
 A connection's `base_url` is shape-checked (`https?://…`) but not range-checked,
-and a Lua transform can point `result.url` at an **arbitrary absolute URL**. Left
+and a Lua transform can point `defaults.url` at an **arbitrary absolute URL**. Left
 unguarded, an operator-authored transform could aim a delivery at a private,
 loopback, or link-local address — the cloud-metadata endpoint
 (`169.254.169.254`), `localhost`, or an in-cluster service — turning the delivery
 pipeline into an SSRF primitive.
 
 The egress guard resolves the host of the effective delivery URL (covering both
-the `base_url`-joined path **and** a transform-set `result.url`) and **blocks**
+the `base_url`-joined path **and** a transform-set `defaults.url`) and **blocks**
 it when any resolved address is private/loopback/link-local/metadata. It runs at
 dispatch (a blocked URL **parks** the delivery with a readable error, so no
 retries are wasted) and again at send time (a backstop against DNS rebinding).

@@ -369,7 +369,7 @@ contiguous); no sequence number.
 | `parked` | A build failure (`project`/transform raised or returned a bad shape): created with `delivery: nil` + `last_error`, never delivered, but an *older* parked head still blocks its lane. |
 | `scheduled` | A delivery job exists. **Only `scheduled` holds the one-in-flight slot** for its lane. |
 | `delivered` | Delivered to the target. |
-| `cancelled` | Superseded by coalescing, skipped by the transform (`result = nil`), or manually cancelled. Leaves the ordering lane; kept for audit, reaped by cleanup. |
+| `cancelled` | Superseded by coalescing, skipped by the transform (returns `nil`), or manually cancelled. Leaves the ordering lane; kept for audit, reaped by cleanup. |
 
 `reprocess` and `park` are **actions**: reprocess re-runs `project` → transform
 from the **immutable `Event`** (never re-loading source) and, on success, returns
@@ -451,7 +451,7 @@ The wire **leads with the event type**; provenance (`source_resource` /
 `Envelope.wire_pairs/1` emits a **deliberately minimal** default set — only the
 three fields every consumer needs: `event-id` (dedup), `event-type` (the
 routing/contract discriminator), `event-version` (which schema to parse). They
-pre-seed the transform's `result.headers`, so a transform may add, override, or
+pre-seed the transform's `defaults.headers`, so a transform may add, override, or
 remove any of them. The **signature** is the one header never snapshotted — it is
 injected live at delivery (below), not by `wire_pairs/1`.
 
@@ -475,11 +475,14 @@ add them in Lua only if a specific consumer needs them:
 Bare names on Kafka, `x-` prefix on HTTP, identical suffixes. The **body** is the
 per-subscription transform output.
 
-**Transform-shaped output + live signing.** The Lua transform reads a read-only
-`event` table and mutates a **pre-seeded, transport-shaped `result`** descriptor
+**Transform-shaped output + live signing.** The Lua transform exposes a
+`transform(event, defaults)` function: it reads the read-only `event` table and
+returns the **pre-seeded, transport-shaped `defaults`** descriptor
 (HTTP: `method`/`path`/`url`/`headers`/`body`; Kafka: `topic`/`key`/`headers`/
-`value`/`timestamp`). A no-op script ships the route defaults; `result = nil` skips
-(→ `cancelled`). The resolved descriptor (body as a term, headers, routing) is
+`value`/`timestamp`), having mutated it as needed. The no-op transform just
+returns `defaults` — `function transform(event, defaults) return defaults end`,
+or a nil/blank `transform_source` — and ships the route defaults; returning `nil`
+skips (→ `cancelled`). The resolved descriptor (body as a term, headers, routing) is
 snapshotted on the `EventDelivery` and replayed on every retry. Two secret-derived
 headers are **never** snapshotted and are injected **live at delivery**: auth
 (resolved from the encrypted connection) and the **signature** (recomputed per
@@ -494,7 +497,7 @@ can reach the wire — each of these **parks** the delivery with a readable erro
 rather than crashing a lane:
 
 - **SSRF egress** — the resolved HTTP URL (both the `base_url`-joined path and a
-  transform-set `result.url`) is host-resolved and rejected when any address is
+  transform-set `defaults.url`) is host-resolved and rejected when any address is
   private/loopback/link-local/metadata. On by default; opt out per-deployment or
   allowlist specific hosts (`config :ash_integration, egress: …`). Re-checked live
   at send time against DNS rebinding.
