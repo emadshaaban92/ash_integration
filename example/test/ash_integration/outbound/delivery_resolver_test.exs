@@ -225,6 +225,31 @@ defmodule Example.Outbound.DeliveryResolverTest do
       assert {:ok, d} = resolve(dest, sub, %{})
       assert d["url"] == "https://1.1.1.1/hook"
     end
+
+    test "an UNRESOLVABLE base_url does NOT park — it stays deliverable (transport, not build)",
+         %{owner: owner} do
+      # NXDOMAIN endpoint = a connectivity condition, not an authoring bug: the
+      # resolver returns a deliverable descriptor so it fails as :transport at send.
+      # `.invalid` is reserved (RFC 6761) and never resolves.
+      dest = http_connection!(owner, base_url: "https://wms.digitalhub.example.invalid/hook")
+      sub = subscription!(dest, "widget.updated", "-- noop")
+
+      assert {:ok, d} = resolve(dest, sub, %{})
+      assert d["url"] == "https://wms.digitalhub.example.invalid/hook"
+    end
+
+    test "a transform-set URL at an UNRESOLVABLE host still PARKS (authoring bug, not the endpoint)",
+         %{owner: owner} do
+      # A bad `result.url` is an authoring bug to fix + reprocess, never a
+      # connection-health signal — only an unresolvable base_url is a transport case.
+      dest = http_connection!(owner, base_url: "https://1.1.1.1/hook")
+
+      sub =
+        subscription!(dest, "widget.updated", ~s|result.url = "https://typo.example.invalid/in"|)
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "egress blocked"
+    end
   end
 
   describe "Kafka" do
