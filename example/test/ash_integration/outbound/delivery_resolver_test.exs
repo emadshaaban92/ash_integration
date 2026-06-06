@@ -42,9 +42,12 @@ defmodule Example.Outbound.DeliveryResolverTest do
       dest = http_connection!(owner)
 
       script = """
-      result.headers["x-event-id"] = nil
-      result.headers["x-custom"] = "added"
-      result.headers["x-event-type"] = "overridden"
+      function transform(event, defaults)
+        defaults.headers["x-event-id"] = nil
+        defaults.headers["x-custom"] = "added"
+        defaults.headers["x-event-type"] = "overridden"
+        return defaults
+      end
       """
 
       sub = subscription!(dest, "widget.updated", script)
@@ -64,7 +67,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
         subscription!(
           dest,
           "widget.updated",
-          ~s|result.path = "/widgets/42"; result.method = "put"|
+          ~s|function transform(event, defaults) defaults.path = "/widgets/42"; defaults.method = "put" return defaults end|
         )
 
       {:ok, d} = resolve(dest, sub, %{})
@@ -75,7 +78,13 @@ defmodule Example.Outbound.DeliveryResolverTest do
 
     test "result.url is an absolute override that bypasses base_url + path", %{owner: owner} do
       dest = http_connection!(owner)
-      sub = subscription!(dest, "widget.updated", ~s|result.url = "https://elsewhere.test/in"|)
+
+      sub =
+        subscription!(
+          dest,
+          "widget.updated",
+          ~s|function transform(event, defaults) defaults.url = "https://elsewhere.test/in" return defaults end|
+        )
 
       {:ok, d} = resolve(dest, sub, %{})
 
@@ -85,7 +94,13 @@ defmodule Example.Outbound.DeliveryResolverTest do
     test "the signature is NOT in the descriptor (it is a live carve-out, added at delivery)",
          %{owner: owner} do
       dest = http_connection!(owner, signing_secret: "topsecret")
-      sub = subscription!(dest, "widget.updated", ~s|result.body = { a = 1 }|)
+
+      sub =
+        subscription!(
+          dest,
+          "widget.updated",
+          ~s|function transform(event, defaults) defaults.body = { a = 1 } return defaults end|
+        )
 
       {:ok, d} = resolve(dest, sub, %{})
 
@@ -108,7 +123,13 @@ defmodule Example.Outbound.DeliveryResolverTest do
 
     test "an invalid HTTP method is a transform error (the event parks)", %{owner: owner} do
       dest = http_connection!(owner)
-      sub = subscription!(dest, "widget.updated", ~s|result.method = "TRACE"|)
+
+      sub =
+        subscription!(
+          dest,
+          "widget.updated",
+          ~s|function transform(event, defaults) defaults.method = "TRACE" return defaults end|
+        )
 
       assert {:error, message} = resolve(dest, sub, %{})
       assert message =~ "invalid HTTP method"
@@ -116,15 +137,27 @@ defmodule Example.Outbound.DeliveryResolverTest do
 
     test "a non-string header value is a transform error (the event parks)", %{owner: owner} do
       dest = http_connection!(owner)
-      sub = subscription!(dest, "widget.updated", ~s|result.headers["x-bad"] = { nested = 1 }|)
+
+      sub =
+        subscription!(
+          dest,
+          "widget.updated",
+          ~s|function transform(event, defaults) defaults.headers["x-bad"] = { nested = 1 } return defaults end|
+        )
 
       assert {:error, message} = resolve(dest, sub, %{})
-      assert message =~ "result.headers"
+      assert message =~ "the transform's headers"
     end
 
     test "result = nil skips", %{owner: owner} do
       dest = http_connection!(owner)
-      sub = subscription!(dest, "widget.updated", "result = nil")
+
+      sub =
+        subscription!(
+          dest,
+          "widget.updated",
+          "function transform(event, defaults) return nil end"
+        )
 
       assert :skip = resolve(dest, sub, %{})
     end
@@ -169,7 +202,11 @@ defmodule Example.Outbound.DeliveryResolverTest do
       dest = http_connection!(owner)
 
       sub =
-        subscription!(dest, "widget.updated", ~s|result.headers["x-evil"] = "a\\r\\nInjected: 1"|)
+        subscription!(
+          dest,
+          "widget.updated",
+          ~s|function transform(event, defaults) defaults.headers["x-evil"] = "a\\r\\nInjected: 1" return defaults end|
+        )
 
       assert {:error, message} = resolve(dest, sub, %{})
       assert message =~ "control character"
@@ -177,7 +214,13 @@ defmodule Example.Outbound.DeliveryResolverTest do
 
     test "a control char in a transform-set header NAME parks the delivery", %{owner: owner} do
       dest = http_connection!(owner)
-      sub = subscription!(dest, "widget.updated", ~s|result.headers["x-bad\\nname"] = "1"|)
+
+      sub =
+        subscription!(
+          dest,
+          "widget.updated",
+          ~s|function transform(event, defaults) defaults.headers["x-bad\\nname"] = "1" return defaults end|
+        )
 
       assert {:error, message} = resolve(dest, sub, %{})
       assert message =~ "control character"
@@ -203,7 +246,11 @@ defmodule Example.Outbound.DeliveryResolverTest do
       dest = http_connection!(owner)
 
       sub =
-        subscription!(dest, "widget.updated", ~s|result.url = "http://169.254.169.254/latest"|)
+        subscription!(
+          dest,
+          "widget.updated",
+          ~s|function transform(event, defaults) defaults.url = "http://169.254.169.254/latest" return defaults end|
+        )
 
       assert {:error, message} = resolve(dest, sub, %{})
       assert message =~ "egress blocked"
@@ -245,7 +292,11 @@ defmodule Example.Outbound.DeliveryResolverTest do
       dest = http_connection!(owner, base_url: "https://1.1.1.1/hook")
 
       sub =
-        subscription!(dest, "widget.updated", ~s|result.url = "https://typo.example.invalid/in"|)
+        subscription!(
+          dest,
+          "widget.updated",
+          ~s|function transform(event, defaults) defaults.url = "https://typo.example.invalid/in" return defaults end|
+        )
 
       assert {:error, message} = resolve(dest, sub, %{})
       assert message =~ "egress blocked"
@@ -274,9 +325,12 @@ defmodule Example.Outbound.DeliveryResolverTest do
       dest = kafka_connection!(owner)
 
       script = """
-      result.topic = "custom-topic"
-      result.key = "custom-key"
-      result.timestamp = 1700000000000
+      function transform(event, defaults)
+        defaults.topic = "custom-topic"
+        defaults.key = "custom-key"
+        defaults.timestamp = 1700000000000
+        return defaults
+      end
       """
 
       sub = subscription!(dest, "stock.changed", script)
@@ -289,7 +343,14 @@ defmodule Example.Outbound.DeliveryResolverTest do
 
     test "a nil timestamp falls back to created_at, not now", %{owner: owner} do
       dest = kafka_connection!(owner)
-      sub = subscription!(dest, "stock.changed", "result.timestamp = nil")
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          "function transform(event, defaults) defaults.timestamp = nil return defaults end"
+        )
+
       created_at = ~U[2024-01-15 10:30:00.000000Z]
 
       {:ok, d} = resolve(dest, sub, %{}, created_at: created_at)
@@ -342,7 +403,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
     end
 
     test "accepts a well-formed script", %{owner: owner} do
-      changeset = create_changeset(owner, "result = event")
+      changeset = create_changeset(owner, "function transform(event, defaults) return event end")
       assert :ok = TransformSource.validate(changeset, [], %{})
     end
 
@@ -362,7 +423,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
                    connection_id: dest.id,
                    event_type: "widget.updated",
                    version: 1,
-                   transform_source: "result = {"
+                   transform_source: "function transform(e, d) return {"
                  },
                  authorize?: false
                )
@@ -399,7 +460,11 @@ defmodule Example.Outbound.DeliveryResolverTest do
       dest = http_connection!(owner)
 
       assert {:ok, _sub} =
-               create_subscription(dest, "widget.updated", "result.headers['x-ok'] = 'yes'")
+               create_subscription(
+                 dest,
+                 "widget.updated",
+                 "function transform(event, defaults) defaults.headers['x-ok'] = 'yes' return defaults end"
+               )
     end
 
     test "the smoke gate no-ops when there is no example/1 to run against" do

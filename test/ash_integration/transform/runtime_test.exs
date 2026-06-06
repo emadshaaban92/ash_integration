@@ -39,32 +39,36 @@ defmodule AshIntegration.Transform.RuntimeTest do
   describe "execute/4 dispatch" do
     test "runs a transform on the named runtime with its default limits" do
       script = ~S"""
-      result = {name = event.name, doubled = event.count * 2}
+      function transform(event, defaults)
+        return {name = event.name, doubled = event.count * 2}
+      end
       """
 
       assert {:ok, %{"name" => "test", "doubled" => 10}} =
                Runtime.execute(:lua, script, %{"name" => "test", "count" => 5}, nil)
     end
 
-    test "pre-seeded defaults are passed through as the starting `result`" do
+    test "pre-seeded defaults pass through when the source exposes no transform" do
       # No-op script: the pre-seeded defaults survive untouched.
       assert {:ok, %{"method" => "post", "path" => "/hook"}} =
                Runtime.execute(:lua, "", %{}, %{"method" => "post", "path" => "/hook"})
     end
 
-    test "a script that never sets result skips" do
+    test "a source with no transform (and no defaults) skips" do
       assert {:ok, :skip} = Runtime.execute(:lua, "local x = 1", %{}, nil)
     end
 
     test "errors surface as {:error, message}" do
-      assert {:error, message} = Runtime.execute(:lua, "result = {", %{}, nil)
+      assert {:error, message} =
+               Runtime.execute(:lua, "function transform(e, d) return {", %{}, nil)
+
       assert is_binary(message)
     end
   end
 
   describe "validate/2" do
     test "accepts a well-formed script" do
-      assert :ok = Runtime.validate(:lua, "result = {ok = true}")
+      assert :ok = Runtime.validate(:lua, "function transform(e, d) return {ok = true} end")
     end
 
     test "rejects a script that does not parse (syntax error caught at save)" do

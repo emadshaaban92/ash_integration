@@ -3,14 +3,19 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime do
   The runtime-neutral seam between the resolver and a concrete transform
   engine.
 
-  A transform is, conceptually, a pure function
+  A transform is a **function the author's source exposes**, not an imperative
+  chunk that mutates a magic global:
 
-      transform(event, defaults) -> result | :skip
+      transform(event, defaults) -> result | nil
 
   where `event` is the immutable event envelope and `defaults` is the
   transport-shaped delivery descriptor the resolver pre-seeds. The function
-  returns the (possibly modified) descriptor to deliver, or `:skip` to drop
-  the event.
+  returns the (possibly modified) descriptor to deliver, or `nil`/`:skip` to drop
+  the event. A source that exposes no `transform` is a no-op (the pre-seeded
+  `defaults` pass through). Defining the contract as *call a function and use its
+  return* — rather than *run a script that mutates a global* — is what keeps it
+  suitable for functional runtimes and maps 1:1 onto a WASM guest's exported
+  `transform`.
 
   Today the only implementation is `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua`.
   This behaviour exists so that adding a second language — a `.wasm` guest, a

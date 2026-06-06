@@ -68,7 +68,11 @@ defmodule Example.Outbound.TransformPreviewTest do
 
   test "a transform that skips reports :skipped with no output", %{owner: owner, connection: dest} do
     create_widget!(owner)
-    sub = create_subscription!(dest, transform_source: "result = nil")
+
+    sub =
+      create_subscription!(dest,
+        transform_source: "function transform(event, defaults) return nil end"
+      )
 
     assert {:ok, result} = Transform.Preview.run(sub.id, owner)
     assert result.outcome == :skipped

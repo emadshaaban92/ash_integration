@@ -4,21 +4,38 @@ defmodule AshIntegration.LuaSandboxTest do
   alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua
 
   describe "execute/2" do
-    test "returns transformed result when script sets result" do
+    test "returns the value the exposed transform returns" do
       script = ~S"""
-      result = {name = event.name, doubled = event.count * 2}
+      function transform(event, defaults)
+        return {name = event.name, doubled = event.count * 2}
+      end
       """
 
       event_data = %{"name" => "test", "count" => 5}
       assert {:ok, %{"name" => "test", "doubled" => 10}} = Lua.execute(script, event_data)
     end
 
-    test "returns :skip when script does not set result" do
+    test "returns :skip when the source exposes no transform (and no defaults)" do
       script = ~S"""
       local x = 1 + 1
       """
 
       assert {:ok, :skip} = Lua.execute(script, %{})
+    end
+
+    test "returns :skip when transform returns nil" do
+      script = ~S"""
+      function transform(event, defaults)
+        return nil
+      end
+      """
+
+      assert {:ok, :skip} = Lua.execute(script, %{})
+    end
+
+    test "passes the defaults through unchanged when no transform is defined" do
+      assert {:ok, %{"method" => "post"}} =
+               Lua.execute("-- no-op", %{}, defaults: %{"method" => "post"})
     end
 
     test "rejects scripts exceeding maximum size" do
@@ -29,14 +46,16 @@ defmodule AshIntegration.LuaSandboxTest do
     end
 
     test "returns error for Lua syntax errors" do
-      script = "result = {"
+      script = "function transform(event, defaults) return {"
       assert {:error, message} = Lua.execute(script, %{})
       assert is_binary(message)
     end
 
     test "returns error for Lua runtime errors" do
       script = ~S"""
-      error("something went wrong")
+      function transform(event, defaults)
+        error("something went wrong")
+      end
       """
 
       assert {:error, message} = Lua.execute(script, %{})
@@ -45,13 +64,22 @@ defmodule AshIntegration.LuaSandboxTest do
 
     @tag timeout: 10_000
     test "returns error when a script runs away (reduction budget or wall-clock)" do
-      script = "while true do end"
+      script = ~S"""
+      function transform(event, defaults)
+        while true do end
+      end
+      """
+
       assert {:error, message} = Lua.execute(script, %{})
       assert message =~ "reduction" or message =~ "timed out"
     end
 
     test "event data round-trips through Lua" do
-      script = "result = event"
+      script = ~S"""
+      function transform(event, defaults)
+        return event
+      end
+      """
 
       event_data = %{"id" => "abc", "nested" => %{"key" => "value"}}
       assert {:ok, result} = Lua.execute(script, event_data)
@@ -60,7 +88,11 @@ defmodule AshIntegration.LuaSandboxTest do
     end
 
     test "stringifies atom keys in event data" do
-      script = "result = {got_name = event.name}"
+      script = ~S"""
+      function transform(event, defaults)
+        return {got_name = event.name}
+      end
+      """
 
       event_data = %{name: "test", details: %{status: "active"}}
       assert {:ok, %{"got_name" => "test"}} = Lua.execute(script, event_data)
@@ -68,7 +100,9 @@ defmodule AshIntegration.LuaSandboxTest do
 
     test "Lua tables with string keys decode as maps" do
       script = ~S"""
-      result = {foo = "bar", baz = "qux"}
+      function transform(event, defaults)
+        return {foo = "bar", baz = "qux"}
+      end
       """
 
       assert {:ok, %{"foo" => "bar", "baz" => "qux"}} = Lua.execute(script, %{})
@@ -76,7 +110,9 @@ defmodule AshIntegration.LuaSandboxTest do
 
     test "Lua sequential tables decode as ordered lists" do
       script = ~S"""
-      result = {"a", "b", "c"}
+      function transform(event, defaults)
+        return {"a", "b", "c"}
+      end
       """
 
       assert {:ok, ["a", "b", "c"]} = Lua.execute(script, %{})
@@ -84,10 +120,12 @@ defmodule AshIntegration.LuaSandboxTest do
 
     test "Lua arrays of objects decode as a list of maps" do
       script = ~S"""
-      result = {
-        {id = 1, name = "a"},
-        {id = 2, name = "b"}
-      }
+      function transform(event, defaults)
+        return {
+          {id = 1, name = "a"},
+          {id = 2, name = "b"}
+        }
+      end
       """
 
       assert {:ok, [%{"id" => 1, "name" => "a"}, %{"id" => 2, "name" => "b"}]} =
@@ -96,10 +134,13 @@ defmodule AshIntegration.LuaSandboxTest do
 
     test "sequence order is preserved regardless of insertion order" do
       script = ~S"""
-      result = {}
-      result[3] = "third"
-      result[1] = "first"
-      result[2] = "second"
+      function transform(event, defaults)
+        local r = {}
+        r[3] = "third"
+        r[1] = "first"
+        r[2] = "second"
+        return r
+      end
       """
 
       assert {:ok, ["first", "second", "third"]} = Lua.execute(script, %{})
@@ -107,7 +148,9 @@ defmodule AshIntegration.LuaSandboxTest do
 
     test "empty Lua table decodes as empty list" do
       script = ~S"""
-      result = {}
+      function transform(event, defaults)
+        return {}
+      end
       """
 
       assert {:ok, []} = Lua.execute(script, %{})
@@ -115,10 +158,12 @@ defmodule AshIntegration.LuaSandboxTest do
 
     test "nested tables decode correctly" do
       script = ~S"""
-      result = {
-        items = {"x", "y"},
-        meta = {count = 2}
-      }
+      function transform(event, defaults)
+        return {
+          items = {"x", "y"},
+          meta = {count = 2}
+        }
+      end
       """
 
       assert {:ok, result} = Lua.execute(script, %{})
@@ -128,12 +173,14 @@ defmodule AshIntegration.LuaSandboxTest do
 
     test "objects nested inside sequences decode recursively" do
       script = ~S"""
-      result = {
-        rows = {
-          {sku = "A", qty = 1},
-          {sku = "B", qty = 2}
+      function transform(event, defaults)
+        return {
+          rows = {
+            {sku = "A", qty = 1},
+            {sku = "B", qty = 2}
+          }
         }
-      }
+      end
       """
 
       assert {:ok, result} = Lua.execute(script, %{})
@@ -145,7 +192,12 @@ defmodule AshIntegration.LuaSandboxTest do
     end
 
     test "sandboxed functions raise runtime errors" do
-      script = "os.exit(1)"
+      script = ~S"""
+      function transform(event, defaults)
+        os.exit(1)
+      end
+      """
+
       assert {:error, _message} = Lua.execute(script, %{})
     end
   end

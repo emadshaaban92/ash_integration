@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** The transform is now a **function the source exposes**, not an
+  imperative chunk that mutates a global `result`:
+
+      function transform(event, defaults)
+        defaults.headers["x-thing"] = event.id
+        return defaults              -- return nil to skip
+      end
+
+  The runtime calls `transform(event, defaults)` and uses its **return value**.
+  This replaces the old "mutate the pre-seeded `result` global" contract — it
+  makes `event`/`defaults` explicit parameters, drops the magic global, and maps
+  directly onto a WASM guest's exported `transform`, so the runtime seam finally
+  fits functional languages, not just Lua's imperative idiom. A source exposing
+  no `transform` is a no-op (the pre-seeded `defaults` pass through); returning
+  `nil` skips. **Every existing transform must be rewritten** from
+  `result.x = …` / `result = nil` to a `transform/2` function that returns the
+  descriptor (or `nil`).
 - **BREAKING:** Renamed the subscription's `transform_script` attribute to
   `transform_source`. The stored transform is runtime-neutral — Lua source today,
   a WASM guest's module tomorrow — so "script" no longer fits; the name also

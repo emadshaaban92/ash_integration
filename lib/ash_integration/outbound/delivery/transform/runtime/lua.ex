@@ -47,11 +47,43 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
           max_heap_words: 50_000_000
         ]
 
-  Scripts receive event data as a global `event` table and produce output by
-  mutating a global `result` variable. The caller may **pre-seed** `result` (the
-  `defaults` argument) with the transport-shaped delivery defaults, so a no-op
-  script sends those defaults and the script only has to express overrides. If the
-  script sets `result` to nil, the event is skipped.
+  The transform is a **function the script exposes**, not a top-level
+  imperative chunk:
+
+      function transform(event, defaults)
+        defaults.headers["x-thing"] = event.id
+        return defaults            -- return nil to skip the event
+      end
+
+  The runtime calls `transform(event, defaults)` and uses its **return value**:
+
+  - `event` is the event envelope (a table).
+  - `defaults` is the transport-shaped delivery descriptor the caller pre-seeds
+    (method/headers/body for HTTP, …); the function may mutate it in place and
+    return it, or build and return a fresh table.
+  - returning `nil` skips the event.
+
+  A script that defines no `transform` function (including a blank/comment-only
+  one) is a **no-op** — the pre-seeded `defaults` are returned unchanged — so the
+  common "send the resolved defaults" case needs no function at all. Defining a
+  function and **returning** the descriptor is what keeps the contract suitable
+  for any runtime, functional ones included (it maps directly onto a WASM guest's
+  exported `transform`), rather than baking in Lua's mutate-a-global idiom.
+  """
+
+  # Bridge global the wrapper assigns the transform's return value to, then we
+  # read back. Underscored to stay out of the author's way.
+  @result_global :__transform_result
+
+  # Appended to the author's source: call the exposed `transform` if present,
+  # else pass the pre-seeded defaults through unchanged (the no-op case).
+  @invoke """
+
+  if type(transform) == "function" then
+    #{@result_global} = transform(event, defaults)
+  else
+    #{@result_global} = defaults
+  end
   """
 
   @behaviour AshIntegration.Outbound.Delivery.Transform.Runtime
@@ -60,12 +92,13 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   @doc """
   Convenience entry point: run `script` against `event_data` using the
-  config-driven default limits. `opts` may carry `:result` to pre-seed the
-  `result` global. Prefer `AshIntegration.Outbound.Delivery.Transform.Runtime` for
-  dispatch; this arity keeps the direct, limit-free call ergonomic.
+  config-driven default limits. `opts` may carry `:defaults` — the pre-seeded
+  descriptor passed to `transform/2`. Prefer
+  `AshIntegration.Outbound.Delivery.Transform.Runtime` for dispatch; this arity
+  keeps the direct, limit-free call ergonomic.
   """
   def execute(script, event_data, opts \\ []) when is_list(opts) do
-    execute(script, event_data, Keyword.get(opts, :result), default_limits())
+    execute(script, event_data, Keyword.get(opts, :defaults), default_limits())
   end
 
   @impl true
@@ -136,7 +169,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     lua =
       Lua.new()
       |> set_global(:event, event)
-      |> set_preseed(defaults)
+      |> maybe_set_global(:defaults, defaults)
 
     flags = %{
       max_reductions: limits.max_steps,
@@ -146,7 +179,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       ]
     }
 
-    case :luerl_sandbox.run(script, flags, lua.state) do
+    # The author's source defines `transform`; @invoke calls it (or passes the
+    # defaults through, for a no-op script) and stashes the RETURN value in the
+    # bridge global we read back. Both run under the one bounded sandbox call.
+    case :luerl_sandbox.run(script <> @invoke, flags, lua.state) do
       {:ok, _results, state} ->
         read_result(state)
 
@@ -176,8 +212,9 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       {:error, Exception.message(e)}
   end
 
+  # The transform's return value (`nil` → skip the event).
   defp read_result(state) do
-    case Lua.get!(%Lua{state: state}, [:result]) do
+    case Lua.get!(%Lua{state: state}, [@result_global]) do
       nil -> {:ok, :skip}
       result -> {:ok, decode_result(result)}
     end
@@ -188,8 +225,8 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     Lua.set!(lua, [key], encoded)
   end
 
-  defp set_preseed(lua, nil), do: lua
-  defp set_preseed(lua, preseed), do: set_global(lua, :result, preseed)
+  defp maybe_set_global(lua, _key, nil), do: lua
+  defp maybe_set_global(lua, key, data), do: set_global(lua, key, data)
 
   defp stringify_keys(map) when is_map(map) do
     Map.new(map, fn

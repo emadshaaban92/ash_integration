@@ -299,24 +299,32 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
           <.input
             field={f[:transform_source]}
             type="textarea"
-            label="Transform Script (optional)"
-            placeholder={"-- Leave blank to send the defaults, or mutate `result`, e.g.:\nresult.body = { id = event.data.id }\nresult.headers[\"x-tenant\"] = event.data.tenant"}
+            label="Transform (optional)"
+            placeholder={"-- Leave blank to send the defaults, or expose a transform:\nfunction transform(event, defaults)\n  defaults.body = { id = event.data.id }\n  defaults.headers[\"x-tenant\"] = event.data.tenant\n  return defaults\nend"}
             phx-debounce="500"
-            rows="6"
+            rows="8"
           />
           <ul class="text-xs text-base-content/60 mt-1 list-disc list-inside space-y-0.5">
-            <li>Write a <strong>Lua</strong> script to customize delivery (optional).</li>
-            <li>The incoming event is available as <code class="text-xs">event</code> (a table).</li>
             <li>
-              <code class="text-xs">result</code>
-              is pre-seeded with the defaults this route would send
-              (<code class="text-xs">body</code>, <code class="text-xs">headers</code>, and routing).
-              <strong>Mutate it</strong>
-              to override — e.g. set <code class="text-xs">result.body</code>,
-              or <code class="text-xs">result.headers["x-event-id"] = nil</code>
-              to drop a header. A no-op script sends the defaults.
+              Expose a <strong>Lua</strong>
+              function <code class="text-xs">transform(event, defaults)</code>
+              to customize delivery (optional).
             </li>
-            <li>Set <code class="text-xs">result = nil</code> to skip the event.</li>
+            <li>
+              <code class="text-xs">event</code>
+              is the incoming event (a table); <code class="text-xs">defaults</code>
+              is the descriptor this route would send
+              (<code class="text-xs">body</code>, <code class="text-xs">headers</code>, routing).
+            </li>
+            <li>
+              <strong>Return</strong>
+              the descriptor to deliver — mutate and return <code class="text-xs">defaults</code>, or build a fresh table. Exposing
+              no <code class="text-xs">transform</code>
+              sends the defaults unchanged.
+            </li>
+            <li>
+              Return <code class="text-xs">nil</code> to skip the event.
+            </li>
           </ul>
 
           <div
