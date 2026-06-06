@@ -47,7 +47,12 @@ defmodule Example.Outbound.ReprocessorTest do
     # The transform echoes the whole envelope into the body, so the resolved body
     # IS the Lua input. It must be identical on dispatch and reprocess, and must
     # not carry provenance (`source`) — that stays internal.
-    _sub = create_subscription!(dest, "widget.updated", "result.body = event")
+    _sub =
+      create_subscription!(
+        dest,
+        "widget.updated",
+        "function transform(event, defaults) defaults.body = event return defaults end"
+      )
 
     create_widget!(%{name: "w", stock: 1})
     drain_dispatch!()
@@ -71,7 +76,11 @@ defmodule Example.Outbound.ReprocessorTest do
     refute Map.has_key?(original["headers"], "x-extra")
 
     # Editing the transform does NOT touch the already-dispatched event...
-    fix_transform!(sub, ~s|result.headers["x-extra"] = "yes"|)
+    fix_transform!(
+      sub,
+      ~s|function transform(event, defaults) defaults.headers["x-extra"] = "yes" return defaults end|
+    )
+
     assert single_event().delivery == original
 
     # ...reprocess re-runs the transform and re-snapshots the descriptor.
@@ -84,7 +93,7 @@ defmodule Example.Outbound.ReprocessorTest do
     create_widget!(%{name: "w", stock: 1})
     drain_dispatch!()
 
-    fix_transform!(sub, "result = nil")
+    fix_transform!(sub, "function transform(event, defaults) return nil end")
 
     assert {:ok, :cancelled} = Reprocessor.reprocess_event(single_event())
     assert single_event().state == :cancelled

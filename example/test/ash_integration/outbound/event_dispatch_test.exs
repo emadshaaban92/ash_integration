@@ -143,7 +143,8 @@ defmodule Example.Outbound.EventDispatchTest do
 
     s_ssrf =
       create_subscription!(public, "widget.updated",
-        transform_source: ~s|result.url = "http://169.254.169.254/latest"|
+        transform_source:
+          ~s|function transform(event, defaults) defaults.url = "http://169.254.169.254/latest" return defaults end|
       )
 
     create_widget!(%{name: "w", stock: 1})
@@ -211,7 +212,10 @@ defmodule Example.Outbound.EventDispatchTest do
   test "a transform that skips creates a cancelled event for audit",
        %{connection: dest} do
     # `result = nil` → the transform skips the event.
-    s1 = create_subscription!(dest, "widget.updated", transform_source: "result = nil")
+    s1 =
+      create_subscription!(dest, "widget.updated",
+        transform_source: "function transform(event, defaults) return nil end"
+      )
 
     create_widget!(%{name: "w", stock: 1})
     drain_dispatch!()
@@ -273,7 +277,8 @@ defmodule Example.Outbound.EventDispatchTest do
     # `echoed_id` can equal the row id is if the id Lua saw == the id written.
     s1 =
       create_subscription!(dest, "widget.updated",
-        transform_source: "result.body = { echoed_id = event.id }"
+        transform_source:
+          "function transform(event, defaults) defaults.body = { echoed_id = event.id } return defaults end"
       )
 
     create_widget!(%{name: "w", stock: 1})

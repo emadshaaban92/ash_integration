@@ -3,18 +3,19 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   Resolves the **transport-shaped delivery descriptor** at dispatch/reprocess
   time.
 
-  The transform mutates a global `result` table that is PRE-SEEDED (from the
-  connection + subscription route + event) with the full delivery shape for the
-  transport:
+  The transform is a function the author exposes — `transform(event, defaults)` —
+  whose `defaults` argument is PRE-SEEDED (from the connection + subscription
+  route + event) with the full delivery shape for the transport:
 
-      HTTP  → result = %{ method, path, url, headers, body }
-      Kafka → result = %{ topic, key, headers, value, timestamp }
+      HTTP  → defaults = %{ method, path, url, headers, body }
+      Kafka → defaults = %{ topic, key, headers, value, timestamp }
 
-  A no-op transform sends the pre-seeded defaults; the script only expresses
-  overrides. `result = nil` skips the event.
+  The function returns the descriptor to deliver (a no-op exposing no `transform`
+  sends the pre-seeded defaults; the function only expresses overrides). Returning
+  `nil` skips the event.
 
-  This module pre-seeds `result`, runs the Lua transform, then — unless the
-  transform skipped — normalizes/validates the output and returns the wire
+  This module pre-seeds `defaults`, runs the transform, then — unless it
+  skipped — normalizes/validates the returned descriptor and returns the wire
   payload to SNAPSHOT on the event (`event.delivery`). `body`/`value` are stored
   as the decoded TERM (not pre-serialized bytes); delivery encodes them once and
   signs over those exact bytes. Delivery replays the snapshot for the static wire
@@ -29,7 +30,7 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     * **`Authorization`/auth** — the decrypted credential, injected live from the
       encrypted connection (never persisted, never exposed to the sandbox).
 
-  `result.headers` is pre-seeded with the wire-metadata headers, `content-type`,
+  `defaults.headers` is pre-seeded with the wire-metadata headers, `content-type`,
   and the connection's static headers — ALL overridable and removable.
 
   Returns `{:ok, descriptor}`, `:skip`, or `{:error, message}` (the transform
@@ -60,7 +61,7 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     case Transform.Runtime.execute(runtime, script, envelope, preseed) do
       {:ok, :skip} -> :skip
       {:ok, result} when is_map(result) -> finalize(transport, config, result, created_at)
-      {:ok, _scalar} -> {:error, "transform must set `result` to a table"}
+      {:ok, _scalar} -> {:error, "transform must return a table or nil"}
       {:error, message} -> {:error, message}
     end
   end
@@ -92,7 +93,7 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     case Transform.Runtime.execute(runtime, script, envelope, preseed) do
       {:ok, :skip} -> :ok
       {:ok, result} when is_map(result) -> :ok
-      {:ok, _scalar} -> {:error, "transform must set `result` to a table"}
+      {:ok, _scalar} -> {:error, "transform must return a table or nil"}
       {:error, message} -> {:error, message}
     end
   end
@@ -103,7 +104,7 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
 
   defp transform_runtime(_subscription), do: Transform.Runtime.default_runtime()
 
-  # ── Pre-seed (config + route + event → the transform's starting `result`) ────
+  # ── Pre-seed (config + route + event → the transform's `defaults` argument) ────
 
   defp preseed(:http, config, subscription, envelope, _created_at) do
     route = http_route(subscription.route_config)
@@ -240,12 +241,14 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   end
 
   defp normalize_headers(other),
-    do: {:error, "result.headers must be a table, got #{inspect(other)}"}
+    do: {:error, "the transform's headers must be a table, got #{inspect(other)}"}
 
   defp header_value(_key, value) when is_binary(value), do: {:ok, value}
   defp header_value(_key, value) when is_number(value), do: {:ok, to_string(value)}
   defp header_value(_key, value) when is_boolean(value), do: {:ok, to_string(value)}
-  defp header_value(key, _value), do: {:error, "result.headers[#{inspect(key)}] must be a string"}
+
+  defp header_value(key, _value),
+    do: {:error, "the transform's headers[#{inspect(key)}] must be a string"}
 
   # Untrusted event data can flow into a transform-built header. A `\r`/`\n` (or
   # any C0 control / DEL) in a header name or value is a request-splitting vector
@@ -253,7 +256,8 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   # the resolver boundary so the delivery PARKS with a readable error instead.
   defp reject_control_chars(name, string) do
     if String.match?(string, ~r/[\x00-\x1f\x7f]/) do
-      {:error, "result.headers[#{inspect(name)}] contains a control character (CR/LF/etc.)"}
+      {:error,
+       "the transform's headers[#{inspect(name)}] contains a control character (CR/LF/etc.)"}
     else
       :ok
     end
@@ -266,7 +270,7 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   defp normalize_timestamp(ts, _created_at) when is_float(ts), do: {:ok, trunc(ts)}
 
   defp normalize_timestamp(other, _created_at) do
-    {:error, "result.timestamp must be an integer (epoch ms), got #{inspect(other)}"}
+    {:error, "the transform's timestamp must be an integer (epoch ms), got #{inspect(other)}"}
   end
 
   # Store the body/value as the decoded TERM (encoding happens once at delivery).

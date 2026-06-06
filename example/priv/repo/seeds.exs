@@ -79,17 +79,21 @@ if Connection |> Ash.read!(authorize?: false) |> Enum.empty?() do
 
   # Subscriptions — one per event type the sources produce. Each carries its own
   # route (path + method) joined onto the connection's base URL, via the
-  # transport-tagged route_config union. The transform mutates a pre-seeded,
-  # transport-shaped `result` (body/headers/routing); `nil` is a no-op that sends
-  # the resolved defaults.
+  # transport-tagged route_config union. The transform is a function the author
+  # exposes — `transform(event, defaults)` — returning the (transport-shaped)
+  # descriptor to deliver; exposing none is a no-op that sends the resolved
+  # defaults.
   widget_script = """
   -- Customize delivery: send a trimmed body and tag the request with the widget id.
-  result.body = {
-    id = event.data.id,
-    name = event.data.name,
-    stock = event.data.stock,
-  }
-  result.headers["x-widget-id"] = event.data.id
+  function transform(event, defaults)
+    defaults.body = {
+      id = event.data.id,
+      name = event.data.name,
+      stock = event.data.stock,
+    }
+    defaults.headers["x-widget-id"] = event.data.id
+    return defaults
+  end
   """
 
   for {event_type, script, path, method} <- [

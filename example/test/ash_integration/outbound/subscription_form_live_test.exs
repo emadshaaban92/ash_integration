@@ -72,7 +72,7 @@ defmodule Example.Outbound.SubscriptionFormLiveTest do
         "connection_id" => http.id,
         "event_type" => "widget.updated",
         "version" => "1",
-        "transform_source" => "result = event",
+        "transform_source" => "function transform(event, defaults) return event end",
         "route" => %{"method" => "patch", "path" => "/widgets"}
       }
     )
@@ -101,7 +101,7 @@ defmodule Example.Outbound.SubscriptionFormLiveTest do
         "connection_id" => kafka.id,
         "event_type" => "stock.changed",
         "version" => "1",
-        "transform_source" => "result = event",
+        "transform_source" => "function transform(event, defaults) return event end",
         "route" => %{"topic" => "orders"}
       }
     )

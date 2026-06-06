@@ -25,13 +25,15 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
     :ok
   end
 
-  test "an allocation-bomb script is killed without taking down the caller" do
+  test "an allocation-bomb transform is killed without taking down the caller" do
     bomb = ~S"""
-    local t = {}
-    local i = 1
-    while true do
-      t[i] = string.rep("x", 1024)
-      i = i + 1
+    function transform(event, defaults)
+      local t = {}
+      local i = 1
+      while true do
+        t[i] = string.rep("x", 1024)
+        i = i + 1
+      end
     end
     """
 
@@ -40,17 +42,22 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
 
     # The caller (this test process) is unharmed and the sandbox still works for a
     # well-behaved script afterwards — proving crash isolation + recovery.
-    assert {:ok, %{"ok" => true}} = Lua.execute(~S|result = {ok = true}|, %{})
+    assert {:ok, %{"ok" => true}} =
+             Lua.execute(~S|function transform(e, d) return {ok = true} end|, %{})
   end
 
   test "a tight infinite loop is killed by the reduction budget" do
-    assert {:error, message} = Lua.execute("while true do end", %{})
+    bomb = ~S|function transform(e, d) while true do end end|
+    assert {:error, message} = Lua.execute(bomb, %{})
     assert is_binary(message)
     assert message =~ "reduction" or message =~ "timed out"
   end
 
-  test "a legitimate script still runs under the tightened budgets" do
+  test "a legitimate transform still runs under the tightened budgets" do
     assert {:ok, %{"doubled" => 84}} =
-             Lua.execute(~S|result = {doubled = event.n * 2}|, %{"n" => 42})
+             Lua.execute(
+               ~S|function transform(event, d) return {doubled = event.n * 2} end|,
+               %{"n" => 42}
+             )
   end
 end
