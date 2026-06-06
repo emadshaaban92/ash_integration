@@ -12,7 +12,13 @@ defmodule Example.MixProject do
       deps: deps(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader],
-      consolidate_protocols: Mix.env() != :dev
+      consolidate_protocols: Mix.env() != :dev,
+      # The outbound runtime lives in the :ash_integration library, which has no
+      # Repo of its own and is exercised through this app. Coverage therefore
+      # measures the library too — see test/test_helper.exs, which instruments
+      # the dependency's beams so the integration suite's exercise of the
+      # library shows up in the report.
+      test_coverage: [tool: ExCoveralls]
     ]
   end
 
@@ -28,7 +34,12 @@ defmodule Example.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [
+        precommit: :test,
+        coveralls: :test,
+        "coveralls.html": :test,
+        "coveralls.github": :test
+      ]
     ]
   end
 
@@ -80,6 +91,7 @@ defmodule Example.MixProject do
       {:ash_integration, path: ".."},
       {:cloak, "~> 1.1"},
       {:picosat_elixir, "~> 0.2"},
+      {:excoveralls, "~> 0.18", only: :test},
       # Optional transports — add this to enable Kafka in the dashboard
       {:brod, "~> 4.0"}
     ]

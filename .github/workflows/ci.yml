@@ -114,6 +114,64 @@ jobs:
         if: ${{ !cancelled() }}
         run: mix hex.audit
 
+  # Measure and surface coverage. The library has no Repo of its own, so its
+  # outbound runtime is exercised through the example app's integration suite;
+  # test/test_helper.exs instruments the :ash_integration dependency so the
+  # report covers the library too. Informational for now (no threshold) — the
+  # per-file table is printed in the job log.
+  example-coverage:
+    name: Coverage (library via example app)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: example
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: admin
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U admin"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Elixir / OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.19"
+          otp-version: "28"
+
+      - name: Cache example deps and _build
+        uses: actions/cache@v5
+        with:
+          path: |
+            example/deps
+            example/_build
+          key: ${{ runner.os }}-mix-example-cover-${{ hashFiles('example/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-example-cover-
+
+      # config/test.exs connects to host "db"; point it at the service on localhost.
+      - name: Map the "db" host to localhost
+        run: echo "127.0.0.1 db" | sudo tee -a /etc/hosts
+
+      - name: Install example dependencies
+        run: mix deps.get
+
+      - name: Set up the test database
+        run: mix ash.setup
+
+      - name: Run coverage (library + example app)
+        run: mix coveralls
+
   # Scan the example app's real router/endpoint — coverage the library (no
   # router of its own) can't get. See example/.sobelow-conf.
   sobelow-example:
