@@ -7,8 +7,11 @@
 #   mix test
 #
 # The example app's tests exercise library code paths that can only be tested
-# inside a real host app (router, endpoint, auth, etc.), so they ALWAYS run —
-# they are not gated on whether example/ files changed.
+# inside a real host app (router, endpoint, auth, etc.), so a *library* change
+# can break them just as an example/ change can. The gate is therefore
+# fingerprint-gated on BOTH the library and example source sets (see
+# _common.sh): it skips only when neither has changed since the last passing
+# run, so pure Q&A / "thinking" turns don't trigger the suite.
 #
 # (credo and sobelow are library-only: the example app has no credo dep and CI
 # runs Sobelow against it only via an archive.)
@@ -23,11 +26,16 @@ set -uo pipefail
 REPO_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 EXAMPLE_DIR="$REPO_DIR/example"
 
-# Make the mise-managed toolchain available in web sessions (see
-# session-start.sh); harmless no-ops in a local checkout.
-export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
-export HEX_CACERTS_PATH="${HEX_CACERTS_PATH:-/etc/ssl/certs/ca-certificates.crt}"
-export ELIXIR_ERL_OPTIONS="${ELIXIR_ERL_OPTIONS:-+fnu}"
+# Fail open: if the shared helper is missing, let the turn finish rather than
+# hard-erroring under `set -u`.
+COMMON="$REPO_DIR/.claude/hooks/_common.sh"
+[ -f "$COMMON" ] || exit 0
+source "$COMMON"
+
+# A library change can break the host app, so this gate fires on either set
+# changing. Combine both fingerprints into one trigger value.
+fp="$(printf '%s\n%s\n' "$(fingerprint_library)" "$(fingerprint_example)" | sha1sum | cut -d' ' -f1)"
+gate_unchanged example "$fp" && exit 0
 
 failures=""
 
@@ -49,3 +57,6 @@ if [ -n "$failures" ]; then
   echo "Example stop gate failed — fix these before finishing:${failures}" >&2
   exit 2
 fi
+
+# All green — remember this fingerprint so unchanged turns skip the gate.
+gate_passed example "$fp"
