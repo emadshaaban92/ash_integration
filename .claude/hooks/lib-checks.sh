@@ -8,6 +8,10 @@
 #   mix sobelow
 #   mix test
 #
+# Fingerprint-gated (see _common.sh): if no library source file has changed
+# since the last passing run, the gate skips entirely — so pure Q&A / "thinking"
+# turns don't trigger the suite. Only a real change to library sources re-runs it.
+#
 # Registered as its own Stop hook entry so it runs in parallel with the example
 # app's gate (example-checks.sh). Every check runs even if an earlier one fails,
 # so a single turn surfaces every problem. On any failure the hook exits 2: the
@@ -18,11 +22,15 @@ set -uo pipefail
 
 REPO_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
-# Make the mise-managed toolchain available in web sessions (see
-# session-start.sh); harmless no-ops in a local checkout.
-export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
-export HEX_CACERTS_PATH="${HEX_CACERTS_PATH:-/etc/ssl/certs/ca-certificates.crt}"
-export ELIXIR_ERL_OPTIONS="${ELIXIR_ERL_OPTIONS:-+fnu}"
+# Fail open: if the shared helper is missing, let the turn finish rather than
+# hard-erroring under `set -u`.
+COMMON="$REPO_DIR/.claude/hooks/_common.sh"
+[ -f "$COMMON" ] || exit 0
+source "$COMMON"
+
+# Skip when nothing the library cares about has changed since the last green run.
+fp="$(fingerprint_library)"
+gate_unchanged library "$fp" && exit 0
 
 failures=""
 
@@ -46,3 +54,6 @@ if [ -n "$failures" ]; then
   echo "Library stop gate failed — fix these before finishing:${failures}" >&2
   exit 2
 fi
+
+# All green — remember this fingerprint so unchanged turns skip the gate.
+gate_passed library "$fp"
