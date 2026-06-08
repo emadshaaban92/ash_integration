@@ -156,7 +156,7 @@ defmodule Example.Outbound.TransformPreviewTest do
           base_url: "http://localhost:9999/webhook",
           auth: %{type: "none"},
           timeout_ms: 5000,
-          signing_secret: "shh"
+          signing: %{type: "stripe", secret: "shh", header_name: "x-signature"}
         }
       },
       authorize?: false

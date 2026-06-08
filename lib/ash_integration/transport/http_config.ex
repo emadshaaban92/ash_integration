@@ -1,15 +1,6 @@
 defmodule AshIntegration.Transport.HttpConfig do
-  @vault Application.compile_env!(:ash_integration, :vault)
-
   use Ash.Resource,
-    data_layer: :embedded,
-    extensions: [AshCloak]
-
-  cloak do
-    vault @vault
-    attributes [:signing_secret]
-    decrypt_by_default []
-  end
+    data_layer: :embedded
 
   attributes do
     # Connection-level base URL (scheme + host, optionally a base path). The
@@ -63,9 +54,13 @@ defmodule AshIntegration.Transport.HttpConfig do
       default %{}
     end
 
-    attribute :signing_secret, :string do
+    # Explicit signing scheme (none/stripe/custom). The chosen variant carries its
+    # own encrypted secret, so "a secret with no scheme" is unrepresentable. See
+    # `AshIntegration.Transport.SigningScheme`.
+    attribute :signing, AshIntegration.Transport.SigningScheme do
+      allow_nil? false
       public? true
-      sensitive? true
+      default %{type: "none"}
     end
   end
 

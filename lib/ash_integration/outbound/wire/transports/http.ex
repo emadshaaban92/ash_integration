@@ -12,6 +12,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
 
   @behaviour AshIntegration.Outbound.Wire.Transport
 
+  alias AshIntegration.Transport.Signing
   alias AshIntegration.Transport.Utils
 
   @impl true
@@ -33,34 +34,63 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
     %Ash.Union{type: :http, value: config} = connection.transport_config
     delivery = event.delivery
     # Encode the stored body term ONCE here and sign over those exact bytes, so
-    # the live x-signature is over precisely what goes on the wire (parity).
+    # the live signature is over precisely what goes on the wire (parity). A
+    # `custom` scheme that places the signature IN the body returns replacement
+    # bytes; otherwise the cached bytes are sent verbatim.
     body = Utils.encode_body(delivery["body"])
+    ctx = build_ctx(delivery, body)
 
     # Both secret-derived inputs are loaded LIVE here. A decryption/vault failure
-    # short-circuits to a classified `:transport` error (NOT a raised MatchError)
-    # so the suspension subsystem sees it instead of retrying forever.
-    with {:ok, signature} <- AshIntegration.Transport.Signing.signature(config, body),
+    # (or a `custom` script error) short-circuits to a classified `:transport`
+    # error so the suspension subsystem sees it instead of retrying forever.
+    with {:ok, applied} <- Signing.run(config.signing, ctx),
          {:ok, auth} <- auth_headers(config.auth) do
-      do_deliver(event, config, body, auth, signature)
+      do_deliver(event, config, body, applied, auth)
     end
   end
 
-  defp do_deliver(event, config, body, auth, signature) do
-    delivery = event.delivery
+  # The send-time signing context. `body` is the exact wire bytes; `data` is the
+  # structured body (for Model-2 canonical strings); `now` is frozen for this
+  # attempt and shared across every signing callback.
+  defp build_ctx(delivery, body) do
+    uri = URI.parse(delivery["url"] || "")
 
-    # Pin the snapshotted URL to a validated IP right before the send — the live SSRF
-    # gate against DNS rebinding (the checked address is the connected address). An
-    # unresolvable base_url fails here as a `:transport` error, driving suspension.
-    case AshIntegration.Transport.Egress.pin(delivery["url"]) do
+    %{
+      method: String.upcase(to_string(delivery["method"] || "post")),
+      url: delivery["url"],
+      path: path_with_query(uri),
+      host: uri.host,
+      headers: stringify_headers(delivery["headers"]),
+      body: body || "",
+      data: delivery["body"],
+      now: Signing.now_context()
+    }
+  end
+
+  defp path_with_query(%URI{path: path, query: nil}), do: path || "/"
+  defp path_with_query(%URI{path: path, query: query}), do: (path || "/") <> "?" <> query
+
+  defp stringify_headers(headers),
+    do: Map.new(headers || %{}, fn {k, v} -> {to_string(k), to_string(v)} end)
+
+  defp do_deliver(event, config, body, applied, auth) do
+    delivery = event.delivery
+    final_body = if applied.body == :keep, do: body, else: applied.body
+    url = if applied.url == :keep, do: delivery["url"], else: applied.url
+
+    # Pin the (possibly signing-rewritten) URL to a validated IP right before the
+    # send — the live SSRF gate against DNS rebinding (the checked address is the
+    # connected address). An unresolvable URL fails here as a `:transport` error.
+    case AshIntegration.Transport.Egress.pin(url) do
       {:ok, url, connect_options} ->
-        do_send(event, config, body, auth, signature, url, connect_options)
+        do_send(event, config, final_body, applied.headers, auth, url, connect_options)
 
       {:error, _category, reason} ->
         egress_error(reason)
     end
   end
 
-  defp do_send(event, config, body, auth, signature, url, connect_options) do
+  defp do_send(event, config, body, sig_headers, auth, url, connect_options) do
     delivery = event.delivery
     req_options = Application.get_env(:ash_integration, :req_options, [])
 
@@ -69,7 +99,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
              method: method(delivery["method"]),
              url: url,
              body: body,
-             headers: headers(auth, delivery["headers"], signature),
+             headers: headers(auth, delivery["headers"], sig_headers),
              receive_timeout: timeout(event.subscription.route_config, config),
              retry: false,
              # Never follow redirects: a 3xx to an internal address would re-resolve
@@ -121,20 +151,17 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
     [{:connect_options, Keyword.merge(existing, connect_options)} | rest]
   end
 
-  # Both secret-derived headers are injected LIVE here (never in the event row or
-  # the sandbox). Precedence (lowest→highest, de-dup keeps last):
-  #   auth (fallback)  →  stored resolved headers  →  signature
-  # so a transform-set `authorization` overrides the connection auth, while
-  # `x-signature` is library-owned and wins over any transform-set value.
-  defp headers(auth, stored, signature) do
+  # Both secret-derived header groups are injected LIVE here (never in the event
+  # row or the sandbox). Precedence (lowest→highest, de-dup keeps last):
+  #   auth (fallback)  →  stored resolved headers  →  signing headers
+  # so a transform-set `authorization` overrides the connection auth, while the
+  # signing headers are library-owned and win over any transform-set value.
+  defp headers(auth, stored, sig_headers) do
     stored = Enum.map(stored || %{}, fn {k, v} -> {to_string(k), to_string(v)} end)
 
-    (auth ++ stored ++ signature_header(signature))
+    (auth ++ stored ++ sig_headers)
     |> Utils.dedup_keep_last()
   end
-
-  defp signature_header(nil), do: []
-  defp signature_header(signature), do: [{"x-signature", signature}]
 
   # Per-route timeout override stays LIVE (it's a client setting, not wire data).
   defp timeout(%Ash.Union{type: :http, value: route}, config),

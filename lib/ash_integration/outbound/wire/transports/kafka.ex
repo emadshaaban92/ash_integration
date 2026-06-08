@@ -48,35 +48,40 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
     %Ash.Union{type: :kafka, value: config} = connection.transport_config
     delivery = event.delivery
     value = Utils.encode_body(delivery["value"]) || ""
+    ctx = build_ctx(delivery, value)
 
-    with {:ok, headers} <- headers(config, delivery["headers"], value) do
+    with {:ok, applied} <- Signing.run(config.signing, ctx) do
+      final_value = if applied.body == :keep, do: value, else: applied.body
+
       {:ok,
        %{
          key: delivery["key"],
-         value: value,
+         value: final_value,
          ts: delivery["timestamp"],
-         headers: headers
+         headers: headers(delivery["headers"], applied.headers)
        }}
     end
   end
 
-  # Bare wire headers replayed from the descriptor, with the library-owned
-  # `signature` (live MAC over `value`) appended last so it wins the de-dup.
-  defp headers(config, stored, value) do
-    stored = Enum.map(stored || %{}, fn {k, v} -> {to_string(k), to_string(v)} end)
-
-    with {:ok, signature_headers} <- signature_header(config, value) do
-      {:ok, Utils.dedup_keep_last(stored ++ signature_headers)}
-    end
+  # The send-time signing context. `body` is the record value bytes (what a default
+  # signer hashes); `data` is the structured value; `now` is frozen per attempt.
+  # There is no method/path/url — a `url` placement callback simply doesn't apply.
+  defp build_ctx(delivery, value) do
+    %{
+      topic: delivery["topic"],
+      key: to_string(delivery["key"]),
+      headers: Map.new(delivery["headers"] || %{}, fn {k, v} -> {to_string(k), to_string(v)} end),
+      body: value,
+      data: delivery["value"],
+      now: Signing.now_context()
+    }
   end
 
-  defp signature_header(config, value) do
-    with {:ok, signature} <- Signing.signature(config, value) do
-      case signature do
-        nil -> {:ok, []}
-        signature -> {:ok, [{"signature", signature}]}
-      end
-    end
+  # Bare wire headers replayed from the descriptor, with the library-owned signing
+  # headers appended last so they win the de-dup.
+  defp headers(stored, sig_headers) do
+    stored = Enum.map(stored || %{}, fn {k, v} -> {to_string(k), to_string(v)} end)
+    Utils.dedup_keep_last(stored ++ sig_headers)
   end
 
   defp do_deliver(connection, event) do

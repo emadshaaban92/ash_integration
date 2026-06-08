@@ -132,7 +132,15 @@ defmodule Example.Outbound.TransportKafkaTest do
         topic: "events",
         security: %{type: "none"}
       }
-      |> maybe_put(:signing_secret, opts[:signing_secret])
+      |> then(fn tc ->
+        case opts[:signing_secret] do
+          nil ->
+            tc
+
+          secret ->
+            Map.put(tc, :signing, %{type: "stripe", secret: secret, header_name: "signature"})
+        end
+      end)
       |> maybe_put(:headers, opts[:headers])
 
     Connection

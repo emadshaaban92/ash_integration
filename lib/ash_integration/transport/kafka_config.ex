@@ -1,15 +1,6 @@
 defmodule AshIntegration.Transport.KafkaConfig do
-  @vault Application.compile_env!(:ash_integration, :vault)
-
   use Ash.Resource,
-    data_layer: :embedded,
-    extensions: [AshCloak]
-
-  cloak do
-    vault @vault
-    attributes [:signing_secret]
-    decrypt_by_default []
-  end
+    data_layer: :embedded
 
   attributes do
     attribute :brokers, {:array, :string} do
@@ -30,9 +21,13 @@ defmodule AshIntegration.Transport.KafkaConfig do
       default %{}
     end
 
-    attribute :signing_secret, :string do
+    # Explicit signing scheme (none/stripe/custom); the signature lands in a record
+    # header. The chosen variant carries its own encrypted secret. See
+    # `AshIntegration.Transport.SigningScheme`.
+    attribute :signing, AshIntegration.Transport.SigningScheme do
+      allow_nil? false
       public? true
-      sensitive? true
+      default %{type: "none"}
     end
 
     attribute :security, :union do

@@ -17,14 +17,14 @@ defmodule Example.Outbound.ConnectionSecretParamsTest do
         "_union_type" => "http",
         "auth" => %{"_union_type" => "none"},
         "base_url" => "https://example.com",
-        "signing_secret" => "secret"
+        "signing" => %{"_union_type" => "stripe", "secret" => "secret"}
       }
     }
 
     tc = Helpers.strip_blank_secrets(params)["transport_config"]
 
     refute Map.has_key?(tc, "security")
-    assert tc["signing_secret"] == "secret"
+    assert tc["signing"]["secret"] == "secret"
   end
 
   test "a Kafka config never gains a stray `auth` key" do
@@ -45,14 +45,14 @@ defmodule Example.Outbound.ConnectionSecretParamsTest do
     params = %{
       "transport_config" => %{
         "_union_type" => "http",
-        "signing_secret" => "",
+        "signing" => %{"_union_type" => "stripe", "secret" => ""},
         "auth" => %{"_union_type" => "bearer_token", "token" => ""}
       }
     }
 
     tc = Helpers.strip_blank_secrets(params)["transport_config"]
 
-    refute Map.has_key?(tc, "signing_secret")
+    refute Map.has_key?(tc["signing"], "secret")
     refute Map.has_key?(tc["auth"], "token")
   end
 end
