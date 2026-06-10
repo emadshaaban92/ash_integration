@@ -35,4 +35,4 @@ ash_integration-*.tar
 .devcontainer/.env
 .env
 
-.DS_Store
+.DS_Store.claude/hooks/.state/
