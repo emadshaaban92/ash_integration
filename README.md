@@ -11,7 +11,7 @@ Declare named, versioned **event types** that your resource actions contribute t
 - **Multi-transport** — deliver via [HTTP](guides/http-transport.md) or [Kafka](guides/kafka-transport.md)
 - **Schema versioning** — pin subscriptions to specific payload versions for safe consumer upgrades
 - **Lua transform scripts** — sandboxed Lua execution to reshape event data before delivery
-- **Payload signing** — HMAC-SHA256 signatures across all transports
+- **Payload signing** — an explicit per-connection signing scheme (`none`/`stripe`/`custom`) across all transports: a native Stripe-style HMAC built-in, plus sandboxed custom signing scripts for novel schemes (canonical request strings, embedded body signatures)
 - **Secret encryption** — credentials encrypted at rest via AshCloak
 - **[Event-driven delivery](guides/delivery-pipeline.md)** — an immutable `Event` log is the source of truth (a transactional outbox); two Broadway relays claim rows directly — one fans events out, one delivers them — with no external job queue to wire
 - **At-least-once semantics** — events are never lost, even if a claim is lost or a node crashes
@@ -181,7 +181,7 @@ AshIntegration ships five extensions you attach to your own resources. Each
 injects all attributes, actions, relationships, and code interface automatically —
 you only provide app-specific configuration (module name, table, policies).
 
-A **Connection** holds the transport, auth, signing secret, and ordering domain:
+A **Connection** holds the transport, auth, signing scheme, and ordering domain:
 
 ```elixir
 defmodule MyApp.Integration.Connection do
@@ -447,7 +447,7 @@ AshIntegration supports two transport types, configured per connection. Each has
 - **[HTTP Transport](guides/http-transport.md)** — JSON payloads over HTTP with Bearer, API Key, or Basic Auth
 - **[Kafka Transport](guides/kafka-transport.md)** — Kafka messages with SASL/TLS security and event-key partitioning
 
-Both transports lead with the event type on the wire and support HMAC-SHA256 payload signing via the `signing_secret` config field.
+Both transports lead with the event type on the wire and support payload signing via the `signing` config union — `none` (default), `stripe` (native Stripe-style HMAC-SHA256, configurable header name), or `custom` (a sandboxed signing script; the secret never enters the sandbox). See the transport guides for details.
 
 ## Lua Transform Scripts
 
@@ -526,7 +526,7 @@ function transform(event, defaults)
 end
 ```
 
-**Signature & auth.** The descriptor (body as a term, headers, routing) is resolved at dispatch and snapshotted on the event, then replayed on every retry. Two secret-derived headers are **never** snapshotted and are injected live at delivery: `Authorization`/auth (resolved from the encrypted connection — a transform-set `authorization` header still wins), and the **signature**, which is recomputed fresh per attempt over the exact body bytes being sent, with a send-time timestamp. Signing live keeps the anti-replay `t` honest on retries and makes a rotated `signing_secret` apply immediately — so reprocess is only needed to pick up an edited transform or connection/route config, not a secret rotation.
+**Signature & auth.** The descriptor (body as a term, headers, routing) is resolved at dispatch and snapshotted on the event, then replayed on every retry. Two secret-derived outputs are **never** snapshotted and are injected live at delivery: `Authorization`/auth (resolved from the encrypted connection — a transform-set `authorization` header still wins), and the **signature**, which is recomputed fresh per attempt under the connection's `signing` scheme with a frozen send-time timestamp. Signing live keeps the anti-replay timestamp honest on retries and makes a rotated secret apply immediately — so reprocess is only needed to pick up an edited transform or connection/route config, not a secret rotation.
 
 Scripts run in a sandboxed environment with no I/O, a 10KB size limit, and a 5-second timeout.
 

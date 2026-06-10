@@ -80,6 +80,28 @@ defmodule Example.Outbound.TransportKafkaTest do
     assert message.value == ""
   end
 
+  test "a custom signing `url` placement callback is rejected — Kafka has no URL", %{
+    owner: owner
+  } do
+    signing = %{
+      type: "custom",
+      secret: "topsecret",
+      source: """
+      function url(ctx)
+        return "https://example.com/elsewhere"
+      end
+      """
+    }
+
+    dest = create_kafka_connection!(owner, signing: signing)
+    event = create_event!(dest, data: %{"a" => 1})
+
+    assert {:error, %{failure_class: :transport, error_message: message}} =
+             Kafka.build_message(dest, event)
+
+    assert message =~ "`url` placement callback does not apply to the Kafka transport"
+  end
+
   test "custom headers pass through but cannot shadow or duplicate bare wire headers", %{
     owner: owner
   } do
@@ -133,12 +155,15 @@ defmodule Example.Outbound.TransportKafkaTest do
         security: %{type: "none"}
       }
       |> then(fn tc ->
-        case opts[:signing_secret] do
-          nil ->
-            tc
+        cond do
+          signing = opts[:signing] ->
+            Map.put(tc, :signing, signing)
 
-          secret ->
+          secret = opts[:signing_secret] ->
             Map.put(tc, :signing, %{type: "stripe", secret: secret, header_name: "signature"})
+
+          true ->
+            tc
         end
       end)
       |> maybe_put(:headers, opts[:headers])

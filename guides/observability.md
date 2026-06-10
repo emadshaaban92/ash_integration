@@ -75,11 +75,3 @@ A connection auto-suspends on crossing `auto_suspension_threshold` consecutive
 consecutive **response** failures (`failure_class: "response"`). `:unsuspended` /
 `:resumed` fire on the inverse `unsuspend` action.
 
-### Signing
-
-| Event | Measurements | Metadata |
-| --- | --- | --- |
-| `[:ash_integration, :signing, :blank_secret]` | `count` | — |
-
-A connection has a present-but-empty signing secret, so a delivery went out
-unsigned.

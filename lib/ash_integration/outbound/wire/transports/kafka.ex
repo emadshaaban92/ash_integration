@@ -50,7 +50,8 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
     value = Utils.encode_body(delivery["value"]) || ""
     ctx = build_ctx(delivery, value)
 
-    with {:ok, applied} <- Signing.run(config.signing, ctx) do
+    with {:ok, applied} <- Signing.run(config.signing, ctx),
+         :ok <- reject_url_placement(applied) do
       final_value = if applied.body == :keep, do: value, else: applied.body
 
       {:ok,
@@ -63,9 +64,24 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
     end
   end
 
+  # Kafka has no URL, so a `url` placement callback is a config error on this
+  # transport. Reject it loudly (a classified failure that surfaces in the log and
+  # drives suspension) rather than silently ignoring a callback the author wrote.
+  defp reject_url_placement(%{url: :keep}), do: :ok
+
+  defp reject_url_placement(_applied) do
+    {:error,
+     %{
+       failure_class: :transport,
+       error_message:
+         "signing failed: a `url` placement callback does not apply to the Kafka transport",
+       retryable: true
+     }}
+  end
+
   # The send-time signing context. `body` is the record value bytes (what a default
   # signer hashes); `data` is the structured value; `now` is frozen per attempt.
-  # There is no method/path/url — a `url` placement callback simply doesn't apply.
+  # There is no method/path/url — a `url` placement callback is rejected above.
   defp build_ctx(delivery, value) do
     %{
       topic: delivery["topic"],

@@ -176,6 +176,15 @@ counter and auto-suspends rather than looping forever. (Cheap future tightening:
 treat a deterministic *bad return shape* as non-retryable so it fails fast and in
 isolation — not needed for v1.)
 
+**Trust-boundary guards on placements.** Script-built placements are injected
+live at send, so they never pass the resolver's transform-output guard — the same
+checks therefore run at the signing boundary: a `headers` result accepts only
+string/number/boolean values, and a C0 control char / DEL (`\r`/`\n` request
+splitting; Mint raises on them, which would crash-loop outside the taxonomy) in a
+header name, header value, or `url` result is a classified error. A `url`
+placement against the Kafka transport (which has no URL) is likewise rejected as
+a classified error rather than silently ignored.
+
 **Logging / redaction.** The **secret** never enters the descriptor or the sandbox
 (invariant 1), so custom signing adds no secret-leak surface. The **signature** is
 not a credential — it's a per-request MAC, useless without the secret and already

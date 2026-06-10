@@ -427,10 +427,12 @@ Two details keep the counter honest:
   log/telemetry a suspension — exactly one update matches; the loser is a clean
   no-op.
 
-A blank signing-secret never fails silently: if a connection has a *present-but-empty*
-`signing_secret`, the delivery is sent unsigned but emits a warning +
-`[:ash_integration, :signing, :blank_secret]` telemetry (§11) rather than silently
-shipping without a signature.
+Whether a connection signs is an **explicit choice**: the transport config carries
+a tagged `signing` union (`none` / `stripe` / `custom` — see
+[configurable-signing.md](configurable-signing.md)). The `none` variant has no
+secret field and the signing variants validate a non-blank secret at save, so
+"a secret with no scheme" / "a blank secret silently shipping unsigned" are
+unrepresentable.
 
 A suspended subscription holding a lane's oldest event **parks that key's lane**
 until it recovers — the §8 head-of-line tradeoff extended to suspension:
@@ -483,7 +485,7 @@ The wire **leads with the event type**; provenance (`source_resource` /
 | Event identity | `event-id` | `x-event-id` | the `Event` UUIDv7 (stable across subscriptions) |
 | Event type | `event-type` | `x-event-type` | `product.created` |
 | Version | `event-version` | `x-event-version` | `1` |
-| Signature (if secret set) | `signature` | `x-signature` | HMAC over `"<timestamp>.<body>"` (Stripe-style), recomputed + injected live per attempt |
+| Signature (per the `signing` scheme) | scheme-defined | scheme-defined | the connection's `signing` union (`none` / `stripe` / `custom`); recomputed + injected live per attempt ([configurable-signing.md](configurable-signing.md)) |
 
 `Envelope.wire_pairs/1` emits a **deliberately minimal** default set — only the
 three fields every consumer needs: `event-id` (dedup), `event-type` (the
@@ -521,10 +523,11 @@ returns `defaults` — `function transform(event, defaults) return defaults end`
 or a nil/blank `transform_source` — and ships the route defaults; returning `nil`
 skips (→ `cancelled`). The resolved descriptor (body as a term, headers, routing) is
 snapshotted on the `EventDelivery` and replayed on every retry. Two secret-derived
-headers are **never** snapshotted and are injected **live at delivery**: auth
+outputs are **never** snapshotted and are injected **live at delivery**: auth
 (resolved from the encrypted connection) and the **signature** (recomputed per
-attempt over the exact bytes sent, with a send-time timestamp) — so a rotated secret
-applies immediately and the anti-replay timestamp stays honest on retries.
+attempt under the connection's `signing` scheme, with a frozen send-time
+timestamp — [configurable-signing.md](configurable-signing.md)) — so a rotated
+secret applies immediately and the anti-replay timestamp stays honest on retries.
 Reprocess is only needed for an edited transform or route config, not a secret
 rotation.
 

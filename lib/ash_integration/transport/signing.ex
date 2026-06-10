@@ -207,7 +207,7 @@ defmodule AshIntegration.Transport.Signing do
   defp placement_headers(ctx, call) do
     case call.("headers", ctx) do
       {:ok, :undefined} -> {:ok, []}
-      {:ok, {:defined, map}} when is_map(map) -> {:ok, header_list(map)}
+      {:ok, {:defined, map}} when is_map(map) -> header_list(map)
       {:ok, {:defined, []}} -> {:ok, []}
       {:ok, {:defined, _}} -> {:error, "the signing `headers` callback must return a table"}
       {:error, message} -> {:error, message}
@@ -240,15 +240,62 @@ defmodule AshIntegration.Transport.Signing do
 
   defp placement_url(ctx, call) do
     case call.("url", ctx) do
-      {:ok, :undefined} -> {:ok, :keep}
-      {:ok, {:defined, url}} when is_binary(url) -> {:ok, url}
-      {:ok, {:defined, _}} -> {:error, "the signing `url` callback must return a string"}
-      {:error, message} -> {:error, message}
+      {:ok, :undefined} ->
+        {:ok, :keep}
+
+      {:ok, {:defined, url}} when is_binary(url) ->
+        case reject_control_chars("url", url) do
+          :ok -> {:ok, url}
+          {:error, _} = error -> error
+        end
+
+      {:ok, {:defined, _}} ->
+        {:error, "the signing `url` callback must return a string"}
+
+      {:error, message} ->
+        {:error, message}
     end
   end
 
-  defp header_list(map),
-    do: Enum.map(map, fn {k, v} -> {to_string(k), to_string(v)} end)
+  # Script-built headers are injected live at send, so they never pass the
+  # resolver's transform-output guard. Apply the same trust-boundary checks here:
+  # string/number/boolean values only, and no C0 control char / DEL in a name or
+  # value (request-splitting; Mint raises on them, which would crash-loop the
+  # delivery outside the failure taxonomy).
+  defp header_list(map) do
+    Enum.reduce_while(map, {:ok, []}, fn {key, value}, {:ok, acc} ->
+      name = to_string(key)
+
+      with {:ok, value} <- header_value(name, value),
+           :ok <- reject_control_chars(name, name),
+           :ok <- reject_control_chars(name, value) do
+        {:cont, {:ok, [{name, value} | acc]}}
+      else
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, headers} -> {:ok, Enum.reverse(headers)}
+      error -> error
+    end
+  end
+
+  defp header_value(_name, value) when is_binary(value), do: {:ok, value}
+
+  defp header_value(_name, value) when is_number(value) or is_boolean(value),
+    do: {:ok, to_string(value)}
+
+  defp header_value(name, _value),
+    do: {:error, "the signing `headers` callback's #{inspect(name)} value must be a string"}
+
+  defp reject_control_chars(name, string) do
+    if String.match?(string, ~r/[\x00-\x1f\x7f]/) do
+      {:error,
+       "the signing callback's #{inspect(name)} contains a control character (CR/LF/etc.)"}
+    else
+      :ok
+    end
+  end
 
   # ── primitives ──────────────────────────────────────────────────────────────
 

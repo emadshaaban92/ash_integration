@@ -156,6 +156,41 @@ defmodule AshIntegration.Transport.SigningComputeTest do
     end
   end
 
+  describe "compute/2 {:custom, _} — placement trust boundary" do
+    test "number and boolean header values coerce to strings" do
+      src = ~S|function headers(ctx) return { ["x-count"] = 3, ["x-flag"] = true } end|
+      {:ok, applied} = Signing.compute(custom(src), ctx())
+
+      headers = Map.new(applied.headers)
+      assert headers["x-count"] == "3"
+      assert headers["x-flag"] == "true"
+    end
+
+    test "a control character in a header value is a classified error" do
+      src = ~S|function headers(ctx) return { ["x-sig"] = "a\r\nx-evil: 1" } end|
+      assert {:error, message} = Signing.compute(custom(src), ctx())
+      assert message =~ "control character"
+    end
+
+    test "a control character in a header name is a classified error" do
+      src = ~S|function headers(ctx) return { ["x-sig\r\nx-evil"] = "v" } end|
+      assert {:error, message} = Signing.compute(custom(src), ctx())
+      assert message =~ "control character"
+    end
+
+    test "a non-scalar header value is a classified error" do
+      src = ~S|function headers(ctx) return { ["x-sig"] = { nested = true } } end|
+      assert {:error, message} = Signing.compute(custom(src), ctx())
+      assert message =~ "must be a string"
+    end
+
+    test "a control character in a url result is a classified error" do
+      src = ~S|function url(ctx) return "https://api.example.com/x\r\nHost: evil" end|
+      assert {:error, message} = Signing.compute(custom(src), ctx())
+      assert message =~ "control character"
+    end
+  end
+
   describe "compute/2 {:custom, _} — one compiled session" do
     test "the source's top-level (compiled once) is visible to every callback" do
       # A top-level upvalue captured by both callbacks proves the source compiles
