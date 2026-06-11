@@ -40,7 +40,15 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
   defp init_form(%{assigns: %{action: :edit, connection: connection, actor: actor}} = socket) do
     form =
       AshPhoenix.Form.for_update(connection, :update, actor: actor, forms: [auto?: true])
-      |> Helpers.ensure_auth_subform()
+
+    # auth is a subform on HttpConfig only; KafkaConfig has security. Branch on
+    # the connection's transport type exactly like the transport-type-changed
+    # handler does, then ensure signing for both (it applies to every transport).
+    form =
+      case transport_type(connection.transport_config) do
+        "http" -> Helpers.ensure_auth_subform(form)
+        _ -> Helpers.ensure_security_subform(form)
+      end
       |> Helpers.ensure_signing_subform()
 
     {header_rows, broker_rows, kafka_header_rows} =
