@@ -561,7 +561,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
         auth: Keyword.get(opts, :auth, %{type: "none"}),
         timeout_ms: 5000
       }
-      |> maybe_put(:signing_secret, opts[:signing_secret])
+      |> maybe_put(:signing, stripe_signing(opts[:signing_secret], "x-signature"))
       |> maybe_put(:headers, opts[:headers])
 
     connection!(owner, config)
@@ -575,7 +575,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
         topic: Keyword.get(opts, :topic, "events"),
         security: %{type: "none"}
       }
-      |> maybe_put(:signing_secret, opts[:signing_secret])
+      |> maybe_put(:signing, stripe_signing(opts[:signing_secret], "signature"))
 
     connection!(owner, config)
   end
@@ -611,4 +611,7 @@ defmodule Example.Outbound.DeliveryResolverTest do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp stripe_signing(nil, _header), do: nil
+  defp stripe_signing(secret, header), do: %{type: "stripe", secret: secret, header_name: header}
 end

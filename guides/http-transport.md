@@ -4,18 +4,18 @@ The HTTP transport delivers JSON payloads to external endpoints via HTTP request
 
 ## Configuration
 
-A connection holds the **base URL, auth, signing secret, and a default timeout** — the shared "who and how to authenticate." Each subscription under it sets its own **route** (request path + HTTP method). Set the connection's `transport_config.type` to `:http`:
+A connection holds the **base URL, auth, signing scheme, and a default timeout** — the shared "who and how to authenticate." Each subscription under it sets its own **route** (request path + HTTP method). Set the connection's `transport_config.type` to `:http`:
 
 ```elixir
 %{
   type: :http,
   base_url: "https://api.example.com",  # scheme + host (+ optional base path)
-  timeout_ms: 30_000,     # Default request timeout in ms (default: 30s, min: 1s)
-  auth: %{type: "none"},  # See Authentication below
-  headers: %{             # Optional connection-wide custom headers
+  timeout_ms: 30_000,      # Default request timeout in ms (default: 30s, min: 1s)
+  auth: %{type: "none"},   # See Authentication below
+  headers: %{              # Optional connection-wide custom headers
     "x-source" => "my-app"
   },
-  signing_secret: nil     # Optional HMAC secret — see Payload Signing
+  signing: %{type: "none"} # Explicit signing scheme — see Payload Signing
 }
 ```
 
@@ -97,7 +97,7 @@ metadata travels in `x-`-prefixed headers:
 | `x-created-at` | ISO8601 timestamp of the event |
 | `x-event-key` | The ordering/coalescing key (interpret it alongside `x-connection-id`) |
 | `x-connection-id` | The connection's id |
-| `x-signature` | HMAC signature, if a signing secret is set (see below) |
+| signature header(s) | Per the connection's `signing` scheme (see below) — e.g. `stripe-signature` for the `stripe` scheme |
 
 These wire headers pre-seed the transform's `defaults.headers`, so a subscription
 can override or remove any of them (including `x-event-id`). The connection's
@@ -114,27 +114,86 @@ is no sequence number.
 
 ## Payload Signing
 
-When `signing_secret` is set, the body is signed with HMAC-SHA256 and the signature is sent in the `x-signature` header:
+Whether (and how) a connection signs is an **explicit choice**: the
+`transport_config.signing` field is a tagged union — the variant *is* the answer,
+so there is no implicit "secret present ⇒ sign" switch.
+
+### `none` (default)
+
+```elixir
+signing: %{type: "none"}
+```
+
+Deliveries are sent unsigned. This variant carries no secret field, so "a secret
+with no scheme" is unrepresentable.
+
+### `stripe`
+
+The Stripe webhook format, built in natively (no sandbox):
+
+```elixir
+signing: %{type: "stripe", secret: "whsec_...", header_name: "stripe-signature"}
+```
+
+The body is signed with HMAC-SHA256 and sent in the configured header
+(`header_name` defaults to `stripe-signature`; it is lowercased on the wire):
 
 ```
-x-signature: t=1234567890,v1=abc123def456...
+stripe-signature: t=1234567890,v1=abc123def456...
 ```
 
 To verify on the receiving end:
 
 1. Extract the timestamp (`t`) and signature (`v1`) from the header
-2. Compute `HMAC-SHA256(signing_secret, "#{timestamp}.#{raw_body}")`
+2. Compute `HMAC-SHA256(secret, "#{timestamp}.#{raw_body}")`
 3. Compare with `v1` (hex-encoded, lowercase)
 
-The signature is computed **live at delivery** over the exact body bytes being
-sent, with a send-time timestamp (`t`). Each delivery attempt is signed fresh, so
-the `t` always reflects the real send — if your receiver enforces a timestamp
-**tolerance window** for replay protection, retries after backoff still verify
-(their `t` moves forward with each attempt). Because signing is live, **rotating
-the `signing_secret` takes effect immediately** on already-dispatched events — no
-reprocess needed. The signature is never persisted (it's recomputed each send);
-the body it signs is, however, snapshotted at dispatch, so the signed content is
-stable across retries.
+### `custom`
+
+A staged Lua signing behaviour for targets with novel schemes (canonical request
+strings, embedded body signatures, presigned URLs). The script exposes optional
+pure callbacks — `content(ctx)`, `string_to_sign(ctx)`, `headers(ctx)`,
+`body(ctx)`, `url(ctx)` — and the library applies the cryptographic primitives
+between them, so **the secret never enters the sandbox**:
+
+```elixir
+signing: %{
+  type: "custom",
+  secret: "...",
+  source: """
+  function string_to_sign(ctx)
+    return ctx.method .. "\\n" .. ctx.path .. "\\n" .. ctx.now.iso8601 .. "\\n" .. ctx.digest
+  end
+
+  function headers(ctx)
+    return { ["x-signature"] = ctx.signature, ["x-timestamp"] = ctx.now.iso8601 }
+  end
+  """,
+  algorithm: :sha256,  # :sha256 (default) | :sha1 | :sha512
+  encoding: :hex       # :hex (default) | :base64 | :base64url
+}
+```
+
+Every callback receives a read-only `ctx` (method, url, path, host, headers,
+the encoded `body` string, the structured `data`, and a frozen `now` in several
+formats) plus the threaded results (`ctx.digest`, `ctx.signature`). If no `body`
+callback is defined, the cached encoded body bytes are sent **verbatim** — the
+exact bytes that were signed — so detached-signature schemes are byte-identical
+by construction. A `body` callback re-encodes (for schemes that embed the
+signature in the payload). One footgun to know: numbers in `ctx.data` are Lua
+floats — format them explicitly (`string.format("%d", n)`) when building
+canonical strings. See `design/configurable-signing.md` for the full model.
+
+### Live signing (all schemes)
+
+The signature is computed **live at delivery**, with a frozen send-time
+timestamp shared by every callback in the attempt. Each delivery attempt is
+signed fresh, so the timestamp always reflects the real send — if your receiver
+enforces a timestamp **tolerance window** for replay protection, retries after
+backoff still verify. Because signing is live, **rotating the secret takes
+effect immediately** on already-dispatched events — no reprocess needed. The
+signature is never persisted; the body it signs is, however, snapshotted at
+dispatch, so the signed content is stable across retries.
 
 ## Error Handling
 

@@ -26,7 +26,7 @@ A connection holds the **brokers, security, acks, and a default topic** — the 
   headers: %{                                 # Optional custom Kafka headers
     "x-source" => "my-app"
   },
-  signing_secret: nil                         # Optional HMAC secret — see Payload Signing
+  signing: %{type: "none"}                    # Explicit signing scheme — see Payload Signing
 }
 ```
 
@@ -88,7 +88,17 @@ order — the same key the pipeline uses for ordering and latest-state coalescin
 
 ## Payload Signing
 
-When `signing_secret` is set, a `signature` Kafka header is added with the same HMAC-SHA256 format used by the HTTP transport. See [HTTP Transport](http-transport.md#payload-signing) for verification details. As on HTTP, the signature is computed **live at delivery** over the encoded `defaults.value` with a send-time timestamp (never stored; recomputed per attempt), so rotating the `signing_secret` takes effect immediately without reprocessing.
+The connection's `transport_config.signing` union selects the scheme explicitly —
+`none` (default, unsigned), `stripe`, or `custom` — exactly as on HTTP. See
+[HTTP Transport — Payload Signing](http-transport.md#payload-signing) for the
+schemes, verification details, and the `custom` callback model. On Kafka the
+signature lands in a **record header** (for `stripe`, the configured
+`header_name`); the signing `ctx` carries `topic`/`key`/`headers`/`body`/`data`
+instead of URL fields, and a `url` placement callback is rejected as a config
+error (Kafka has no URL). As on HTTP, the signature is computed **live at
+delivery** over the encoded `defaults.value` with a frozen send-time timestamp
+(never stored; recomputed per attempt), so rotating the secret takes effect
+immediately without reprocessing.
 
 ## Message Format
 

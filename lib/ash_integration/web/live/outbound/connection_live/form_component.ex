@@ -24,6 +24,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
       )
       |> AshPhoenix.Form.add_form("form[transport_config]", params: %{"_union_type" => "http"})
       |> Helpers.ensure_auth_subform()
+      |> Helpers.ensure_signing_subform()
 
     assign(socket,
       form: form,
@@ -40,6 +41,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
     form =
       AshPhoenix.Form.for_update(connection, :update, actor: actor, forms: [auto?: true])
       |> Helpers.ensure_auth_subform()
+      |> Helpers.ensure_signing_subform()
 
     {header_rows, broker_rows, kafka_header_rows} =
       existing_rows(connection.transport_config)
@@ -106,6 +108,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
         "http" -> Helpers.ensure_auth_subform(form)
         _ -> Helpers.ensure_security_subform(form)
       end
+      |> Helpers.ensure_signing_subform()
 
     {:noreply,
      assign(socket,
@@ -114,7 +117,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
        header_rows: [],
        broker_rows: [],
        kafka_header_rows: [],
-       has_secrets: %{signing_secret: false, auth: false, sasl_password: false}
+       has_secrets: %{signing: false, auth: false, sasl_password: false}
      )}
   end
 
@@ -141,6 +144,9 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
 
   def handle_event("security-type-changed", params, socket),
     do: union_type_changed(socket, params, :sasl_password)
+
+  def handle_event("signing-type-changed", params, socket),
+    do: union_type_changed(socket, params, :signing)
 
   defp union_type_changed(socket, %{"_target" => path} = params, secret_key) do
     new_type = get_in(params, path)
@@ -226,24 +232,76 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
 
             <div class="card card-border border-base-300 p-4 mt-4">
               <h4 class="font-semibold mb-3">Payload Signing</h4>
-              <.input
-                field={tc[:signing_secret]}
-                type="password"
-                autocomplete="one-time-code"
-                label="HMAC Signing Secret"
-                placeholder={
-                  if @has_secrets[:signing_secret],
-                    do: "Leave blank to keep current",
-                    else: "Leave blank to disable signing"
-                }
-                phx-debounce="blur"
-              />
-              <p class="text-xs text-base-content/50 mt-1">
-                When set, payloads are signed with HMAC-SHA256, sent as
-                <code class="text-xs">x-signature</code>
-                (HTTP) or <code class="text-xs">signature</code>
-                (Kafka).
-              </p>
+              <.inputs_for :let={sig} field={tc[:signing]}>
+                <.input
+                  field={sig[:_union_type]}
+                  phx-change="signing-type-changed"
+                  phx-target={@myself}
+                  type="select"
+                  label="Signing Scheme"
+                  options={[
+                    {"None", "none"},
+                    {"Stripe (HMAC-SHA256)", "stripe"},
+                    {"Custom (script)", "custom"}
+                  ]}
+                />
+                <%= case sig.params["_union_type"] do %>
+                  <% "stripe" -> %>
+                    <.input
+                      field={sig[:secret]}
+                      type="password"
+                      autocomplete="one-time-code"
+                      label="Signing Secret"
+                      required={@action == :new}
+                      force_errors={@submitted?}
+                      placeholder={if @has_secrets[:signing], do: "Leave blank to keep current"}
+                      phx-debounce="blur"
+                    />
+                    <.input
+                      field={sig[:header_name]}
+                      type="text"
+                      label="Header Name"
+                      required
+                      force_errors={@submitted?}
+                      phx-debounce="blur"
+                    />
+                  <% "custom" -> %>
+                    <.input
+                      field={sig[:secret]}
+                      type="password"
+                      autocomplete="one-time-code"
+                      label="Signing Secret"
+                      required={@action == :new}
+                      force_errors={@submitted?}
+                      placeholder={if @has_secrets[:signing], do: "Leave blank to keep current"}
+                      phx-debounce="blur"
+                    />
+                    <.input
+                      field={sig[:source]}
+                      type="textarea"
+                      label="Signing Script"
+                      rows="8"
+                      force_errors={@submitted?}
+                      placeholder="function string_to_sign(ctx) ... end"
+                      phx-debounce="blur"
+                    />
+                    <div class="flex gap-2">
+                      <.input
+                        field={sig[:algorithm]}
+                        type="select"
+                        label="Algorithm"
+                        options={[{"SHA-256", "sha256"}, {"SHA-1", "sha1"}, {"SHA-512", "sha512"}]}
+                      />
+                      <.input
+                        field={sig[:encoding]}
+                        type="select"
+                        label="Encoding"
+                        options={[{"Hex", "hex"}, {"Base64", "base64"}, {"Base64 URL", "base64url"}]}
+                      />
+                    </div>
+                  <% _ -> %>
+                <% end %>
+              </.inputs_for>
             </div>
           </.inputs_for>
         </div>

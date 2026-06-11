@@ -157,6 +157,24 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     end
   end
 
+  # Signing applies to BOTH transports, so this is ensured for http and kafka alike.
+  def ensure_signing_subform(form) do
+    tc = form.forms[:transport_config]
+
+    cond do
+      is_nil(tc) ->
+        form
+
+      is_nil(tc.forms[:signing]) ->
+        AshPhoenix.Form.add_form(form, "form[transport_config][signing]",
+          params: %{"_union_type" => "none"}
+        )
+
+      true ->
+        form
+    end
+  end
+
   @encrypted_auth_fields ["token", "value", "password"]
 
   def strip_blank_secrets(params) do
@@ -164,11 +182,13 @@ defmodule AshIntegration.Web.Outbound.Helpers do
       tc when is_map(tc) ->
         tc =
           tc
-          |> maybe_drop_blank("signing_secret")
           # Only touch a sub-map that's actually PRESENT: `auth` is HTTP-only and
           # `security` is Kafka-only, so defaulting an absent key (as Map.update/4
           # does) would inject a stray map the other transport rejects with
           # "no such input" — silently failing the whole save.
+          |> update_if_present("signing", fn sig when is_map(sig) ->
+            maybe_drop_blank(sig, "secret")
+          end)
           |> update_if_present("auth", fn auth when is_map(auth) ->
             Enum.reduce(@encrypted_auth_fields, auth, &maybe_drop_blank(&2, &1))
           end)
@@ -203,21 +223,26 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     case record.transport_config do
       %Ash.Union{type: :http, value: tc} ->
         %{
-          signing_secret: tc.encrypted_signing_secret != nil,
+          signing: signing_secret?(tc.signing),
           auth: http_auth_secret?(tc.auth)
         }
 
       %Ash.Union{type: :kafka, value: tc} ->
         %{
-          signing_secret: tc.encrypted_signing_secret != nil,
+          signing: signing_secret?(tc.signing),
           sasl_password: kafka_sasl_password?(tc.security),
           auth: false
         }
 
       _ ->
-        %{signing_secret: false, auth: false}
+        %{signing: false, auth: false}
     end
   end
+
+  defp signing_secret?(%Ash.Union{type: type, value: v}) when type in [:stripe, :custom],
+    do: v.encrypted_secret != nil
+
+  defp signing_secret?(_), do: false
 
   defp http_auth_secret?(%{type: :bearer_token, value: v}), do: v.encrypted_token != nil
   defp http_auth_secret?(%{type: :api_key, value: v}), do: v.encrypted_value != nil

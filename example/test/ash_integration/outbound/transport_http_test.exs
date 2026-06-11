@@ -150,6 +150,45 @@ defmodule Example.Outbound.TransportHttpTest do
     assert v1 == expected
   end
 
+  test "custom signing scheme: decrypts the secret and signs the canonical request via Lua" do
+    stub_webhook_capture(self())
+
+    source = ~S"""
+    function string_to_sign(ctx)
+      return ctx.method .. "\n" .. ctx.path .. "\n" .. ctx.body
+    end
+
+    function headers(ctx)
+      return { ["x-signature"] = ctx.signature, ["x-signed-by"] = "custom" }
+    end
+    """
+
+    dest =
+      create_connection!(create_user!(),
+        signing: %{
+          type: "custom",
+          secret: "topsecret",
+          source: source,
+          algorithm: "sha256",
+          encoding: "hex"
+        }
+      )
+
+    create_event!(create_subscription!(dest), data: %{"a" => 1})
+
+    drain_delivery!()
+
+    assert_received {:webhook_request, req}
+    headers = Map.new(req.headers, fn {k, v} -> {k, v} end)
+
+    # The default subscription posts at the base_url path "/webhook" (see above).
+    sts = "POST\n/webhook\n" <> req.body
+    expected = :crypto.mac(:hmac, :sha256, "topsecret", sts) |> Base.encode16(case: :lower)
+
+    assert headers["x-signature"] == expected
+    assert headers["x-signed-by"] == "custom"
+  end
+
   test "auth is injected live at delivery from the encrypted connection (never in the descriptor)" do
     stub_webhook_capture(self())
 
@@ -280,9 +319,19 @@ defmodule Example.Outbound.TransportHttpTest do
         timeout_ms: 5000
       }
       |> then(fn tc ->
-        case opts[:signing_secret] do
-          nil -> tc
-          secret -> Map.put(tc, :signing_secret, secret)
+        cond do
+          opts[:signing] ->
+            Map.put(tc, :signing, opts[:signing])
+
+          opts[:signing_secret] ->
+            Map.put(tc, :signing, %{
+              type: "stripe",
+              secret: opts[:signing_secret],
+              header_name: "x-signature"
+            })
+
+          true ->
+            tc
         end
       end)
       |> then(fn tc ->

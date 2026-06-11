@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: configurable request signing.** The implicit "secret present ⇒ sign"
+  switch and the single hardcoded Stripe-style signer are replaced by an explicit
+  `signing` **union** on the transport config (`HttpConfig` and `KafkaConfig`
+  alike), mirroring the `auth` union — the variant *is* the choice
+  (see `design/configurable-signing.md`):
+  - **`none`** (default) — unsigned; carries no secret field, so "a secret with no
+    scheme" is unrepresentable.
+  - **`stripe`** — the previous scheme as a native built-in (`t=<ts>,v1=<hex>`
+    HMAC-SHA256 over `"<unix_seconds>.<body>"`), with a configurable `header_name`
+    defaulting to `stripe-signature` (lowercased on the wire).
+  - **`custom`** — a staged Lua signing behaviour (`content` / `string_to_sign` /
+    `headers` / `body` / `url` callbacks) for novel schemes; the library applies
+    the crypto between the pure callbacks, so the secret never enters the sandbox.
+    `algorithm` (`sha256`/`sha1`/`sha512`) and `encoding` (`hex`/`base64`/
+    `base64url`) are allowlisted config.
+  - The old `signing_secret` attribute is **gone** from both transport configs.
+    Existing connections load as `signing: none` (i.e. previously-signing
+    connections become unsigned) — re-create the scheme as
+    `signing: %{type: "stripe", secret: …, header_name: "x-signature"}` (HTTP) or
+    `header_name: "signature"` (Kafka) to keep the previous wire contract, or
+    accept the new `stripe-signature` default.
+  - Script-built signing headers and URLs pass the same trust-boundary guards as
+    transform output (string/number/boolean header values only; control characters
+    rejected); a `url` placement callback on the Kafka transport is rejected as a
+    config error rather than silently ignored.
+
+### Removed
+
+- The `[:ash_integration, :signing, :blank_secret]` telemetry event. A blank
+  secret is now rejected at save by the `stripe`/`custom` variants (and `none`
+  carries no secret), so the "delivery went out unsigned because the secret was
+  blank" condition no longer exists.
+
 ### Added
 
 - Telemetry for three outbound state changes that were previously uninstrumented,

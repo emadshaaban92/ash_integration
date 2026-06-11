@@ -31,7 +31,6 @@ defmodule AshIntegration.Telemetry do
       `auto_suspension_threshold`.
     * `[:ash_integration, :connection, :unsuspended]` /
       `[:ash_integration, :subscription, :resumed]` — the inverse `unsuspend` action.
-    * `[:ash_integration, :signing, :blank_secret]` — a delivery went out unsigned.
   """
 
   @events [
@@ -45,8 +44,7 @@ defmodule AshIntegration.Telemetry do
     [:ash_integration, :connection, :suspended],
     [:ash_integration, :subscription, :suspended],
     [:ash_integration, :connection, :unsuspended],
-    [:ash_integration, :subscription, :resumed],
-    [:ash_integration, :signing, :blank_secret]
+    [:ash_integration, :subscription, :resumed]
   ]
 
   @doc """

@@ -162,6 +162,124 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     end
   end
 
+  @impl true
+  def sign_session(source, %Limits{} = _limits, _orchestrate)
+      when byte_size(source) > @max_script_size do
+    {:error, "script exceeds maximum size of #{@max_script_size} bytes"}
+  end
+
+  def sign_session(source, %Limits{} = limits, orchestrate) when is_function(orchestrate, 1) do
+    task =
+      Task.Supervisor.async_nolink(AshIntegration.TaskSupervisor, fn ->
+        Process.flag(:max_heap_size, %{
+          size: limits.max_memory_words,
+          kill: true,
+          error_logger: false
+        })
+
+        run_session(source, limits, orchestrate)
+      end)
+
+    # ONE wall-clock backstop for the whole signing pipeline (all callbacks share
+    # it), so a pathological source can't multiply latency by the number of
+    # callbacks the way per-call Tasks would.
+    case Task.yield(task, limits.timeout_ms + 1_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      {:exit, _reason} -> {:error, "signing sandbox crashed or was killed"}
+      nil -> {:error, "signing callbacks timed out after #{limits.timeout_ms}ms"}
+    end
+  end
+
+  # The signing callbacks the runtime knows about, in no particular order.
+  @signing_callbacks ~w(content string_to_sign headers body url)
+
+  # Appended to the author's source: record which signing callbacks are functions
+  # so the orchestrator can skip the undefined ones with no further sandbox run.
+  @detect_callbacks "\n__sign_defined = {" <>
+                      Enum.map_join(@signing_callbacks, ", ", fn name ->
+                        "#{name} = type(#{name}) == \"function\""
+                      end) <> "}\n"
+
+  # Compile the author source ONCE (defining its signing callbacks) and detect
+  # which are present in the same run; then hand the orchestrator a `call/2` that
+  # invokes a single callback on that ALREADY-COMPILED state — no source re-parse,
+  # all under the one Task + one budget above. The orchestrator (the caller's
+  # Elixir pipeline) performs the keyed MAC between calls; the secret is never set
+  # into the sandbox state.
+  defp run_session(source, %Limits{} = limits, orchestrate) do
+    flags = sandbox_flags(limits)
+
+    case :luerl_sandbox.run(source <> @detect_callbacks, flags, Lua.new().state) do
+      {:ok, _results, state} ->
+        defined = read_defined(state)
+        orchestrate.(fn fname, ctx -> sign_call_on(state, flags, defined, fname, ctx) end)
+
+      other ->
+        {:error, classify_sandbox_error(other)}
+    end
+  rescue
+    e in [Lua.RuntimeException, Lua.CompilerException] ->
+      {:error, Exception.message(e)}
+  end
+
+  # Invoke one already-compiled callback on the shared state. An undefined callback
+  # short-circuits to `:undefined` with no sandbox run at all.
+  defp sign_call_on(state, flags, defined, fname, ctx) do
+    if MapSet.member?(defined, fname) do
+      lua = set_global(%Lua{state: state}, :__ctx, ctx)
+
+      case :luerl_sandbox.run("__sign_result = #{fname}(__ctx)", flags, lua.state) do
+        {:ok, _results, state} ->
+          {:ok, {:defined, decode_result(Lua.get!(%Lua{state: state}, [:__sign_result]))}}
+
+        other ->
+          {:error, classify_sandbox_error(other)}
+      end
+    else
+      {:ok, :undefined}
+    end
+  rescue
+    e in [Lua.RuntimeException, Lua.CompilerException] ->
+      {:error, Exception.message(e)}
+  end
+
+  defp read_defined(state) do
+    case Lua.get!(%Lua{state: state}, [:__sign_defined]) do
+      table when is_list(table) ->
+        for {k, true} <- table, into: MapSet.new(), do: to_string(k)
+
+      _ ->
+        MapSet.new()
+    end
+  end
+
+  defp sandbox_flags(%Limits{} = limits) do
+    %{
+      max_reductions: limits.max_steps,
+      max_time: limits.timeout_ms,
+      spawn_opts: [
+        {:max_heap_size, %{size: limits.max_memory_words, kill: true, error_logger: false}}
+      ]
+    }
+  end
+
+  defp classify_sandbox_error({:lua_error, _reason, _state} = error),
+    do: Exception.message(Lua.RuntimeException.exception(error))
+
+  defp classify_sandbox_error({:error, errors, _state}) when is_list(errors),
+    do: Exception.message(Lua.CompilerException.exception(errors))
+
+  defp classify_sandbox_error({:error, {:reductions, count}}),
+    do: "signing callback exceeded the reduction budget (killed after #{count} reductions)"
+
+  defp classify_sandbox_error({:error, :timeout}),
+    do: "signing callback timed out or exceeded its memory budget"
+
+  defp classify_sandbox_error({:error, reason}),
+    do: "signing callback error: #{inspect(reason)}"
+
+  defp classify_sandbox_error(other), do: "signing callback error: #{inspect(other)}"
+
   # Runs inside the async_nolink task. The actual Lua evaluation happens in a
   # FURTHER luerl-spawned runner (carrying the reduction + heap limits); this
   # function only builds the pre-seeded state and classifies the outcome.

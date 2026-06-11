@@ -74,6 +74,31 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime do
   """
   @callback execute(source(), event :: data(), defaults :: data() | nil, limits()) :: result()
 
+  @typedoc """
+  The outcome of invoking a single signing callback:
+
+    * `{:ok, {:defined, value}}` — the callback exists; `value` is its decoded return
+    * `{:ok, :undefined}` — the source exposes no such callback (use the library default)
+    * `{:error, reason}` — the callback raised, hit a limit, or the source failed
+  """
+  @type sign_result :: {:ok, {:defined, term()} | :undefined} | {:error, String.t()}
+
+  @typedoc """
+  A `call/2` the runtime hands the orchestrator: invoke the signing callback named
+  `fname` against `ctx` on the already-compiled source. See `t:sign_result/0`.
+  """
+  @type sign_call :: (fname :: String.t(), ctx :: data() -> sign_result())
+
+  @doc """
+  Run a signing session: compile `source` ONCE, then invoke `orchestrate` with a
+  `t:sign_call/0` that calls individual callbacks on that compiled state (no
+  re-parse), all under a single resource budget. The orchestrator performs the
+  keyed MAC between calls; the secret is never passed into the sandbox. Returns
+  whatever `orchestrate` returns, or a classified `{:error, reason}` if the source
+  fails to compile or the session crashes/times out.
+  """
+  @callback sign_session(source(), limits(), orchestrate :: (sign_call() -> term())) :: term()
+
   @doc "This runtime's config-driven default limits."
   @callback default_limits() :: limits()
 
@@ -124,6 +149,16 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime do
   def execute(runtime, source, event, defaults) do
     impl = impl!(runtime)
     impl.execute(source, event, defaults, impl.default_limits())
+  end
+
+  @doc """
+  Run a signing session on `runtime`, using that runtime's default limits.
+  Dispatches to the runtime's `c:sign_session/3`. See `t:sign_call/0`.
+  """
+  @spec sign_session(atom(), source(), (sign_call() -> term())) :: term()
+  def sign_session(runtime, source, orchestrate) do
+    impl = impl!(runtime)
+    impl.sign_session(source, impl.default_limits(), orchestrate)
   end
 
   @doc "Validate `source` for `runtime` at save time, if the runtime supports it."
