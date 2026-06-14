@@ -157,12 +157,24 @@ naive shape of this query is the thing to avoid. The recompute is **not** a scan
 of the whole `Log` and **not** a `GROUP BY connection_id` over all history —
 either of those is `O(table size)` and degrades as the `Log` grows. It is a
 **top-N-per-group** read: *for each connection being evaluated, seek to its most
-recent `N` transport rows and stop.* With a supporting index this is
+recent `N` transport-relevant outcomes and stop.* With a supporting index this is
 `O(connections_evaluated × N)` index reads — **independent of how big the `Log`
 is** (a 100M-row `Log` costs the same per pass as a 1M-row one, because you never
 read past the `N`th row of any connection).
 
-Three things make this hold:
+**What "transport-relevant" means for the window — and why successes can't be
+excluded.** A connection's transport window is its **successes ∪ transport
+failures**; **response** rejections (4xx/5xx — the target answered) are *not*
+transport outcomes and are excluded (they drive the *subscription* scope, §10). A
+success has no `failure_class` (it's not a failure), but it is the very thing that
+*clears* the breaker — "no success among the last `N`" can only become false if
+successes are *in* the window. So the window predicate is
+`status = 'success' OR failure_class = 'transport'`, **not** `failure_class =
+'transport'` alone — the latter would exclude every success and freeze a tripped
+connection suspended forever. (A delivery success proves both transport *and*
+response health, so one success row legitimately counts in both scopes' windows.)
+
+Three things make the cost bound hold:
 
 - **A supporting index is required — and the existing ones do not serve it.**
   The `Log` today is indexed on `(connection_id)`, `(created_at)`, and
@@ -172,26 +184,27 @@ Three things make this hold:
   pure time order you would have to scan **all** of its rows across every
   `event_key` and re-sort (the full-history sort, on exactly the high-volume
   connections we care about). The recompute needs a partial, connection-scoped,
-  time-ordered index, e.g.
+  time-ordered index over the transport-relevant slice:
 
   ```sql
-  CREATE INDEX ... ON <log> (connection_id, created_at DESC) WHERE failure_class = 'transport';
+  CREATE INDEX ... ON <log> (connection_id, created_at DESC)
+    WHERE status = 'success' OR failure_class = 'transport';
   ```
 
   This index is a cost of **derived suspension itself** (slice 1/2 of §13), owed
-  regardless of any other decision in this doc. The signal can be reduced to
-  *two* index seeks per connection rather than fetching `N` rows — most-recent
-  success time (a success-only partial index) vs. the `N`th-most-recent attempt
-  time — but that is an optimization detail; the load-bearing point is that the
-  cost is `groups × N` seeks, not table size.
+  regardless of any other decision in this doc. The signal can alternatively be
+  reduced to *two* seeks per connection rather than fetching `N` rows — the
+  most-recent success time (a `WHERE status = 'success'` partial) vs. the count of
+  transport failures since it (a `WHERE failure_class = 'transport'` partial);
+  suspended iff that count `≥ N` — but that is an optimization detail; the
+  load-bearing point is that the cost is `groups × N` seeks, not table size.
 
 - **Only recently-active connections are evaluated.** The set per tick is
-  (currently `suspended`) ∪ (a connection with a transport `Log` row since the
-  last recompute). The first is bounded by the suspended set; the second is one
-  time-ordered scan of the recent `Log` tail (the `(created_at)` index, or a
-  `WHERE failure_class = 'transport'` partial) to collect the touched
-  `connection_id`s. So `groups` is bounded by *recent activity*, never the
-  catalog size.
+  (currently `suspended`) ∪ (a connection with a transport-relevant `Log` row
+  since the last recompute). The first is bounded by the suspended set; the second
+  is one time-ordered scan of the recent `Log` tail (the `(created_at)` index, or
+  the partial above) to collect the touched `connection_id`s. So `groups` is
+  bounded by *recent activity*, never the catalog size.
 
 - **The `Log` is retention-bounded.** `Outbound.Retention` already trims `Log`
   rows older than its (shorter) `delivery_days` window, oldest-first, so the
@@ -263,9 +276,10 @@ infrequent tick** (kept out of the hot scheduler so that query stays a one-line
   connection has no other transport traffic — so the `Log` already records when
   we last probed it; no `last_probed_at` column and no in-memory cursor are
   needed. This timestamp is a **byproduct of the §5 recompute**, which already
-  reads each connection's most recent transport rows over the very index that
-  scan requires (`(connection_id, created_at DESC) WHERE failure_class =
-  'transport'`); the probe order falls out of the same read at no extra cost. A
+  reads each connection's most recent transport-relevant rows over the very index
+  that scan requires (`(connection_id, created_at DESC) WHERE status = 'success'
+  OR failure_class = 'transport'`); the probe order falls out of the same read at
+  no extra cost. A
   persisted `last_probed_at` was considered and rejected: it would not avoid the
   recompute's `Log` read (unavoidable for the signal itself), so it buys nothing
   on reads while adding a write and a column — strictly the worse trade.
@@ -461,13 +475,19 @@ in-flight. These two intervals are **tuning constraints derived from
 
 **Implementation slices.**
 
-1. **`Log` discriminator + index** — add/confirm `failure_class` on the delivery
-   `Log` so the recompute can scope transport vs response outcomes, **and add the
-   supporting index** `(connection_id, created_at DESC) WHERE failure_class =
+1. **`Log` discriminator + index** — **persist `failure_class` on the delivery
+   `Log`** (it is already computed at failure time as
+   `delivery_metadata["failure_class"]` and read by `OnDeliveryFailure.classify/1`,
+   but `create_delivery_log/3` currently discards it), so the recompute can scope
+   transport vs response outcomes, **and add the supporting index**
+   `(connection_id, created_at DESC) WHERE status = 'success' OR failure_class =
    'transport'` (§5) so the top-N-per-connection read stays `O(groups × N)` as the
    `Log` grows. The existing `(connection_id, event_key, created_at)` index does
    **not** serve this. *Verify:* `EXPLAIN` shows an index scan, not a per-connection
-   sort, for "last `N` transport rows for connection C."
+   sort, for "last `N` transport-relevant rows for connection C." **This slice is
+   safe to land ahead of everything else** — it is purely additive (a nullable
+   column + an index, no behavior change) and starts accumulating the classified
+   history the later slices read, shortening their cold-start.
 2. **Derived recompute** — the periodic health pass computing connection
    `suspended` from the `Log`, transition-only filtered writes, transition
    telemetry; remove `consecutive_failures` and its `inc`/reset. Default it to run
