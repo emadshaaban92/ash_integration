@@ -151,6 +151,57 @@ explicit column.) Successful deliveries log `status: :success`; failures log
 transition) rather than source-of-truth-by-accumulation. `suspended_at` becomes
 "when the recompute last flipped it on," useful for the dashboard.
 
+**Query cost & indexing (the `Log` can get large).** The recompute reads from
+the delivery `Log`, which is the highest-volume table in the system, so the
+naive shape of this query is the thing to avoid. The recompute is **not** a scan
+of the whole `Log` and **not** a `GROUP BY connection_id` over all history —
+either of those is `O(table size)` and degrades as the `Log` grows. It is a
+**top-N-per-group** read: *for each connection being evaluated, seek to its most
+recent `N` transport rows and stop.* With a supporting index this is
+`O(connections_evaluated × N)` index reads — **independent of how big the `Log`
+is** (a 100M-row `Log` costs the same per pass as a 1M-row one, because you never
+read past the `N`th row of any connection).
+
+Three things make this hold:
+
+- **A supporting index is required — and the existing ones do not serve it.**
+  The `Log` today is indexed on `(connection_id)`, `(created_at)`, and
+  `(connection_id, event_key, created_at)`. The composite looks usable but is
+  not: `event_key` sits **between** `connection_id` and `created_at`, so it
+  orders a connection's rows by key *then* time — to read a connection's rows in
+  pure time order you would have to scan **all** of its rows across every
+  `event_key` and re-sort (the full-history sort, on exactly the high-volume
+  connections we care about). The recompute needs a partial, connection-scoped,
+  time-ordered index, e.g.
+
+  ```sql
+  CREATE INDEX ... ON <log> (connection_id, created_at DESC) WHERE failure_class = 'transport';
+  ```
+
+  This index is a cost of **derived suspension itself** (slice 1/2 of §13), owed
+  regardless of any other decision in this doc. The signal can be reduced to
+  *two* index seeks per connection rather than fetching `N` rows — most-recent
+  success time (a success-only partial index) vs. the `N`th-most-recent attempt
+  time — but that is an optimization detail; the load-bearing point is that the
+  cost is `groups × N` seeks, not table size.
+
+- **Only recently-active connections are evaluated.** The set per tick is
+  (currently `suspended`) ∪ (a connection with a transport `Log` row since the
+  last recompute). The first is bounded by the suspended set; the second is one
+  time-ordered scan of the recent `Log` tail (the `(created_at)` index, or a
+  `WHERE failure_class = 'transport'` partial) to collect the touched
+  `connection_id`s. So `groups` is bounded by *recent activity*, never the
+  catalog size.
+
+- **The `Log` is retention-bounded.** `Outbound.Retention` already trims `Log`
+  rows older than its (shorter) `delivery_days` window, oldest-first, so the
+  table has a ceiling set by the retention policy rather than growing without
+  bound.
+
+Net: the recompute is cheap *given the index*, runs every ~60s off the hot path,
+and its cost is set by recent activity, not by `Log` size. The index is the one
+real engineering task, and it is owed by §5 anyway.
+
 ## 6. Park on the suspend transition
 
 When the recompute flips a connection to `suspended`, immediately stop the relay
@@ -200,12 +251,27 @@ infrequent tick** (kept out of the hot scheduler so that query stays a one-line
 `suspended = false` exclusion):
 
 - Each probe tick, pick **at most `M` suspended connections, round-robin**
-  (oldest-probed-first, tracked in the pass's state) — *not* random (random has a
-  starvation tail that delays noticing a recovered connection far beyond `M`
-  passes) and *not* the whole set (a broad outage suspending 500 connections
-  would dump 500 oldest rows into 25 slots and hang them on timeouts). `M` is a
-  small knob, `≪ 25`, so probes never dominate the pool; it trades probe pressure
-  against mass-recovery latency.
+  (oldest-probed-first) — *not* random (random has a starvation tail that delays
+  noticing a recovered connection far beyond `M` passes) and *not* the whole set
+  (a broad outage suspending 500 connections would dump 500 oldest rows into 25
+  slots and hang them on timeouts). `M` is a small knob, `≪ 25`, so probes never
+  dominate the pool; it trades probe pressure against mass-recovery latency.
+- **The round-robin cursor is derived from the `Log`, not held in process
+  state.** "Oldest-probed-first" = order the suspended set by *the timestamp of
+  each connection's most recent transport `Log` row*, ascending. For a suspended
+  connection that row **is** its last probe — park (§6) guarantees a suspended
+  connection has no other transport traffic — so the `Log` already records when
+  we last probed it; no `last_probed_at` column and no in-memory cursor are
+  needed. This timestamp is a **byproduct of the §5 recompute**, which already
+  reads each connection's most recent transport rows over the very index that
+  scan requires (`(connection_id, created_at DESC) WHERE failure_class =
+  'transport'`); the probe order falls out of the same read at no extra cost. A
+  persisted `last_probed_at` was considered and rejected: it would not avoid the
+  recompute's `Log` read (unavoidable for the signal itself), so it buys nothing
+  on reads while adding a write and a column — strictly the worse trade.
+  Deriving the cursor from the `Log` also makes round-robin fairness **exact
+  across any number of nodes** (every runner reads the same authoritative
+  timestamps), which removes the only reason §9 had to prefer a singleton.
 - For each picked connection, ensure it has **exactly one live (non-poison)
   `:scheduled` probe**: promote one `pending` head (its oldest) if it has none.
   That single row is then claimed and sent by the **normal relay** — no special
@@ -241,50 +307,85 @@ recompute will re-set it if the connection is still failing), but it is no longe
 
 ## 9. Cross-node behavior
 
-**Intended topology: a single scheduler in the cluster.** The scheduler — and
-the health recompute and probe pass that ride with it — should run as a
-**cluster singleton** (one elected process, e.g. a globally-registered name or a
-distributed registry), not one-per-node. A singleton is the efficient choice:
-one `Log` scan per recompute instead of one per node, and a single authoritative
-round-robin cursor so probe fairness is exact rather than `N_nodes`
-independently-fair views. (Today the scheduler registers under a local
-`name: __MODULE__` — i.e. it is *already* one-per-node — so adopting the
-singleton is a change, not a given.)
+**This is a library, so it must be cluster-*friendly* without assuming a
+cluster.** It ships as a dependency of a host app whose topology we don't
+control — one node or fifty, BEAM-distributed or just several independent nodes
+sharing the one Postgres. We cannot impose an election mechanism (`:global`,
+Horde, `libcluster`) on the host, and nothing here may *depend* on one for
+correctness. The only coordination primitive we can assume is the one the
+library already requires: **the database.**
 
-**But correctness must never depend on the singleton.** Elections are not
-instantaneous and partitions happen: during failover overlap, a deploy
-rollover, or a genuine **split brain**, two or more schedulers *will*
-occasionally run at once. The design is therefore built so that `K` concurrent
-schedulers are **correct, only redundant** — the singleton buys efficiency, not
-safety. Every shared-state mutation in this design is already concurrency-safe by
-construction:
+**Two jobs, two coordination needs.** The scheduler today does one thing —
+**promotion** (`pending → scheduled`) — and this design adds two more — the
+**health recompute** (§5) and the **probe pass** (§7). They are not the same kind
+of work and should not be forced to share a placement decision:
 
-- **Recompute transition writes are idempotent.** Each scheduler computes the
-  same set from the same `Log` and issues the same *filtered* update
+| Job | Latency | Coordination need | Placement |
+|-----|---------|-------------------|-----------|
+| **Promotion** | latency-sensitive — poked by deliveries finishing via a local `GenServer.cast` (`Scheduler.notify/0`) | none; idempotent via the partial unique index `(connection_id, event_key) WHERE state = 'scheduled'` | **per-node**, unchanged |
+| **Recompute + probe** | periodic (~60s / ~30s), *not* latency-sensitive | idempotent via filtered transition writes + `SKIP LOCKED` | per-node *or* an optional single-runner |
+
+**Promotion stays per-node — do not singleton it.** It is correct under `K`
+concurrent runners by construction (the unique index makes double-scheduling
+impossible — see the scheduler moduledoc), and being per-node is a *feature*:
+each node self-pokes via a **local** cast with no network hop and no dependency
+on a remote process being up. Making promotion a singleton would actively
+regress two things: (1) `Scheduler.notify/0` is a cast to the **locally**
+registered `name: __MODULE__`, so on every non-leader node it would resolve to an
+unregistered name and be **silently dropped** — those nodes would lose
+low-latency scheduling and fall back to the 10s idle sweep unless `notify` is
+also rewritten into a distributed send; and (2) it introduces a *zero-runner*
+gap during elections/failover that the per-node design simply does not have.
+
+**Recompute + probe are the only candidates for a single runner — and even
+there it is an optional optimization, not a correctness requirement.** Because
+the cursor is derived from the `Log` (§7), `K` concurrent recompute/probe passes
+are **correct, only redundant**; every shared-state mutation is already
+concurrency-safe:
+
+- **Recompute transition writes are idempotent.** Each runner computes the same
+  set from the same `Log` and issues the same *filtered* update
   (`suspend WHERE suspended == false`, `unsuspend WHERE suspended == true`). The
   filter makes the second writer's update match zero rows — a clean no-op — so
   the worst case is a redundant scan, never a double-flip or a lost transition.
   (Same guard `OnDeliveryFailure.maybe_suspend/6` already relies on.)
-- **Probe claims dedup via `SKIP LOCKED`.** Two schedulers picking the same
+- **Probe claims dedup via `SKIP LOCKED`.** Two runners picking the same
   suspended connection race on the same `:scheduled` probe row; `SKIP LOCKED`
   hands it to exactly one. The connection gets one or two probes that tick
-  instead of one — bounded, harmless. Aggregate probe load under `K` schedulers
-  is `≤ K × M` deliveries/tick for the duration of the overlap, still small and
-  self-correcting once the cluster heals to a single runner.
+  instead of one — bounded, harmless. Aggregate probe load under `K` runners is
+  `≤ K × M` deliveries/tick, still small and self-correcting.
+- **The probe cursor is shared, not per-process.** Because round-robin order is
+  derived from each connection's most recent transport `Log` row (§7), every
+  runner reads the *same* authoritative ordering — fairness is exact across any
+  node count, with no in-memory cursor to diverge.
 - **Park reverts are idempotent and fence-safe.** The un-leased-rows revert (§6)
-  is a filtered UPDATE; a second scheduler running it finds the rows already
-  `pending` and matches nothing. Live-leased rows are excluded by the lease
-  predicate regardless of which scheduler runs it, and the fenced-finalize
-  argument (§6) holds independent of how many schedulers exist.
+  is a filtered UPDATE; a second runner finds the rows already `pending` and
+  matches nothing. Live-leased rows are excluded by the lease predicate
+  regardless of which runner runs it, and the fenced-finalize argument (§6)
+  holds independent of how many runners exist.
 - **`suspended` is a DB column,** so the suspended state itself is shared — every
-  scheduler's `d.suspended = false` filter sees transitions from whichever runner
-  wrote them, whether that's the elected singleton or a split-brain twin.
+  scheduler's `d.suspended = false` promotion filter sees transitions from
+  whichever runner wrote them.
 
-Net: run it as a singleton for efficiency; rely on idempotent filtered writes,
-`SKIP LOCKED`, and fencing — not on the singleton — for correctness. The only
-casualties of a split brain are a duplicated `Log` scan and a transiently larger
-(but still `M`-bounded-per-runner) probe load, both of which vanish when the
-election settles.
+So the only cost of running the recompute/probe on every node is a duplicated
+`Log` scan every ~60s (cheap — §5) and a `≤ K × M` probe load. **The default is
+therefore per-node**: simplest, zero coordination, correct on one node or fifty.
+
+**If duplicate scans ever measurably bite, the cluster-friendly way to make it a
+single runner is a Postgres advisory lock** (`pg_try_advisory_lock`, or a
+`FOR UPDATE SKIP LOCKED` "leader row") — one node grabs it and runs the periodic
+tick, the rest stand by and retry. This assumes only Postgres (which the library
+already requires), works whether or not the host runs BEAM distribution, and
+auto-releases on connection drop. It is strictly preferable here to `:global` /
+Horde, which would force a clustering assumption onto the host. And because the
+lock-holder can still overlap briefly with a previous holder on failover, the
+idempotency above is still what carries correctness — the lock only suppresses
+the redundant scan, it does not let us delete any of the safety machinery.
+
+Net: **promotion per-node always; recompute/probe per-node by default; a
+Postgres advisory lock as an optional single-runner optimization, never a
+correctness dependency.** Correctness rests on idempotent filtered writes,
+`SKIP LOCKED`, fencing, and the `Log`-derived cursor — not on any election.
 
 ## 10. Subscription-scope reuse
 
@@ -360,13 +461,19 @@ in-flight. These two intervals are **tuning constraints derived from
 
 **Implementation slices.**
 
-1. **`Log` discriminator** — add/confirm `failure_class` on the delivery `Log`
-   so the recompute can scope transport vs response outcomes.
+1. **`Log` discriminator + index** — add/confirm `failure_class` on the delivery
+   `Log` so the recompute can scope transport vs response outcomes, **and add the
+   supporting index** `(connection_id, created_at DESC) WHERE failure_class =
+   'transport'` (§5) so the top-N-per-connection read stays `O(groups × N)` as the
+   `Log` grows. The existing `(connection_id, event_key, created_at)` index does
+   **not** serve this. *Verify:* `EXPLAIN` shows an index scan, not a per-connection
+   sort, for "last `N` transport rows for connection C."
 2. **Derived recompute** — the periodic health pass computing connection
    `suspended` from the `Log`, transition-only filtered writes, transition
-   telemetry; remove `consecutive_failures` and its `inc`/reset. *Verify:* a
-   connection trips after `N` transport failures and clears after a logged
-   success, with no per-failure write.
+   telemetry; remove `consecutive_failures` and its `inc`/reset. Default it to run
+   **per-node** (correct & redundant — §9). *Verify:* a connection trips after `N`
+   transport failures and clears after a logged success, with no per-failure
+   write.
 3. **Park-on-suspend** — the filtered revert in the suspend transition. *Verify:*
    on suspend, un-leased `:scheduled` rows return to `pending`, live-leased rows
    drain, slots free.
@@ -387,10 +494,12 @@ in-flight. These two intervals are **tuning constraints derived from
 - **Dedicated probe capacity.** Probes currently share the 25-slot pool (bounded
   by `M`). If probe-vs-healthy contention ever bites under a very small pool, a
   tiny reserved probe concurrency lane is the upgrade path. Deferred.
-- **Scheduler/recompute placement — decided (§9): cluster singleton.** The
-  scheduler, recompute, and probe pass run as one elected process for efficiency,
-  with correctness held by idempotent filtered writes + `SKIP LOCKED` + fencing
-  so split brain is correct-but-redundant rather than a fork. Open sub-question:
-  *which* election mechanism (globally-registered name vs. a distributed registry
-  like Horde/`:global`) and its failover characteristics — an ops choice the
-  correctness argument deliberately does not hinge on.
+- **Scheduler/recompute placement — decided (§9): per-node by default; promotion
+  always per-node.** Promotion keeps its local-cast, per-node design. The
+  recompute and probe run per-node too (correct-but-redundant via idempotent
+  filtered writes + `SKIP LOCKED` + the `Log`-derived cursor), with a **Postgres
+  advisory lock** held in reserve as an optional single-runner optimization if
+  duplicate `Log` scans ever measurably bite. `:global`/Horde are explicitly off
+  the table — a library must not impose a clustering mechanism on its host. Open
+  sub-question: at what cluster size / `Log` volume the advisory-lock optimization
+  is worth turning on — a measurement to take later, not a design fork now.
