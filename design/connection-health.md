@@ -141,7 +141,9 @@ rejections and from successes. The failure log already records
 explicit `failure_class` column on the `Log` (`:transport` / `:response`),
 written from the same classification `OnDeliveryFailure` already computes.
 (Inferring "transport = no `response_status`" works but is fragile; prefer the
-explicit column.) Successful deliveries log `status: :delivered`.
+explicit column.) Successful deliveries log `status: :success`; failures log
+`status: :failed` — so a "no success in the last `N`" recompute keys off
+`status: :success` being absent from the scope's most recent `N` rows.
 
 **`consecutive_failures` is removed** from both `Connection` and `Subscription`
 (attribute, the `inc`, the `record_success` reset). `suspended` /
@@ -209,8 +211,8 @@ infrequent tick** (kept out of the hot scheduler so that query stays a one-line
   That single row is then claimed and sent by the **normal relay** — no special
   claim path, because after the park (§6) the connection has no *other*
   `:scheduled` rows competing.
-- A probe **success** writes a `delivered` `Log` row; the next recompute (§5)
-  sees a success in the last `N` and **unsuspends** the connection, after which
+- A probe **success** writes a `status: :success` `Log` row; the next recompute
+  (§5) sees a success in the last `N` and **unsuspends** the connection, after which
   the scheduler resumes normal promotion in order. A probe **failure** backs off
   (its `next_attempt_at`) and the connection stays suspended; the row self-paces
   as the probe until it succeeds or poisons.
@@ -239,24 +241,56 @@ recompute will re-set it if the connection is still failing), but it is no longe
 
 ## 9. Cross-node behavior
 
-No leader election (consistent with the rest of the system):
+**Intended topology: a single scheduler in the cluster.** The scheduler — and
+the health recompute and probe pass that ride with it — should run as a
+**cluster singleton** (one elected process, e.g. a globally-registered name or a
+distributed registry), not one-per-node. A singleton is the efficient choice:
+one `Log` scan per recompute instead of one per node, and a single authoritative
+round-robin cursor so probe fairness is exact rather than `N_nodes`
+independently-fair views. (Today the scheduler registers under a local
+`name: __MODULE__` — i.e. it is *already* one-per-node — so adopting the
+singleton is a change, not a given.)
 
-- The **recompute** may run on every node; each computes the same set from the
-  same `Log` and issues the same *filtered* transition writes — redundant but
-  idempotent. (A single elected runner is a valid later optimization if the
-  redundant scan cost ever matters.)
-- The **probe pass** runs per node with its own round-robin cursor; if two nodes
-  probe the same connection, `SKIP LOCKED` on the claim dedups and the connection
-  merely gets one or two probes — harmless.
-- `suspended` is a DB column, so the **suspended state itself is shared** — the
-  scheduler's `d.suspended = false` filter sees transitions from whichever node
-  wrote them.
+**But correctness must never depend on the singleton.** Elections are not
+instantaneous and partitions happen: during failover overlap, a deploy
+rollover, or a genuine **split brain**, two or more schedulers *will*
+occasionally run at once. The design is therefore built so that `K` concurrent
+schedulers are **correct, only redundant** — the singleton buys efficiency, not
+safety. Every shared-state mutation in this design is already concurrency-safe by
+construction:
+
+- **Recompute transition writes are idempotent.** Each scheduler computes the
+  same set from the same `Log` and issues the same *filtered* update
+  (`suspend WHERE suspended == false`, `unsuspend WHERE suspended == true`). The
+  filter makes the second writer's update match zero rows — a clean no-op — so
+  the worst case is a redundant scan, never a double-flip or a lost transition.
+  (Same guard `OnDeliveryFailure.maybe_suspend/6` already relies on.)
+- **Probe claims dedup via `SKIP LOCKED`.** Two schedulers picking the same
+  suspended connection race on the same `:scheduled` probe row; `SKIP LOCKED`
+  hands it to exactly one. The connection gets one or two probes that tick
+  instead of one — bounded, harmless. Aggregate probe load under `K` schedulers
+  is `≤ K × M` deliveries/tick for the duration of the overlap, still small and
+  self-correcting once the cluster heals to a single runner.
+- **Park reverts are idempotent and fence-safe.** The un-leased-rows revert (§6)
+  is a filtered UPDATE; a second scheduler running it finds the rows already
+  `pending` and matches nothing. Live-leased rows are excluded by the lease
+  predicate regardless of which scheduler runs it, and the fenced-finalize
+  argument (§6) holds independent of how many schedulers exist.
+- **`suspended` is a DB column,** so the suspended state itself is shared — every
+  scheduler's `d.suspended = false` filter sees transitions from whichever runner
+  wrote them, whether that's the elected singleton or a split-brain twin.
+
+Net: run it as a singleton for efficiency; rely on idempotent filtered writes,
+`SKIP LOCKED`, and fencing — not on the singleton — for correctness. The only
+casualties of a split brain are a duplicated `Log` scan and a transiently larger
+(but still `M`-bounded-per-runner) probe load, both of which vanish when the
+election settles.
 
 ## 10. Subscription-scope reuse
 
 The subscription scope (response rejections) is the **same mechanism** over a
-different `Log` slice: "no `delivered` outcome among this subscription's last `N`
-response-class outcomes → `subscription.suspended = true`." Park applies per
+different `Log` slice: "no `status: :success` outcome among this subscription's
+last `N` response-class outcomes → `subscription.suspended = true`." Park applies per
 subscription (revert that subscription's un-leased `:scheduled` rows); the probe
 pass picks suspended *subscriptions* the same way. One health-recompute pass can
 produce both scopes' transition sets in one sweep. Whether to land both scopes
@@ -309,9 +343,20 @@ config :ash_integration,
   ]
 ```
 
-`recompute_interval_ms` must comfortably exceed typical delivery latency, or a
+`recompute_interval_ms` must comfortably exceed delivery latency, or a
 recovering connection's in-flight probe success won't have landed in the `Log`
-before the recompute re-evaluates and bounces it back into the set.
+before the recompute re-evaluates and bounces it back into the set. The relevant
+bound is not "typical" latency but the **worst-case probe duration**, which is
+the soft-lease window — `Delivery.Supervisor.lease_seconds/0 = http_max_timeout +
+30s` (§2). A probe that opens just before a slow endpoint's timeout can take the
+full lease to resolve; if `recompute_interval_ms` is shorter than that, the
+recompute can fire on a connection whose probe is still in flight and hold it
+suspended for another whole interval. So `recompute_interval_ms` should be sized
+against the deployment's actual `http_max_timeout` (a high max-timeout demands a
+longer recompute interval, not the 60s default), and `probe_interval_ms`
+similarly should not re-probe a connection whose previous probe is still
+in-flight. These two intervals are **tuning constraints derived from
+`http_max_timeout`**, not free-standing constants.
 
 **Implementation slices.**
 
@@ -342,5 +387,10 @@ before the recompute re-evaluates and bounces it back into the set.
 - **Dedicated probe capacity.** Probes currently share the 25-slot pool (bounded
   by `M`). If probe-vs-healthy contention ever bites under a very small pool, a
   tiny reserved probe concurrency lane is the upgrade path. Deferred.
-- **Recompute placement.** Per-node-idempotent vs. single-elected runner — start
-  per-node; revisit only if the redundant `Log` scan cost shows up.
+- **Scheduler/recompute placement — decided (§9): cluster singleton.** The
+  scheduler, recompute, and probe pass run as one elected process for efficiency,
+  with correctness held by idempotent filtered writes + `SKIP LOCKED` + fencing
+  so split brain is correct-but-redundant rather than a fork. Open sub-question:
+  *which* election mechanism (globally-registered name vs. a distributed registry
+  like Horde/`:global`) and its failover characteristics — an ops choice the
+  correctness argument deliberately does not hinge on.
