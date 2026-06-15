@@ -67,15 +67,19 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
      # MUST be in the index or the breaker could never clear. The partial predicate
      # IS the window (no post-scan filter); `INCLUDE (status)` lets the success check
      # stay index-only; the connection/subscription leading column serves each scope.
+     # Ordered by `id` (uuidv7), not `created_at`: it is this table's existing
+     # recency key (both read actions sort `id: :desc`), gives a unique total order
+     # (no same-µs tie ambiguity), and for the `Log` the row *is* the outcome so `id`
+     # is occurrence-ordered (unlike `EventDelivery`, whose `id` is dispatch-time).
      |> add_partial_index_if_not_exists(
        "outbound_logs_conn_transport_health_idx",
-       [:connection_id, :created_at],
+       [:connection_id, :id],
        "status = 'success' OR failure_class = 'transport'",
        ["status"]
      )
      |> add_partial_index_if_not_exists(
        "outbound_logs_sub_response_health_idx",
-       [:subscription_id, :created_at],
+       [:subscription_id, :id],
        "status = 'success' OR failure_class = 'response'",
        ["status"]
      )}
