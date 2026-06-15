@@ -31,6 +31,17 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
        public?: true,
        constraints: [one_of: [:success, :failed, :skipped, :suppressed]]
      )
+     # Failure-class discriminator (`:transport` couldn't reach the target /
+     # `:response` the target rejected). Nil on non-failures (success/skipped/
+     # suppressed). Persisted so the derived health recompute can scope a
+     # connection's transport window vs. a subscription's response window — see
+     # `design/connection-health.md` §5. It is already computed at failure time by
+     # `OnDeliveryFailure.classify/1`; this column just stops discarding it.
+     |> add_attribute_if_not_exists(:failure_class, :atom,
+       allow_nil?: true,
+       public?: true,
+       constraints: [one_of: [:transport, :response]]
+     )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_subscription_relationship_if_not_exists()
      |> add_connection_relationship_if_not_exists()
@@ -48,7 +59,26 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
      |> add_index_if_not_exists([:connection_id])
      |> add_index_if_not_exists([:event_delivery_id])
      |> add_index_if_not_exists([:created_at])
-     |> add_index_if_not_exists([:connection_id, :event_key, :created_at])}
+     |> add_index_if_not_exists([:connection_id, :event_key, :created_at])
+     # Derived-health windows (design/connection-health.md §5). Each scope's breaker
+     # reads "the most recent N transport-relevant outcomes for this {connection /
+     # subscription}, is any a success?" — the transport window is *successes ∪
+     # transport failures* (response rejections drive the other scope), so a success
+     # MUST be in the index or the breaker could never clear. The partial predicate
+     # IS the window (no post-scan filter); `INCLUDE (status)` lets the success check
+     # stay index-only; the connection/subscription leading column serves each scope.
+     |> add_partial_index_if_not_exists(
+       "outbound_logs_conn_transport_health_idx",
+       [:connection_id, :created_at],
+       "status = 'success' OR failure_class = 'transport'",
+       ["status"]
+     )
+     |> add_partial_index_if_not_exists(
+       "outbound_logs_sub_response_health_idx",
+       [:subscription_id, :created_at],
+       "status = 'success' OR failure_class = 'response'",
+       ["status"]
+     )}
   end
 
   # ── Attributes ──────────────────────────────────────────────────────────
@@ -203,6 +233,7 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
             :kafka_partition,
             :duration_ms,
             :status,
+            :failure_class,
             :subscription_id,
             :connection_id,
             :event_delivery_id
@@ -349,6 +380,30 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
       {:ok, index} =
         Transformer.build_entity(AshPostgres.DataLayer, [:postgres, :custom_indexes], :index,
           fields: fields
+        )
+
+      Transformer.add_entity(dsl_state, [:postgres, :custom_indexes], index, type: :append)
+    end
+  end
+
+  # A named partial index with an optional `INCLUDE` payload. Deduped by `name`
+  # (the partial `where` means two indexes can share `fields`, so name — not
+  # fields — is the identity here).
+  defp add_partial_index_if_not_exists(dsl_state, name, fields, where, include) do
+    existing =
+      dsl_state
+      |> Transformer.get_entities([:postgres, :custom_indexes])
+      |> Enum.find(&(&1.name == name))
+
+    if existing do
+      dsl_state
+    else
+      {:ok, index} =
+        Transformer.build_entity(AshPostgres.DataLayer, [:postgres, :custom_indexes], :index,
+          name: name,
+          fields: fields,
+          where: where,
+          include: include
         )
 
       Transformer.add_entity(dsl_state, [:postgres, :custom_indexes], index, type: :append)
