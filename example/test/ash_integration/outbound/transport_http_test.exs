@@ -231,6 +231,9 @@ defmodule Example.Outbound.TransportHttpTest do
 
     assert reload(s1).consecutive_failures == 1
     assert reload(dest).consecutive_failures == 0
+    # The log persists the class so the derived-health recompute can scope it.
+    assert [_ | _] = classes = failed_log_classes(:subscription_id, s1.id)
+    assert Enum.all?(classes, &(&1 == :response))
   end
 
   test "a 4xx response is a :response failure, not retried", %{connection: dest} do
@@ -245,6 +248,7 @@ defmodule Example.Outbound.TransportHttpTest do
     drain_delivery!()
     assert reload(s1).consecutive_failures == 1
     assert reload(dest).consecutive_failures == 0
+    assert [:response] = failed_log_classes(:subscription_id, s1.id)
   end
 
   test "a connection error is a :transport failure (connection counter)", %{connection: dest} do
@@ -259,6 +263,8 @@ defmodule Example.Outbound.TransportHttpTest do
 
     assert reload(dest).consecutive_failures == 1
     assert reload(s1).consecutive_failures == 0
+    assert [_ | _] = classes = failed_log_classes(:connection_id, dest.id)
+    assert Enum.all?(classes, &(&1 == :transport))
   end
 
   test "does not follow an HTTP redirect to an internal address (SSRF: redirect: false)", %{
@@ -458,4 +464,20 @@ defmodule Example.Outbound.TransportHttpTest do
   end
 
   defp reload(%resource{id: id}), do: Ash.get!(resource, id, authorize?: false)
+
+  # Failure classes recorded on the delivery `Log` for a given scope, used to
+  # assert the persisted `failure_class` discriminator (design/connection-health.md §5).
+  defp failed_log_classes(:subscription_id, id) do
+    AshIntegration.delivery_log_resource()
+    |> Ash.Query.filter(status == :failed and subscription_id == ^id)
+    |> Ash.read!(authorize?: false)
+    |> Enum.map(& &1.failure_class)
+  end
+
+  defp failed_log_classes(:connection_id, id) do
+    AshIntegration.delivery_log_resource()
+    |> Ash.Query.filter(status == :failed and connection_id == ^id)
+    |> Ash.read!(authorize?: false)
+    |> Enum.map(& &1.failure_class)
+  end
 end

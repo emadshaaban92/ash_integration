@@ -164,6 +164,10 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
         kafka_partition: metadata["kafka_partition"],
         duration_ms: metadata["duration_ms"],
         status: :failed,
+        # Persist the same class that drives the suspension bump above, so the
+        # derived-health recompute (design/connection-health.md §5) can scope this
+        # row to the connection (transport) or subscription (response) window.
+        failure_class: classify(metadata),
         subscription_id: event.subscription_id,
         connection_id: event.connection_id,
         event_delivery_id: event.id
