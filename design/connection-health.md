@@ -1,6 +1,8 @@
 # Connection Health: Derived Suspension & Bounded Probes (Design Doc)
 
-**Status:** Proposed · **Scope:** replacing the outbound suspension mechanism —
+**Status:** Proposed · schema groundwork (`failure_class` + window indexes)
+**landed in #41**, slice 0 · **Scope:** replacing the outbound suspension
+mechanism —
 today an incrementally-maintained `consecutive_failures` counter plus a *manual*
 unsuspend — with a **derived, windowed** health signal recomputed from the
 delivery `Log`, a **park-on-suspend** step that frees delivery capacity, and a
@@ -135,15 +137,14 @@ set per scope from the `Log` and writes `suspended` **only where it changed**:
 This replaces the per-failure `inc` with a **per-transition** write: rare, off
 the hot path, and bounded by the number of connections actually flipping state.
 
-**`Log` requirement.** The recompute must tell transport failures from response
-rejections and from successes. The failure log already records
-`response_status`/`error_message`/`status`; the cleanest discriminator is an
-explicit `failure_class` column on the `Log` (`:transport` / `:response`),
-written from the same classification `OnDeliveryFailure` already computes.
-(Inferring "transport = no `response_status`" works but is fragile; prefer the
-explicit column.) Successful deliveries log `status: :success`; failures log
-`status: :failed` — so a "no success in the last `N`" recompute keys off
-`status: :success` being absent from the scope's most recent `N` rows.
+**`Log` requirement (landed in #41).** The recompute must tell transport failures
+from response rejections and from successes. The discriminator is now in place: a
+nullable **`failure_class`** column on the `Log` (`:transport` / `:response`, nil
+on non-failures), persisted from the same class `OnDeliveryFailure.classify/1`
+already computes — so the row's class always matches the breaker's decision.
+Successful deliveries log `status: :success`; failures log `status: :failed` — so
+a "no success in the last `N`" recompute keys off `status: :success` being absent
+from the scope's most recent `N` rows.
 
 **`consecutive_failures` is removed** from both `Connection` and `Subscription`
 (attribute, the `inc`, the `record_success` reset). `suspended` /
@@ -176,40 +177,40 @@ response health, so one success row legitimately counts in both scopes' windows.
 
 Three things make the cost bound hold:
 
-- **A supporting index is required — and the existing ones do not serve it.**
-  The `Log` today is indexed on `(connection_id)`, `(created_at)`, and
-  `(connection_id, event_key, created_at)`. The composite looks usable but is
-  not: `event_key` sits **between** `connection_id` and the recency key, so it
-  orders a connection's rows by key *then* time — to read a connection's rows in
-  pure recency order you would have to scan **all** of its rows across every
-  `event_key` and re-sort (the full-history sort, on exactly the high-volume
-  connections we care about). The recompute needs a partial, connection-scoped,
-  recency-ordered index over the transport-relevant slice:
+- **The supporting index already exists (#41) — the pre-existing ones don't
+  serve it.** The `Log` was previously indexed on `(connection_id)`,
+  `(created_at)`, and `(connection_id, event_key, created_at)`. The composite
+  looks usable but is not: `event_key` sits **between** `connection_id` and the
+  recency key, so it orders a connection's rows by key *then* time — to read a
+  connection's rows in pure recency order you would have to scan **all** of its
+  rows across every `event_key` and re-sort (the full-history sort, on exactly
+  the high-volume connections we care about). So #41 landed the partial,
+  scope-keyed, recency-ordered index this recompute needs:
 
   ```sql
-  CREATE INDEX ... ON <log> (connection_id, id DESC)
+  -- landed in #41 (outbound_logs_conn_transport_health_idx)
+  CREATE INDEX ... ON <log> (connection_id, id)
     INCLUDE (status)
     WHERE status = 'success' OR failure_class = 'transport';
   ```
 
-  **Order by `id`, not `created_at`.** The `Log`'s `id` is a uuidv7 (time-ordered)
-  and is *already* this table's recency key — both of its read actions sort
-  `id: :desc`, so keying the health windows on `id` keeps one ordering notion for
-  the table instead of introducing a second. It also gives a **unique total order**
-  (no same-microsecond tie ambiguity that could flap "the last `N`"), and for the
+  **Ordered by `id`, not `created_at`** — the `Log`'s `id` is a uuidv7
+  (time-ordered) and is *already* this table's recency key (both read actions
+  sort `id: :desc`), so keying the health windows on `id` keeps one ordering
+  notion for the table. It also gives a **unique total order** (no
+  same-microsecond tie ambiguity that could flap "the last `N`"), and for the
   `Log` the row *is* the outcome, so `id` is occurrence-ordered — the scheduler's
   "delivery `id` is *dispatch*-time, not a valid ordering key" caveat is about
   `EventDelivery` and does **not** apply here. (`created_at` stays on the row —
   retention filters on it — it just isn't the health-index key.) `INCLUDE (status)`
   keeps the success check index-only.
 
-  This index is a cost of **derived suspension itself** (slice 1/2 of §13), owed
-  regardless of any other decision in this doc. The signal can alternatively be
-  reduced to *two* seeks per connection rather than fetching `N` rows — the
-  most-recent success (a `WHERE status = 'success'` partial) vs. the count of
-  transport failures since it (a `WHERE failure_class = 'transport'` partial);
-  suspended iff that count `≥ N` — but that is an optimization detail; the
-  load-bearing point is that the cost is `groups × N` seeks, not table size.
+  Given that index, the signal can alternatively be reduced to *two* seeks per
+  connection rather than fetching `N` rows — the most-recent success (a
+  `WHERE status = 'success'` partial) vs. the count of transport failures since it
+  (a `WHERE failure_class = 'transport'` partial); suspended iff that count `≥ N`
+  — but that is an optimization detail; the load-bearing point is that the cost is
+  `groups × N` seeks, not table size.
 
 - **Only recently-active connections are evaluated.** The set per tick is
   (currently `suspended`) ∪ (a connection with a transport-relevant `Log` row
@@ -224,9 +225,9 @@ Three things make the cost bound hold:
   table has a ceiling set by the retention policy rather than growing without
   bound.
 
-Net: the recompute is cheap *given the index*, runs every ~60s off the hot path,
-and its cost is set by recent activity, not by `Log` size. The index is the one
-real engineering task, and it is owed by §5 anyway.
+Net: the recompute is cheap *given the index* (which #41 already landed), runs
+every ~60s off the hot path, and its cost is set by recent activity, not by `Log`
+size.
 
 ## 6. Park on the suspend transition
 
@@ -488,34 +489,25 @@ in-flight. These two intervals are **tuning constraints derived from
 
 **Implementation slices.**
 
-1. **`Log` discriminator + index** — **persist `failure_class` on the delivery
-   `Log`** (it is already computed at failure time as
-   `delivery_metadata["failure_class"]` and read by `OnDeliveryFailure.classify/1`,
-   but `create_delivery_log/3` currently discards it), so the recompute can scope
-   transport vs response outcomes, **and add the two supporting partial indexes**
-   (one per scope, keyed on `id` — this table's recency key — `INCLUDE (status)`):
-   `(connection_id, id DESC) WHERE status = 'success' OR failure_class =
-   'transport'` and the `(subscription_id, id DESC) … failure_class = 'response'`
-   analog (§5), so each top-N-per-scope read stays `O(groups × N)` as the `Log`
-   grows. The existing `(connection_id, event_key, created_at)` index does **not**
-   serve this. *Verify:* `EXPLAIN` shows an index scan, not a per-connection sort,
-   for "last `N` transport-relevant rows for connection C." **This slice is safe to
-   land ahead of everything else** — it is purely additive (a nullable column + two
-   indexes, no behavior change) and starts accumulating the classified history the
-   later slices read, shortening their cold-start. *(Landed in #41.)*
-2. **Derived recompute** — the periodic health pass computing connection
+0. **`Log` discriminator + window indexes** — ✅ **landed in #41.** `failure_class`
+   persisted on the delivery `Log`, plus the two partial per-scope indexes
+   (`(connection_id, id) … WHERE status='success' OR failure_class='transport'`
+   and the `subscription_id`/`response` analog, `INCLUDE (status)`) that keep each
+   top-`N`-per-scope read `O(groups × N)` as the `Log` grows (§5). Purely additive;
+   no behavior change.
+1. **Derived recompute** — the periodic health pass computing connection
    `suspended` from the `Log`, transition-only filtered writes, transition
    telemetry; remove `consecutive_failures` and its `inc`/reset. Default it to run
    **per-node** (correct & redundant — §9). *Verify:* a connection trips after `N`
    transport failures and clears after a logged success, with no per-failure
    write.
-3. **Park-on-suspend** — the filtered revert in the suspend transition. *Verify:*
+2. **Park-on-suspend** — the filtered revert in the suspend transition. *Verify:*
    on suspend, un-leased `:scheduled` rows return to `pending`, live-leased rows
    drain, slots free.
-4. **Probe pass** — the bounded round-robin tick, live-probe maintenance, probe
+3. **Probe pass** — the bounded round-robin tick, live-probe maintenance, probe
    telemetry. *Verify:* `M`-bounded probe load independent of set size;
    round-robin fairness; recovery via probe success; fresh probe after poison.
-5. **Subscription scope** — the same recompute/park/probe over the
+4. **Subscription scope** — the same recompute/park/probe over the
    response-class slice (§10).
 
 ## 14. Open questions
