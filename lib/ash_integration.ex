@@ -42,6 +42,12 @@ defmodule AshIntegration do
           delete_limit:  500,
           delivery_days: 90,
           event_days:    365
+        ],
+        health: [
+          window_attempts:       5,
+          recompute_interval_ms: 60_000,
+          probe_interval_ms:     30_000,
+          probe_batch:           3
         ]
 
   """
@@ -125,10 +131,6 @@ defmodule AshIntegration do
     Keyword.get(config(), :source_domains, [])
   end
 
-  def auto_suspension_threshold do
-    Keyword.get(config(), :auto_suspension_threshold, 50)
-  end
-
   @doc """
   Parked-backlog count at/above which a connection/subscription's derived health
   reads `:parked` (chronically parked — UNHEALTHY) rather than `:degraded` (some
@@ -136,8 +138,9 @@ defmodule AshIntegration do
   parked reads `:healthy`. See `AshIntegration.Outbound.Delivery.ParkedHealth`.
 
   This is a **display/alerting** dimension only — it never halts delivery and is
-  independent of the transport/response `consecutive_failures` suspension. Park
-  stays a recoverable build failure cleared by `reprocess`. Defaults to `10`.
+  independent of the derived transport/response suspension
+  (`AshIntegration.Outbound.Delivery.Health`). Park stays a recoverable build
+  failure cleared by `reprocess`. Defaults to `10`.
   """
   def parked_health_threshold do
     Keyword.get(config(), :parked_health_threshold, 10)
@@ -150,8 +153,8 @@ defmodule AshIntegration do
   # subscription — a DISTINCT "parked-suspend" that:
   #
   #   * is recoverable via `reprocess` + `unsuspend` (like every suspension), and
-  #   * NEVER bumps `consecutive_failures` — it is not a transport/response failure,
-  #     so it must not be conflated with the failure-counter suspend.
+  #   * is its own dimension — not a transport/response failure, so it must not be
+  #     conflated with the derived health suspend.
   #
   # Default OFF: a parked head already blocks only its own lane, so the conservative
   # default is purely visible/alertable with no auto-halt. Turn it on with:

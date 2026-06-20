@@ -23,6 +23,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
   import Example.IntegrationHelpers, only: [stub_webhook_success: 0, stub_webhook_failure: 1]
 
   alias AshIntegration.Outbound.Delivery.Dispatcher
+  alias AshIntegration.Outbound.Delivery.Health
   alias AshIntegration.Outbound.Delivery.Relay
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
   alias Example.Outbound.{Connection, Event, EventDelivery, Subscription}
@@ -124,8 +125,6 @@ defmodule Example.Outbound.DeliveryRelayTest do
       # Lease released so the backoff, not the lease, governs the retry.
       assert is_nil(reloaded.claimed_at)
       refute is_nil(reloaded.last_error)
-      # A 5xx is a :response failure → the SUBSCRIPTION counter bumps.
-      assert reload(s).consecutive_failures == 1
     end
 
     test "a suspended connection halts in-flight delivery back to :pending", %{connection: conn} do
@@ -138,32 +137,34 @@ defmodule Example.Outbound.DeliveryRelayTest do
       assert reload(d).state == :pending
     end
 
-    test "an unresolvable endpoint (base_url NXDOMAIN) bumps the CONNECTION counter (transport)",
+    test "an unresolvable endpoint (base_url NXDOMAIN) is a :transport failure (connection scope)",
          %{owner: owner} do
-      # An unresolvable base_url is a :transport failure at send, so the CONNECTION
-      # counter bumps (not the subscription's) — the dead endpoint surfaces normally.
+      # An unresolvable base_url is a :transport failure at send, so a recompute
+      # suspends the CONNECTION (not the subscription) — the dead endpoint surfaces.
       dead = create_connection!(owner, base_url: "https://wms.digitalhub.example.invalid/hook")
       s = create_subscription!(dead)
       d = scheduled_delivery!(s)
 
-      with_egress_blocking(fn -> drain_delivery!() end)
+      with_window(1, fn ->
+        with_egress_blocking(fn -> drain_delivery!() end)
+        Health.recompute()
+      end)
 
-      reloaded = reload(d)
-      assert reloaded.last_error =~ "egress blocked"
-      # The CONNECTION counter bumped (transport), NOT the subscription's (response).
-      assert reload(dead).consecutive_failures == 1
-      assert reload(s).consecutive_failures == 0
+      assert reload(d).last_error =~ "egress blocked"
+      assert reload(dead).suspended
+      refute reload(s).suspended
     end
 
-    test "an unresolvable endpoint drives the connection to auto-suspension at threshold",
+    test "an unresolvable endpoint drives the connection to suspension on recompute",
          %{owner: owner} do
       dead = create_connection!(owner, base_url: "https://wms.digitalhub.example.invalid/hook")
       s = create_subscription!(dead)
       d = scheduled_delivery!(s)
 
-      # Threshold of 1: a single endpoint-transport failure auto-suspends.
-      with_suspension_threshold(1, fn ->
+      # Window of 1: a single endpoint-transport failure trips on the next recompute.
+      with_window(1, fn ->
         with_egress_blocking(fn -> drain_delivery!() end)
+        Health.recompute()
       end)
 
       assert reload(dead).suspended
@@ -194,7 +195,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
       assert [] = Dispatcher.claim(10)
     end
 
-    test "the terminal attempt does NOT bump the suspension counter (no double-penalty)", %{
+    test "the terminal (poison) attempt is logged but one failure does not suspend", %{
       connection: conn
     } do
       stub_webhook_failure(503)
@@ -206,10 +207,10 @@ defmodule Example.Outbound.DeliveryRelayTest do
       drain_delivery!()
 
       assert reload(d).attempts == Stage.max_attempts()
-      # A 5xx is normally a :response failure that bumps the SUBSCRIPTION counter —
-      # but on the terminal/poison attempt it must NOT (the row already blocks its
-      # lane forever; also suspending the subscription would be a double-penalty).
-      assert reload(s).consecutive_failures == 0
+      # The failure is logged, but a single response failure is far below the window,
+      # so a recompute does not suspend the subscription on it alone.
+      Health.recompute()
+      refute reload(s).suspended
     end
   end
 
@@ -382,16 +383,16 @@ defmodule Example.Outbound.DeliveryRelayTest do
   end
 
   # Temporarily lower the auto-suspension threshold for a test, restoring it after.
-  defp with_suspension_threshold(threshold, fun) do
-    original = Application.get_env(:ash_integration, :auto_suspension_threshold)
-    Application.put_env(:ash_integration, :auto_suspension_threshold, threshold)
+  defp with_window(n, fun) do
+    original = Application.get_env(:ash_integration, :health)
+    Application.put_env(:ash_integration, :health, window_attempts: n)
 
     try do
       fun.()
     after
       case original do
-        nil -> Application.delete_env(:ash_integration, :auto_suspension_threshold)
-        value -> Application.put_env(:ash_integration, :auto_suspension_threshold, value)
+        nil -> Application.delete_env(:ash_integration, :health)
+        value -> Application.put_env(:ash_integration, :health, value)
       end
     end
   end

@@ -12,7 +12,7 @@ defmodule Example.Outbound.EventSchedulerTest do
   require Ash.Query
 
   alias AshIntegration.Outbound.Delivery.Scheduler
-  alias Example.Outbound.{Connection, Log, EventDelivery, Subscription}
+  alias Example.Outbound.{Connection, EventDelivery, Subscription}
 
   setup do
     %{connection: create_connection!(create_user!())}
@@ -189,93 +189,10 @@ defmodule Example.Outbound.EventSchedulerTest do
     end
   end
 
-  describe "two-level suspension" do
-    test "a response rejection bumps + auto-suspends the SUBSCRIPTION, not the connection",
-         %{connection: dest} do
-      with_threshold(1, fn ->
-        s1 = create_subscription!(dest, "widget.updated")
-        event = create_event!(s1, state: :scheduled)
-
-        record_failure!(event, "response")
-
-        assert reload(s1).consecutive_failures == 1
-        assert reload(s1).suspended
-        assert reload(dest).consecutive_failures == 0
-        refute reload(dest).suspended
-        assert [%{status: :failed}] = logs()
-      end)
-    end
-
-    test "a transport failure bumps + auto-suspends the DESTINATION, not the subscription",
-         %{connection: dest} do
-      with_threshold(1, fn ->
-        s1 = create_subscription!(dest, "widget.updated")
-        event = create_event!(s1, state: :scheduled)
-
-        record_failure!(event, "transport")
-
-        assert reload(dest).consecutive_failures == 1
-        assert reload(dest).suspended
-        assert reload(s1).consecutive_failures == 0
-        refute reload(s1).suspended
-      end)
-    end
-
-    test "an unclassified failure defaults to the subscription (narrower blast radius)",
-         %{connection: dest} do
-      with_threshold(1, fn ->
-        s1 = create_subscription!(dest, "widget.updated")
-        event = create_event!(s1, state: :scheduled)
-
-        record_failure!(event, nil)
-
-        assert reload(s1).suspended
-        refute reload(dest).suspended
-      end)
-    end
-
-    test "a successful delivery resets both counters", %{connection: dest} do
-      # Default (high) threshold so the failures bump counters without suspending.
-      s1 = create_subscription!(dest, "widget.updated")
-      event = create_event!(s1, state: :scheduled)
-
-      record_failure!(event, "response")
-      record_failure!(reload(event), "transport")
-
-      assert reload(s1).consecutive_failures == 1
-      assert reload(dest).consecutive_failures == 1
-
-      deliver!(reload(event))
-
-      assert reload(s1).consecutive_failures == 0
-      assert reload(dest).consecutive_failures == 0
-      assert reload(event).state == :delivered
-      assert Enum.any?(logs(), &(&1.status == :success))
-    end
-  end
+  # Derived suspension (recompute / park / probe) lives in its own DB-backed suite:
+  # `Example.Outbound.HealthTest`. This file stays focused on scheduling/ordering.
 
   # ── Helpers ───────────────────────────────────────────────────────────────
-
-  defp with_threshold(n, fun) do
-    prev = Application.get_env(:ash_integration, :auto_suspension_threshold)
-    Application.put_env(:ash_integration, :auto_suspension_threshold, n)
-    on_exit(fn -> Application.put_env(:ash_integration, :auto_suspension_threshold, prev) end)
-    fun.()
-  end
-
-  defp record_failure!(event, failure_class) do
-    metadata = if failure_class, do: %{"failure_class" => failure_class}, else: %{}
-
-    Ash.update!(
-      Ash.Changeset.for_update(
-        event,
-        :record_attempt_error,
-        %{last_error: "boom", delivery_metadata: metadata},
-        authorize?: false
-      ),
-      authorize?: false
-    )
-  end
 
   defp deliver!(event) do
     Ash.update!(
@@ -370,6 +287,4 @@ defmodule Example.Outbound.EventSchedulerTest do
   defp reload(%resource{id: id}), do: Ash.get!(resource, id, authorize?: false)
 
   defp all_events, do: EventDelivery |> Ash.Query.sort(id: :asc) |> Ash.read!(authorize?: false)
-
-  defp logs, do: Log |> Ash.read!(authorize?: false)
 end

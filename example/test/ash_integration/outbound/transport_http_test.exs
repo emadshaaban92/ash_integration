@@ -219,7 +219,7 @@ defmodule Example.Outbound.TransportHttpTest do
     refute Map.has_key?(headers, "x-signature")
   end
 
-  test "a 5xx response is a :response failure (subscription counter), retryable", %{
+  test "a 5xx response is a :response failure (subscription scope), retryable", %{
     connection: dest
   } do
     stub_webhook_failure(503)
@@ -229,8 +229,6 @@ defmodule Example.Outbound.TransportHttpTest do
 
     drain_delivery!()
 
-    assert reload(s1).consecutive_failures == 1
-    assert reload(dest).consecutive_failures == 0
     # The log persists the class so the derived-health recompute can scope it.
     assert [_ | _] = classes = failed_log_classes(:subscription_id, s1.id)
     assert Enum.all?(classes, &(&1 == :response))
@@ -242,16 +240,14 @@ defmodule Example.Outbound.TransportHttpTest do
     s1 = create_subscription!(dest)
     create_event!(s1)
 
-    # A 4xx is recorded as a `:response` failure (subscription counter); the row
-    # stays `:scheduled` with a backoff. Two-level suspension is what halts a
+    # A 4xx is recorded as a `:response` failure; the row stays `:scheduled` with a
+    # backoff. The derived subscription-scope recompute is what halts a
     # persistently-rejecting subscription.
     drain_delivery!()
-    assert reload(s1).consecutive_failures == 1
-    assert reload(dest).consecutive_failures == 0
     assert [:response] = failed_log_classes(:subscription_id, s1.id)
   end
 
-  test "a connection error is a :transport failure (connection counter)", %{connection: dest} do
+  test "a connection error is a :transport failure (connection scope)", %{connection: dest} do
     Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn plug_conn ->
       Req.Test.transport_error(plug_conn, :econnrefused)
     end)
@@ -261,8 +257,6 @@ defmodule Example.Outbound.TransportHttpTest do
 
     drain_delivery!()
 
-    assert reload(dest).consecutive_failures == 1
-    assert reload(s1).consecutive_failures == 0
     assert [_ | _] = classes = failed_log_classes(:connection_id, dest.id)
     assert Enum.all?(classes, &(&1 == :transport))
   end
@@ -296,11 +290,9 @@ defmodule Example.Outbound.TransportHttpTest do
     # …but the redirect to the metadata host was never chased.
     refute_received {:redirect_target, "169.254.169.254"}
 
-    # A 302 is a non-2xx rejection: classified `:response` (subscription counter),
-    # never delivered.
+    # A 302 is a non-2xx rejection: classified `:response`, never delivered.
     refute reload(event).state == :delivered
-    assert reload(s1).consecutive_failures == 1
-    assert reload(dest).consecutive_failures == 0
+    assert [:response] = failed_log_classes(:subscription_id, s1.id)
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────

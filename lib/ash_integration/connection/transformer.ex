@@ -21,11 +21,6 @@ defmodule AshIntegration.Connection.Transformer do
        allow_nil?: false,
        public?: true
      )
-     |> add_attribute_if_not_exists(:consecutive_failures, :integer,
-       allow_nil?: false,
-       public?: true,
-       default: 0
-     )
      |> add_attribute_if_not_exists(:active, :boolean,
        default: true,
        public?: true,
@@ -53,7 +48,6 @@ defmodule AshIntegration.Connection.Transformer do
      |> add_identity_if_not_exists(:name, [:name])
      |> add_activate_action_if_not_exists()
      |> add_deactivate_action_if_not_exists()
-     |> add_record_success_action_if_not_exists()
      |> add_suspend_action_if_not_exists()
      |> add_unsuspend_action_if_not_exists()
      |> add_default_accept_if_not_set()
@@ -248,10 +242,6 @@ defmodule AshIntegration.Connection.Transformer do
     add_set_attr_update(dsl_state, :deactivate, :active, false)
   end
 
-  defp add_record_success_action_if_not_exists(dsl_state) do
-    add_set_attr_update(dsl_state, :record_success, :consecutive_failures, 0)
-  end
-
   defp add_set_attr_update(dsl_state, action_name, attribute, value) do
     if Info.action(dsl_state, action_name) do
       dsl_state
@@ -295,6 +285,10 @@ defmodule AshIntegration.Connection.Transformer do
             ),
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
               change: AshIntegration.Outbound.Delivery.Changes.SetSuspensionDetails
+            ),
+            Transformer.build_entity!(Dsl, [:actions, :update], :change,
+              change:
+                {AshIntegration.Outbound.Delivery.Changes.ParkOnSuspend, column: :connection_id}
             )
           ]
         )
@@ -316,7 +310,6 @@ defmodule AshIntegration.Connection.Transformer do
             set_change(:suspended, false),
             set_change(:suspended_at, nil),
             set_change(:suspension_reason, nil),
-            set_change(:consecutive_failures, 0),
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
               change:
                 {AshIntegration.Outbound.Delivery.Changes.EmitResumeTelemetry,
@@ -453,7 +446,6 @@ defmodule AshIntegration.Connection.Transformer do
         {:destroy, [action: :destroy]},
         {:activate, [action: :activate]},
         {:deactivate, [action: :deactivate]},
-        {:record_success, [action: :record_success]},
         {:suspend, [action: :suspend]},
         {:unsuspend, [action: :unsuspend]}
       ]

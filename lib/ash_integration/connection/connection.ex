@@ -7,8 +7,8 @@ defmodule AshIntegration.Connection do
   This is a Spark DSL extension the host application attaches to its own
   resource; the host names the module and table and wires it via
   `config :ash_integration, connection_resource: MyApp.Outbound.Connection`.
-  Health fields (`active`/`suspended`/`consecutive_failures`) are fed by
-  transport failures.
+  Health fields (`active`/`suspended`) — `suspended` is derived from transport
+  failures by the periodic recompute (`AshIntegration.Outbound.Delivery.Health`).
   """
 
   use Spark.Dsl.Extension,

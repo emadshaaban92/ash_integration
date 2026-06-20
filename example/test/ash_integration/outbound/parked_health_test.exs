@@ -2,9 +2,9 @@ defmodule Example.Outbound.ParkedHealthTest do
   @moduledoc """
   The standing parked-health dimension against real resources: the `parked_count` /
   `oldest_parked_at` aggregates, the derived `ParkedHealth.status/1`, and the opt-in
-  parked-suspend. Park must surface as a non-healthy status WITHOUT bumping the
-  transport/response `consecutive_failures` counter or suspending by default — and a
-  reprocess that fixes the build must clear it.
+  parked-suspend. Park must surface as a non-healthy status WITHOUT tripping the
+  derived transport/response suspension or suspending by default — and a reprocess
+  that fixes the build must clear it.
   """
   # async: false — the parked-suspension tests mutate the global :ash_integration env.
   use Example.DataCase, async: false
@@ -87,9 +87,8 @@ defmodule Example.Outbound.ParkedHealthTest do
       assert ParkedHealth.status(loaded) in [:degraded, :parked]
       assert ParkedHealth.unhealthy?(loaded)
 
-      # Park is NOT a transport/response failure — the failure counter and
-      # suspension stay clean (the distinction the whole feature preserves).
-      assert loaded.consecutive_failures == 0
+      # Park is NOT a transport/response failure — derived suspension stays clean
+      # (the distinction the whole feature preserves).
       refute loaded.suspended
     end
 
@@ -123,7 +122,7 @@ defmodule Example.Outbound.ParkedHealthTest do
       refute loaded.suspended, "parking must not auto-suspend when the opt-in is off"
     end
 
-    test "enabled: crossing the threshold suspends WITHOUT bumping consecutive_failures",
+    test "enabled: crossing the threshold parked-suspends (a distinct suspension)",
          %{connection: dest} do
       enable_parked_suspension!(count_threshold: 2)
 
@@ -143,15 +142,12 @@ defmodule Example.Outbound.ParkedHealthTest do
       assert loaded.parked_count == 2
       assert loaded.suspended, "a parked backlog past the threshold must parked-suspend"
       assert loaded.suspension_reason =~ "parked"
-      # It is a parked-suspend, not a failure-counter suspend.
-      assert loaded.consecutive_failures == 0
 
       assert_received {[:ash_integration, :subscription, :suspended], ^ref, measurements, meta}
       assert meta.id == sub.id
       assert meta.failure_class == "parked"
       assert meta.threshold == 2
       assert measurements.parked_count == 2
-      assert measurements.consecutive_failures == 0
     end
 
     test "enabled but below the threshold does not suspend", %{connection: dest} do
@@ -254,8 +250,7 @@ defmodule Example.Outbound.ParkedHealthTest do
       version: 1,
       transform_source: transform_source,
       active: true,
-      suspended: false,
-      consecutive_failures: 0
+      suspended: false
     })
   end
 

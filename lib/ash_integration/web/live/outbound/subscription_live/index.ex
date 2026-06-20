@@ -166,9 +166,9 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
               <td>
                 <span class={[
                   "badge badge-sm",
-                  if(sub.consecutive_failures > 0, do: "badge-warning", else: "badge-ghost")
+                  if(sub.suspended, do: "badge-error", else: "badge-ghost")
                 ]}>
-                  {sub.consecutive_failures}
+                  {if sub.suspended, do: "suspended", else: "ok"}
                 </span>
               </td>
               <td class="text-sm text-base-content/60">

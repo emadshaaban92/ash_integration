@@ -111,8 +111,7 @@ defmodule Example.Outbound.DispatchRelayTest do
           version: 1,
           transform_source: "error('boom')",
           active: true,
-          suspended: false,
-          consecutive_failures: 0
+          suspended: false
         })
 
       s_ok = create_subscription!(conn_ok, "widget.updated")

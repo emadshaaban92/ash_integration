@@ -115,8 +115,7 @@ defmodule Example.Outbound.EventDispatchTest do
         version: 1,
         transform_source: "error('boom')",
         active: true,
-        suspended: false,
-        consecutive_failures: 0
+        suspended: false
       })
 
     create_widget!(%{name: "w", stock: 1})

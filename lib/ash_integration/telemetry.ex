@@ -27,10 +27,13 @@ defmodule AshIntegration.Telemetry do
     * `[:ash_integration, :delivery, :poison]` — a delivery hit the delivery ceiling.
     * `[:ash_integration, :dedup, :suppressed]` — a delivery suppressed (body unchanged).
     * `[:ash_integration, :connection, :suspended]` /
-      `[:ash_integration, :subscription, :suspended]` — auto-suspension on crossing
-      `auto_suspension_threshold`.
+      `[:ash_integration, :subscription, :suspended]` — derived suspension on a
+      recompute transition (no successful outcome in the last `window_attempts`).
     * `[:ash_integration, :connection, :unsuspended]` /
       `[:ash_integration, :subscription, :resumed]` — the inverse `unsuspend` action.
+    * `[:ash_integration, :connection, :probe]` /
+      `[:ash_integration, :subscription, :probe]` — a bounded recovery probe let
+      through for a suspended connection/subscription.
   """
 
   @events [
@@ -44,7 +47,9 @@ defmodule AshIntegration.Telemetry do
     [:ash_integration, :connection, :suspended],
     [:ash_integration, :subscription, :suspended],
     [:ash_integration, :connection, :unsuspended],
-    [:ash_integration, :subscription, :resumed]
+    [:ash_integration, :subscription, :resumed],
+    [:ash_integration, :connection, :probe],
+    [:ash_integration, :subscription, :probe]
   ]
 
   @doc """

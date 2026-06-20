@@ -5,10 +5,10 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliverySuppressed do
   #
   # Writes a `:suppressed` `Log` so the deliveries → logs drill-down shows the
   # withheld delivery alongside real sends, and emits `[:ash_integration, :dedup,
-  # :suppressed]` telemetry. Unlike `OnDeliverySuccess` it does NOT reset
-  # `consecutive_failures`: a suppression never touched the transport, so it proves
-  # nothing about endpoint health — resetting would mask a degrading target.
-  # Suppression is neutral (it neither bumps nor resets the counters).
+  # :suppressed]` telemetry. A suppression never touched the transport, so it proves
+  # nothing about endpoint health: the `:suppressed` log is neither a success nor a
+  # failure, so the derived-health windows (success ∪ transport/response failures)
+  # exclude it entirely — it neither trips nor clears a suspension.
   use Ash.Resource.Change
 
   @impl true

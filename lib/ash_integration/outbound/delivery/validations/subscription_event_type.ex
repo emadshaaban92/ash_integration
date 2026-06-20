@@ -10,7 +10,7 @@ defmodule AshIntegration.Outbound.Delivery.Validations.SubscriptionEventType do
   @impl true
   def validate(changeset, _opts, _context) do
     # Only touch the catalog when the route's identity is actually changing —
-    # health updates (`record_success`, `suspend`, …) leave these alone and must
+    # health updates (`suspend`, `unsuspend`, …) leave these alone and must
     # stay cheap (no domain scan).
     if Ash.Changeset.changing_attribute?(changeset, :event_type) or
          Ash.Changeset.changing_attribute?(changeset, :version) do

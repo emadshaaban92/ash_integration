@@ -7,8 +7,8 @@ defmodule AshIntegration.Outbound.Delivery.Subscription do
 
   Host applications attach this extension to their own resource and wire it via
   `config :ash_integration, subscription_resource: MyApp.Outbound.Subscription`.
-  Health fields (`active`/`suspended`/`consecutive_failures`) are fed by
-  *response* rejections.
+  Health fields (`active`/`suspended`) — `suspended` is derived from *response*
+  rejections by the periodic recompute (`AshIntegration.Outbound.Delivery.Health`).
   """
 
   use Spark.Dsl.Extension,

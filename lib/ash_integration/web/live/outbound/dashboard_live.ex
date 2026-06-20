@@ -26,7 +26,7 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
       stats: %{
         total_subscriptions: count(sub, actor),
         active_subscriptions: count(Ash.Query.filter(sub, active == true), actor),
-        failing_subscriptions: count(Ash.Query.filter(sub, consecutive_failures > 0), actor),
+        failing_subscriptions: count(Ash.Query.filter(sub, suspended == true), actor),
         total_connections: count(conn, actor),
         total_event_types: map_size(AshIntegration.Outbound.Declare.Registry.catalog()),
         delivered_24h:

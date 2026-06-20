@@ -11,6 +11,7 @@ defmodule Example.Outbound.TelemetryTest do
 
   require Ash.Query
 
+  alias AshIntegration.Outbound.Delivery.Health
   alias AshIntegration.Outbound.Delivery.Reprocessor
   alias Example.Catalog.Widget
   alias Example.Outbound.{Connection, Event, EventDelivery, Subscription}
@@ -60,8 +61,8 @@ defmodule Example.Outbound.TelemetryTest do
     end
   end
 
-  describe "auto-suspension" do
-    test "a threshold-crossing transport failure emits [:ash_integration, :connection, :suspended]",
+  describe "derived suspension" do
+    test "a recompute over N transport failures emits [:ash_integration, :connection, :suspended]",
          %{owner: owner} do
       dead = create_connection!(owner, base_url: "https://wms.unreachable.example.invalid/hook")
       s = create_subscription!(dead)
@@ -69,23 +70,22 @@ defmodule Example.Outbound.TelemetryTest do
 
       ref = attach([[:ash_integration, :connection, :suspended]])
 
-      with_suspension_threshold(1, fn ->
+      with_window(1, fn ->
         with_egress_blocking(fn -> drain_delivery!() end)
+        Health.recompute()
       end)
 
-      assert_received {[:ash_integration, :connection, :suspended], ^ref,
-                       %{consecutive_failures: 1}, meta}
+      assert_received {[:ash_integration, :connection, :suspended], ^ref, %{count: 1}, meta}
 
       assert meta.id == dead.id
-      assert meta.threshold == 1
+      assert meta.window_attempts == 1
       assert meta.failure_class == "transport"
-      refute is_nil(meta.last_error)
 
       assert reload(dead).suspended
       assert reload(d).last_error
     end
 
-    test "a threshold-crossing response failure emits [:ash_integration, :subscription, :suspended]",
+    test "a recompute over N response failures emits [:ash_integration, :subscription, :suspended]",
          %{connection: conn} do
       stub_webhook_failure(503)
       s = create_subscription!(conn)
@@ -93,15 +93,16 @@ defmodule Example.Outbound.TelemetryTest do
 
       ref = attach([[:ash_integration, :subscription, :suspended]])
 
-      with_suspension_threshold(1, fn -> drain_delivery!() end)
+      with_window(1, fn ->
+        drain_delivery!()
+        Health.recompute()
+      end)
 
-      assert_received {[:ash_integration, :subscription, :suspended], ^ref,
-                       %{consecutive_failures: 1}, meta}
+      assert_received {[:ash_integration, :subscription, :suspended], ^ref, %{count: 1}, meta}
 
       assert meta.id == s.id
-      assert meta.threshold == 1
+      assert meta.window_attempts == 1
       assert meta.failure_class == "response"
-      refute is_nil(meta.last_error)
 
       assert reload(s).suspended
     end
@@ -242,8 +243,7 @@ defmodule Example.Outbound.TelemetryTest do
       version: 1,
       transform_source: transform_source,
       active: true,
-      suspended: false,
-      consecutive_failures: 0
+      suspended: false
     })
   end
 
@@ -372,16 +372,16 @@ defmodule Example.Outbound.TelemetryTest do
     end
   end
 
-  defp with_suspension_threshold(threshold, fun) do
-    original = Application.get_env(:ash_integration, :auto_suspension_threshold)
-    Application.put_env(:ash_integration, :auto_suspension_threshold, threshold)
+  defp with_window(n, fun) do
+    original = Application.get_env(:ash_integration, :health)
+    Application.put_env(:ash_integration, :health, window_attempts: n)
 
     try do
       fun.()
     after
       case original do
-        nil -> Application.delete_env(:ash_integration, :auto_suspension_threshold)
-        value -> Application.put_env(:ash_integration, :auto_suspension_threshold, value)
+        nil -> Application.delete_env(:ash_integration, :health)
+        value -> Application.put_env(:ash_integration, :health, value)
       end
     end
   end
