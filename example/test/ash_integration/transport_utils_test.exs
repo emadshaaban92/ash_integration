@@ -25,7 +25,7 @@ defmodule AshIntegration.TransportUtilsTest do
   end
 
   describe "load_secret/3" do
-    # Regression guard for #76: every transport routes its credential/secret
+    # Regression guard: every transport routes its credential/secret
     # decryption through here so that a decryption/vault failure becomes a
     # classified, NON-retryable :transport error instead of a raised MatchError
     # that escapes the {:error, %{failure_class: ...}} contract (which left the

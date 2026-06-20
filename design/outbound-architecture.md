@@ -382,7 +382,7 @@ pipeline — the delivery-side mirror of the dispatch relay): its producer claim
 by `connection_id`), bumping `attempts` **on the claim** and honoring the durable
 `next_attempt_at` backoff. Per row: no-op if not `scheduled` → if the
 connection/subscription is now suspended, reset to `pending` → else call the
-transport (`deliver_batch/2`, per-row results; `batch_size` 1 until #36), marking
+transport (`deliver_batch/2`, per-row results; `batch_size` 1 for now), marking
 `delivered` (+ reset both failure counters) or recording the error and stamping a
 `next_attempt_at` backoff while staying `:scheduled` (lane held). Every
 result-writing action is guarded on `state == :scheduled` and fenced on the
@@ -394,7 +394,7 @@ slowest send) and another pass re-claims the still-`scheduled` row — idempoten
 orphan reconciliation. After `delivery: [max_attempts: …]` claims a delivery becomes
 **terminal (poison)** — the claim excludes it forever and it is left `scheduled` so
 its lane stays blocked (loud telemetry, never auto-resolved). This is the
-delivery-side mirror of the dispatch poison policy (§6/#60); the attempt-on-claim
+delivery-side mirror of the dispatch poison policy (§6); the attempt-on-claim
 ceiling is what bounds a crash-looping row.
 
 ## 10. Suspension & failure isolation
@@ -451,7 +451,7 @@ without overloading the failure counters or changing when/why a delivery parks:
   `:parked` deliveries) and `oldest_parked_at` (their min `created_at` — how long
   the head has been stuck). Query-time, filtered to `state == :parked`; the
   connection's span all its subscriptions. A *load* failure surfaces loudly (it is
-  not swallowed into a zero — the #14 lesson).
+  not swallowed into a zero).
 - **Derived status.** `ParkedHealth.status/1` maps the backlog to
   `:healthy | :degraded | :parked` against `parked_health_threshold` (default 10):
   zero is healthy, below the threshold is degraded, at/above is parked. The

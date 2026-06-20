@@ -3,7 +3,7 @@ defmodule Example.Outbound.SubscriptionFormLiveTest do
   LiveView coverage for the event-first subscription form's per-route config: the
   "Delivery route" card renders the right fields for the connection's transport,
   swaps reactively when the selected connection changes, and submission persists
-  the correct `route_config` union (Task 37). Also guards the connection-picker
+  the correct `route_config` union. Also guards the connection-picker
   load (which must not silently empty out on the paginated `:index` read).
   """
   use ExampleWeb.ConnCase, async: false

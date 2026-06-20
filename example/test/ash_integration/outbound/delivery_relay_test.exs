@@ -1,6 +1,6 @@
 defmodule Example.Outbound.DeliveryRelayTest do
   @moduledoc """
-  Tests for the **delivery relay** (#81) — the Broadway pipeline that claims
+  Tests for the **delivery relay** — the Broadway pipeline that claims
   `:scheduled` `EventDelivery` rows and executes them, replacing the per-delivery
   Oban worker + the DeliveryGuardian.
 
@@ -12,7 +12,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
     * a retryable failure → recorded + backoff + stays `:scheduled` (lane held);
     * lease re-claim re-delivers a row whose claimer "died" mid-flight (the deleted
       guardian's job);
-    * terminal (poison) rows are never re-claimed and stay stuck (#60/#74);
+    * terminal (poison) rows are never re-claimed and stay stuck;
     * the lease-token fence — a stale claimer cannot finalize a re-claimed row;
     * the real async pipeline over an isolated `start_supervised!` instance.
   """
@@ -172,7 +172,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
-  describe "terminal (poison) — never auto-resolved (#60/#74)" do
+  describe "terminal (poison) — never auto-resolved" do
     test "a row that crosses the ceiling is left :scheduled, surfaced once, never re-claimed", %{
       connection: conn
     } do

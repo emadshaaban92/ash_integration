@@ -309,7 +309,7 @@ defmodule AshIntegration.Transport.Utils do
   error) into a `MatchError` that escapes the transport's
   `{:error, %{failure_class: ...}}` contract: the delivery crashes with no
   `failure_class` recorded, so a connection with broken/rotated-bad auth retries
-  forever and never auto-suspends (#76). Routing every secret load through
+  forever and never auto-suspends. Routing every secret load through
   here records it as `:transport`/`retryable: false` (a rotated-bad credential
   won't fix itself on retry), so the two-level suspension subsystem sees it.
 

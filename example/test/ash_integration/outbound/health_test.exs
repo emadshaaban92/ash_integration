@@ -187,7 +187,7 @@ defmodule Example.Outbound.HealthTest do
       end)
     end
 
-    test "a probe respects the high-water gate (#56) — no jump past an undispatched older event",
+    test "a probe respects the high-water gate — no jump past an undispatched older event",
          %{connection: dest} do
       with_window(1, fn ->
         s1 = create_subscription!(dest, "widget.updated")
@@ -199,8 +199,8 @@ defmodule Example.Outbound.HealthTest do
         cancel!(reload(trip))
 
         # An OLDER same-key Event still in the outbox (dispatched_at IS NULL), then a
-        # newer event whose delivery materialised on the same lane. #56 holds the
-        # newer behind the older until the older dispatches.
+        # newer event whose delivery materialised on the same lane. The high-water
+        # gate holds the newer behind the older until the older dispatches.
         older = seed_undispatched_event!(event_type: "widget.updated", event_key: "p1")
         newer = create_event!(s1, event_key: "p1")
 

@@ -3,7 +3,7 @@ defmodule Example.Outbound.Batched do
   Producer for `test.batched` — a fixture that reports, via
   `Example.Outbound.ProjectProbe`, how many events each `project/3` call received.
   Used to prove the relay runs `project` once per (event_type, version) batch
-  (open #2). Inert unless something subscribes to `test.batched`.
+  (an open question). Inert unless something subscribes to `test.batched`.
   """
   use AshIntegration.Outbound.Declare.Producer
 

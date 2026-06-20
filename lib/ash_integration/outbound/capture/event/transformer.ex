@@ -249,7 +249,7 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
     end
   end
 
-  # ── Reset dispatch (un-poison; operator recourse, #60) ────────────────────
+  # ── Reset dispatch (un-poison; operator recourse) ─────────────────────────
   # Clears the relay bookkeeping so a stuck/poison Event (past the attempt ceiling,
   # `claim/1` refuses it) becomes claimable again: `dispatch_attempts` → 0 (full
   # retry budget), `claimed_at`/`dispatch_error` → nil. Does NOT touch

@@ -544,7 +544,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     else
       # Deliberately NOT guarded to `:scheduled`: `:cancel` is multi-state —
       # coalescing supersedes `:pending` siblings (guarded `[:pending, :parked]` at
-      # that call site, #70), the `Reprocessor` cancels a skipped `:parked` row, and
+      # that call site), the `Reprocessor` cancels a skipped `:parked` row, and
       # an operator may cancel from the dashboard. Cancelling a `:scheduled` row just
       # frees its in-flight slot; there is no longer an Oban job to cancel.
       {:ok, action} =

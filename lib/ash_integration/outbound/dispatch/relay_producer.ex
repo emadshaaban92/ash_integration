@@ -44,7 +44,7 @@ defmodule AshIntegration.Outbound.Dispatch.RelayProducer do
   # The sole discovery trigger: pick up newly-committed events (from this node or
   # any other). Reschedules itself. (It does NOT reap poison rows: a
   # terminally-stuck event is left undispatched and keeps its lane blocked by
-  # design — #60 — until a human/host resolves it; we never auto-resolve.)
+  # design until a human/host resolves it; we never auto-resolve.)
   def handle_info(:poll, state) do
     schedule_poll(state.poll_interval)
     produce(state)

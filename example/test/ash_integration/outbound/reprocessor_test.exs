@@ -1,6 +1,6 @@
 defmodule Example.Outbound.ReprocessorTest do
   @moduledoc """
-  Operator recovery for parked events (Task 11 / §6.3). A transform that errors
+  Operator recovery for parked events (§6.3). A transform that errors
   parks the event (`:parked` state, nil payload); after the operator fixes the
   transform, `Reprocessor` re-runs it against the stored snapshot and unblocks it.
   """

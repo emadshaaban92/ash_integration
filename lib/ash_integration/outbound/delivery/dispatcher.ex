@@ -4,13 +4,13 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   `AshIntegration.Outbound.Dispatch.Dispatcher`.
 
   The `EventScheduler` promotes `pending → scheduled` (owning ordering: lane-head
-  selection, the high-water gate #57, suspension). This module's `claim/1` then
+  selection, the high-water gate, suspension). This module's `claim/1` then
   leases those `:scheduled` rows for the relay's producer to execute. It also holds
   the two delivery-only mechanisms the relay's failure path needs:
 
     * `backoff_until/1` — the durable exponential backoff cursor (Oban's one
       irreplaceable feature, made a column: `EventDelivery.next_attempt_at`); and
-    * `poison?/1` + `record_poison/2` — the terminal-policy surfacing (#60/#74).
+    * `poison?/1` + `record_poison/2` — the terminal-policy surfacing.
 
   ## Attempts bump on CLAIM (correctness, not tuning)
 
@@ -18,7 +18,7 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   Bumping on the claim — not only on a graceful `:record_attempt_error` — is what
   makes a relay that CRASHES mid-send safe: the increment already happened, so the
   lease expires, another pass re-claims, and the ceiling eventually leaves it stuck
-  instead of crash-looping forever (the #74 failure mode). The consequence is
+  instead of crash-looping forever (that failure mode). The consequence is
   deliberate: `max_attempts` counts CLAIMS, so a slow-but-fine target whose lease
   expires mid-send can be falsely poisoned (stuck `:scheduled`, lane blocked). The
   derived lease (`Supervisor.lease_seconds/0`, sized ≫ the transport timeout) is
@@ -46,7 +46,7 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   claimers can never grab the same row.
 
   Rows at/over `max_attempts` are **never claimed** — terminal (poison), left
-  `:scheduled` with their lane blocked until a human/host intervenes (#60).
+  `:scheduled` with their lane blocked until a human/host intervenes.
   """
   def claim(limit) when is_integer(limit) and limit > 0 do
     repo = AshIntegration.repo()
@@ -121,7 +121,7 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
     DateTime.add(DateTime.utc_now(), max(delay + jitter, 0), :millisecond)
   end
 
-  # ── Terminal (poison) policy (#60/#74) ──────────────────────────────────────
+  # ── Terminal (poison) policy ────────────────────────────────────────────────
 
   @doc """
   Whether this delivery has reached the terminal (poison) ceiling — `attempts` (the

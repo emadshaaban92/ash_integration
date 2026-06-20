@@ -6,7 +6,7 @@ defmodule AshIntegration.Outbound.Dispatch.Acknowledger do
   # materialization — so a successful message is already dispatched by the time we
   # ack. The ack's remaining jobs are: record a `dispatch_error` for any failed
   # message (it stays undispatched; the lease re-emits, and the `dispatch_attempts`
-  # ceiling eventually leaves it stuck — never auto-resolved, #60), and notify the
+  # ceiling eventually leaves it stuck — never auto-resolved), and notify the
   # scheduler so lanes waiting on these events get re-evaluated.
   @behaviour Broadway.Acknowledger
 

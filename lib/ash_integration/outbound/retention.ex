@@ -16,7 +16,7 @@ defmodule AshIntegration.Outbound.Retention do
       remaining deliveries**, so retention never strands a delivery an operator
       still has to reprocess, and never reaps a stuck/poison event — which would
       silently unblock its `(connection, event_key)` lane (the
-      `dispatched_at IS NOT NULL` guard, #60).
+      `dispatched_at IS NOT NULL` guard).
 
   The "what is old enough to delete" policy lives here, not on the resources: they
   keep only a generic `:destroy`, while this module owns the filters and runs the

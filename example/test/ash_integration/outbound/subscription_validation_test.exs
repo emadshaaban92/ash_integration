@@ -1,7 +1,7 @@
 defmodule Example.Outbound.SubscriptionValidationTest do
   @moduledoc """
   Create/update validation of a subscription's `(event_type, version)` against
-  the derived catalog (Task 10, §3.2/§6.1). The example catalog declares
+  the derived catalog (§3.2/§6.1). The example catalog declares
   `widget.updated` v1 and `stock.changed` v1 (see `Example.Catalog.Widget`).
   """
   use Example.DataCase, async: false

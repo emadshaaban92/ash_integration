@@ -73,7 +73,7 @@ defmodule Example.Outbound.RetentionTest do
   test "a terminal/poison Event (undispatched, no deliveries) is NOT reaped by retention" do
     ancient = DateTime.add(DateTime.utc_now(), -400, :day)
 
-    # A poison event (#60): burned through its dispatch attempts, still in the
+    # A poison event: burned through its dispatch attempts, still in the
     # outbox (dispatched_at NULL), so it never materialized any deliveries. It is
     # old enough and delivery-free, so the pre-guard filter would have reaped it —
     # which would silently unblock its lane and let a newer same-key event jump

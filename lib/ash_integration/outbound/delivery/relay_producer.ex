@@ -44,7 +44,7 @@ defmodule AshIntegration.Outbound.Delivery.RelayProducer do
   # The sole discovery trigger: pick up rows newly promoted to `:scheduled` (this
   # node or any other) or whose backoff just elapsed. Reschedules itself. It does
   # NOT reap poison rows — a terminally-stuck delivery is left `:scheduled` with its
-  # lane blocked by design (#60) until a human/host resolves it.
+  # lane blocked by design until a human/host resolves it.
   def handle_info(:poll, state) do
     schedule_poll(state.poll_interval)
     produce(state)

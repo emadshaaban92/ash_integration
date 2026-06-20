@@ -42,7 +42,7 @@ defmodule AshIntegration.Outbound.Wire.Transport do
   @doc """
   Optional batched send. Defaults (`deliver_batch/2` below) to one `deliver/2` per
   event, so a transport only implements it to actually coalesce the wire calls
-  (CloudEvents batch-mode HTTP #36, a future multi-row DB insert). Kafka never
+  (CloudEvents batch-mode HTTP, a future multi-row DB insert). Kafka never
   implements it — `:brod`'s internal request-coalescing already gives wire
   efficiency while preserving per-message acks, and app-level batching there would
   add partial-failure demux risk for no gain. Must return one result per event id.
@@ -103,7 +103,7 @@ defmodule AshIntegration.Outbound.Wire.Transport do
   `deliver_batch/2` coalesces the wire calls and reports per row; otherwise this
   falls back to one `deliver/2` per event — the additive default that lets the
   delivery relay carry a real batch interface from day one while batchable
-  transports land later (#36). The default impl preserves the at-least-once,
+  transports land later. The default impl preserves the at-least-once,
   per-row contract exactly: each row gets its own `{:ok, _}` / `{:error, _}`.
   """
   @spec deliver_batch(struct(), [struct()]) :: batch_results()

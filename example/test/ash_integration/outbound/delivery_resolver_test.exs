@@ -1,7 +1,7 @@
 defmodule Example.Outbound.DeliveryResolverTest do
   @moduledoc """
   Unit tests for `AshIntegration.Outbound.Delivery.Resolver` — the transport-shaped
-  transform output (§7, Task 32): the transform mutates a PRE-SEEDED `result`
+  transform output (§7): the transform mutates a PRE-SEEDED `result`
   (body, headers, routing); the resolver normalizes/validates it, signs the final
   body, and returns the wire descriptor to snapshot on the event.
 
