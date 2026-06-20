@@ -1,9 +1,10 @@
 defmodule Example.Outbound.HealthTest do
   @moduledoc """
   DB-backed coverage for derived suspension (`design/connection-health.md`): the
-  recompute trip signal (§5) and park-on-suspend (§6). Suspension is no longer an
-  inline counter — it is recomputed from the delivery `Log` ("no success among the
-  last N transport/response outcomes"). The recovery probe (§7) is a later phase.
+  recompute trip signal (§5), park-on-suspend (§6), and the bounded recovery probe
+  (§7). Suspension is recomputed from the delivery `Log` ("no success among the last
+  N transport/response outcomes"); the probe delegates promotion to the scheduler so
+  it inherits every ordering gate.
   """
   use Example.DataCase, async: false
 
@@ -99,11 +100,165 @@ defmodule Example.Outbound.HealthTest do
     end
   end
 
-  # The bounded automatic-recovery probe is a later phase (design §13). In this
-  # phase recovery is manual (`unsuspend`); a logged success clearing suspension on
-  # the next recompute is covered above.
+  describe "bounded probe (§7)" do
+    test "promotes one schedulable head for a suspended connection; a success recovers it",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+        ev = create_event!(s1, event_key: "p1", state: :scheduled)
+
+        record_failure!(ev, "transport")
+        Health.recompute()
+        assert reload(dest).suspended
+        assert reload(ev).state == :pending, "parked on suspend"
+
+        Health.probe()
+        assert reload(ev).state == :scheduled, "probe promoted one head"
+
+        deliver!(reload(ev))
+        Health.recompute()
+        refute reload(dest).suspended, "observed success clears suspension"
+      end)
+    end
+
+    test "probe load is bounded by probe_batch across the suspended set", %{connection: dest} do
+      with_health([window_attempts: 1, probe_batch: 1], fn ->
+        other = create_connection!(create_user!())
+
+        d1 = create_event!(create_subscription!(dest, "widget.updated"), state: :scheduled)
+        record_failure!(d1, "transport")
+        Health.recompute()
+
+        d2 = create_event!(create_subscription!(other, "widget.updated"), state: :scheduled)
+        record_failure!(d2, "transport")
+        Health.recompute()
+
+        assert reload(dest).suspended and reload(other).suspended
+
+        Health.probe()
+
+        scheduled = Enum.count([reload(d1), reload(d2)], &(&1.state == :scheduled))
+        assert scheduled == 1, "probe_batch=1 promotes exactly one across the suspended set"
+      end)
+    end
+
+    test "a probe never jumps a parked head (inherits the scheduler's gates)",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+
+        # Trip + suspend the connection, then remove that lane so the ONLY remaining
+        # work sits behind a parked head.
+        trip = create_event!(s1, event_key: "trip", state: :scheduled)
+        record_failure!(trip, "transport")
+        Health.recompute()
+        assert reload(dest).suspended
+        cancel!(reload(trip))
+
+        # Lane "p1": a parked head with a younger deliverable behind it.
+        parked = create_event!(s1, event_key: "p1", state: :parked, delivery: nil)
+        younger = create_event!(s1, event_key: "p1", state: :pending)
+
+        Health.probe()
+
+        assert reload(younger).state == :pending, "must not promote past the parked head"
+        assert reload(parked).state == :parked
+      end)
+    end
+
+    test "a connection probe skips a response-suspended subscription's lane",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+
+        trip = create_event!(s1, event_key: "trip", state: :scheduled)
+        record_failure!(trip, "transport")
+        Health.recompute()
+        suspend!(s1)
+        assert reload(dest).suspended and reload(s1).suspended
+        cancel!(reload(trip))
+
+        pending = create_event!(s1, event_key: "p1", state: :pending)
+
+        Health.probe()
+
+        assert reload(pending).state == :pending,
+               "the connection probe must not promote a response-suspended subscription's row"
+      end)
+    end
+
+    test "a probe respects the high-water gate (#56) — no jump past an undispatched older event",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+
+        trip = create_event!(s1, event_key: "trip", state: :scheduled)
+        record_failure!(trip, "transport")
+        Health.recompute()
+        assert reload(dest).suspended
+        cancel!(reload(trip))
+
+        # An OLDER same-key Event still in the outbox (dispatched_at IS NULL), then a
+        # newer event whose delivery materialised on the same lane. #56 holds the
+        # newer behind the older until the older dispatches.
+        older = seed_undispatched_event!(event_type: "widget.updated", event_key: "p1")
+        newer = create_event!(s1, event_key: "p1")
+
+        Health.probe()
+
+        assert reload(newer).state == :pending,
+               "must not promote past the undispatched older event"
+
+        # Once the older event dispatches, the gate clears and the probe promotes it.
+        mark_dispatched!(older)
+        Health.probe()
+        assert reload(newer).state == :scheduled
+      end)
+    end
+  end
 
   # ── Helpers ───────────────────────────────────────────────────────────────
+
+  defp cancel!(event) do
+    Ash.update!(Ash.Changeset.for_update(event, :cancel, %{}, authorize?: false),
+      authorize?: false
+    )
+  end
+
+  defp suspend!(record) do
+    Ash.update!(Ash.Changeset.for_update(record, :suspend, %{}, authorize?: false),
+      authorize?: false
+    )
+  end
+
+  # An Event with no delivery and no `dispatched_at` — still in the outbox, for the
+  # high-water gate. Seed it BEFORE the newer event so its UUIDv7 id is older.
+  defp seed_undispatched_event!(opts) do
+    AshIntegration.event_resource()
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        event_type: Keyword.fetch!(opts, :event_type),
+        version: Keyword.get(opts, :version, 1),
+        event_key: Keyword.fetch!(opts, :event_key),
+        source_resource: "widget",
+        source_resource_id: "r1",
+        source_action: "update",
+        data: %{}
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
+  end
+
+  defp mark_dispatched!(event) do
+    Ash.update!(
+      Ash.Changeset.for_update(event, :mark_dispatched, %{dispatched_at: DateTime.utc_now()},
+        authorize?: false
+      ),
+      authorize?: false
+    )
+  end
 
   defp with_window(n, fun), do: with_health([window_attempts: n], fun)
 

@@ -1,11 +1,11 @@
 # Connection Health: Derived Suspension & Bounded Probes (Design Doc)
 
-**Status:** In progress, phased (§13). Schema groundwork (`failure_class` + window
+**Status:** Complete, phased (§13). Schema groundwork (`failure_class` + window
 indexes) **landed in #41** (phase 0); the **derived recompute + park + removal of
-`consecutive_failures`** landed in **#45** (phase 1); the **phase-2** refactor that
-single-sources the scheduler's schedulable-head query (suspension predicate as its
-one parameter, moved to Ecto) is **this PR**. The **bounded probe** follows as phase
-3 — a second caller of that query (see §7/§13). · **Scope:** replacing the outbound suspension
+`consecutive_failures`** in **#45** (phase 1); the **single-sourced, Ecto**
+schedulable-head query in **#46** (phase 2); the **bounded recovery probe** — a
+second caller of that query, restoring automatic recovery — is **this PR** (phase 3).
+· **Scope:** replacing the outbound suspension
 mechanism — today an incrementally-maintained `consecutive_failures` counter plus a
 *manual* unsuspend — with a **derived, windowed** health signal recomputed from the
 delivery `Log`, a **park-on-suspend** step that frees delivery capacity, and a
@@ -368,10 +368,10 @@ a second caller of it:
   (one head per entity, `≤ M` per tick, round-robin by the `Log` cursor) without
   touching the correctness core.
 
-This is **phase 2** (refactor the scheduler query to the single-parameter,
-composable form) gating **phase 3** (the probe as its second caller); see §13. It is
-also why the probe is deferred rather than shipped with phase 1 — shipping the
-thinner promotion would have been incorrect.
+This split is why the probe was deferred past phase 1: **phase 2** refactored the
+scheduler query to the single-parameter, composable form (#46), and **phase 3** adds
+the probe as its second caller (`Scheduler.promote_probe/2`). Shipping the thinner
+promotion with phase 1 would have been incorrect.
 
 ## 8. Manual control is preserved
 
@@ -387,6 +387,17 @@ fixing the endpoint and letting the probe clear it. The old manual `unsuspend`
 action can stay as an operator override that clears `suspended` early (the next
 recompute will re-set it if the connection is still failing), but it is no longer
 *required* for recovery.
+
+**Edge: an operator-suspended entity with no `Log` history is inert under the
+derived machinery.** Both the recompute and the probe key off the entity's
+transport/response `Log` window (the recompute's candidate set is "entities with
+such a row"; the probe orders by each entity's most recent such row). An operator
+who suspends a *quiet* connection — one that has never logged a transport
+failure/success — therefore won't be auto-probed *or* auto-unsuspended: it has no
+window to evaluate. This cannot arise from derived suspension (a tripped entity has
+failures in the `Log` by definition); it is specific to a manual `suspend` on an
+idle entity, and is consistent with "manual suspend ⇒ manual `unsuspend`/`activate`."
+Recovery for such an entity is the operator action that suspended it, not the probe.
 
 ## 9. Cross-node behavior
 
@@ -520,29 +531,26 @@ are dashboard aggregates, not telemetry.
 ```elixir
 config :ash_integration,
   health: [
-    window_attempts:      5,        # N — failures-in-a-row to trip (was the suspension threshold)
-    recompute_interval_ms: 60_000   # how often suspended sets are recomputed
-    # phase 3 (probe) adds: probe_interval_ms: 30_000, probe_batch: 3 (M ≪ delivery concurrency)
+    window_attempts:   5,         # N — failures-in-a-row to trip (was the suspension threshold)
+    # recompute_interval_ms — defaults to lease + 30s (derived; see below). Override to tune latency.
+    probe_interval_ms: 30_000,    # the bounded probe tick
+    probe_batch:       3          # M — suspended entities probed per scope per tick (M ≪ concurrency)
   ]
 ```
 
-Phase 1 ships only `window_attempts` and `recompute_interval_ms`; the probe knobs
-arrive with the probe (phase 3), so dead config is never advertised.
-
-`recompute_interval_ms` must comfortably exceed delivery latency, or a
-recovering connection's in-flight probe success won't have landed in the `Log`
-before the recompute re-evaluates and bounces it back into the set. The relevant
-bound is not "typical" latency but the **worst-case probe duration**, which is
-the soft-lease window — `Delivery.Supervisor.lease_seconds/0 = http_max_timeout +
-30s` (§2). A probe that opens just before a slow endpoint's timeout can take the
-full lease to resolve; if `recompute_interval_ms` is shorter than that, the
-recompute can fire on a connection whose probe is still in flight and hold it
-suspended for another whole interval. So `recompute_interval_ms` should be sized
-against the deployment's actual `http_max_timeout` (a high max-timeout demands a
-longer recompute interval, not the 60s default), and `probe_interval_ms`
-similarly should not re-probe a connection whose previous probe is still
-in-flight. These two intervals are **tuning constraints derived from
-`http_max_timeout`**, not free-standing constants.
+`recompute_interval_ms` must comfortably exceed the **worst-case probe
+duration** — not "typical" latency but the soft-lease window,
+`Delivery.Supervisor.lease_seconds/0 = http_max_timeout + 30s` (§2). A probe that
+opens just before a slow endpoint's timeout can take the full lease to resolve; if
+`recompute_interval_ms` were shorter, the recompute could fire while that probe is
+still in flight and hold the entity suspended for another whole interval. (This is
+purely *recovery latency*, never a mis-flip: with no success logged yet, the entity
+correctly stays suspended.) Because of this, the **default is derived, not a
+free-standing constant**: `recompute_interval_ms` defaults to
+`lease_seconds * 1000 + 30s`, so it scales with the host's `http_max_timeout`
+instead of assuming a sub-30s timeout (which a flat 60s default silently would).
+`probe_interval_ms` should likewise not re-probe an entity whose previous probe is
+still in flight.
 
 **Implementation phases.** Each phase is independently shippable and leaves the
 system correct; recovery stays manual until phase 3.
@@ -575,14 +583,18 @@ system correct; recovery stays manual until phase 3.
   ordering suite (lane head, parked-head blocking, suspension, high-water #56,
   suppression) is unchanged.
 
-- **Phase 3 — bounded probe (both scopes).** The probe as a **second caller** of
-  the phase-2 query — relaxing only its own scope's suspension for the chosen `M`
-  ids, bounding composed on top (one head per entity, round-robin by the `Log`
-  cursor) (§7). Adds `probe_interval_ms`/`probe_batch` config and probe telemetry.
-  Restores automatic recovery. *Verify:* `M`-bounded load independent of set size;
-  round-robin fairness; recovery via probe success; **a probe never jumps a parked
-  head, an undispatched older event (#56), or a response-suspended subscription**;
-  fresh head promoted after a probe poisons.
+- **Phase 3 — bounded recovery probe (both scopes) — this PR.** `Health.probe/0`
+  picks `≤ probe_batch` suspended entities per scope (oldest-probed-first by the
+  `Log` cursor, skipping any with a live `:scheduled` row) and calls
+  `Scheduler.promote_probe/2`, which runs the **phase-2 query** with only that
+  entity's own suspension relaxed (`d.id == ^id` / `sub.id == ^id`, the other scope
+  still `false`), composes oldest-first + `limit(1)` on top, and force-`:schedule`s
+  the head (no suppression — a probe must hit the transport). Adds
+  `probe_interval_ms`/`probe_batch` config and `:probe` telemetry; restores automatic
+  recovery. *Verified:* `M`-bounded load independent of set size; recovery via probe
+  success; and — by reusing the shared query — **a probe never jumps a parked head,
+  an undispatched older event (#56), or a response-suspended subscription** (covered
+  by dedicated tests).
 
 ## 14. Open questions
 
