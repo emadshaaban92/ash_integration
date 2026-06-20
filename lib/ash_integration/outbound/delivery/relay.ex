@@ -13,17 +13,17 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
 
   This is the **muscle**; the `EventScheduler` is the **brain**. The scheduler
   promotes `pending → scheduled` (owning ordering: lane-head selection, the
-  high-water gate #57, suspension); this relay only executes rows already chosen as
+  high-water gate, suspension); this relay only executes rows already chosen as
   lane heads. The partial unique index `(connection_id, event_key) WHERE
   state = 'scheduled'` guarantees at most one in-flight row per lane, so a claimed
   batch is a set of DISTINCT-`event_key` heads — there is no intra-batch same-key
-  ordering hazard, and batching (deferred to #36) is ordering-safe by construction.
+  ordering hazard, and batching (deferred) is ordering-safe by construction.
 
   **Outcomes (per row).** A success → `:deliver` (slot freed). A retryable failure
   → `:record_attempt_error`: stamp `next_attempt_at` (durable backoff), leave the
   row `:scheduled` so the lane stays blocked while it retries (in-order-per-key).
   At the poison ceiling (`attempts >= max_attempts`, counted on the claim) → leave
-  `:scheduled`, surface loudly once (#74), never auto-resolve (#60). Suspension
+  `:scheduled`, surface loudly once, never auto-resolve. Suspension
   mid-flight → `:reset_to_pending` (the scheduler re-promotes once unsuspended).
 
   **The lease-token fence.** Every result-writing action is filtered on
@@ -80,7 +80,7 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
       batchers: [
         default: [
           concurrency: config[:concurrency],
-          # batch_size = 1 today (no real transport batching yet, #36). The batch_key
+          # batch_size = 1 today (no real transport batching yet). The batch_key
           # keeps any future batch single-connection.
           batch_size: Stage.transport_batch_size(),
           batch_timeout: Stage.batch_timeout_ms()

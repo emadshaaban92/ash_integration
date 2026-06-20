@@ -88,7 +88,7 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
         type: :pos_integer,
         default: 20,
         doc:
-          "Claim attempts before an undispatched Event becomes terminal (poison): left stuck, lane blocked, never auto-resolved (#60)."
+          "Claim attempts before an undispatched Event becomes terminal (poison): left stuck, lane blocked, never auto-resolved."
       ]
     ]
   end

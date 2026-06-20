@@ -2,7 +2,7 @@ defmodule Example.Outbound.ProjectProbe do
   @moduledoc """
   Test probe: records the batch size of each `project/3` call, so a test can
   prove dispatch runs `project` **once per (event_type, version) group** rather
-  than once per event (the capture doc's batched-`project` win, open #2, that the
+  than once per event (the capture doc's batched-`project` win, an open question, that the
   relay realizes). Inert unless a test starts it.
   """
   use Agent

@@ -1,6 +1,6 @@
 defmodule Example.Outbound.EventDispatchTest do
   @moduledoc """
-  End-to-end tests for the event-first dispatcher (Task 3): a source change fans
+  End-to-end tests for the event-first dispatcher: a source change fans
   out via the registry into one Event per matching subscription, with the loader
   building the snapshot and the per-subscription transform caching the body.
 
@@ -9,7 +9,7 @@ defmodule Example.Outbound.EventDispatchTest do
   loader keyed on the widget id, so both events land on the SAME
   `(connection, event_key)` ordering lane yet must NOT coalesce each other
   (coalescing is per `(subscription, event_key)`). The one-in-flight enforcement
-  itself is the scheduler's job (Task 4); here we prove the precondition —
+  itself is the scheduler's job; here we prove the precondition —
   same lane, distinct subscriptions, both deliverable.
   """
   use Example.DataCase, async: false

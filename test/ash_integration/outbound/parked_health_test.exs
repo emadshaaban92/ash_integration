@@ -29,7 +29,7 @@ defmodule AshIntegration.Outbound.ParkedHealthTest do
       assert ParkedHealth.unhealthy?(%{parked_count: 10})
     end
 
-    test "an unloaded aggregate raises rather than silently reading healthy (cf. #14)" do
+    test "an unloaded aggregate raises rather than silently reading healthy" do
       # Built via `Map.new/1` (typed as generic `map()`) so Elixir 1.20's type
       # checker doesn't prove this call always raises — it intentionally does, but a
       # static `%{parked_count: %Ash.NotLoaded{}}` literal trips --warnings-as-errors.

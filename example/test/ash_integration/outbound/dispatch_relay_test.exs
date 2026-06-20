@@ -1,6 +1,6 @@
 defmodule Example.Outbound.DispatchRelayTest do
   @moduledoc """
-  Tests for the outbox **dispatch relay** (outbound-architecture.md §6, #79).
+  Tests for the outbox **dispatch relay** (outbound-architecture.md §6).
 
   Capture writes only undispatched `Event` rows; the relay claims them and fans
   them out. Prep (`project` + transform) runs in the Broadway processor stage
@@ -11,10 +11,10 @@ defmodule Example.Outbound.DispatchRelayTest do
     * the outbox contract (capture enqueues no job; Events start undispatched);
     * the in-process drain (real relay callbacks) materializing + stamping;
     * **batched `project`** — one call per (type, version);
-    * the #79 invariant — a bad transform parks only its own delivery, never the
+    * the isolation invariant — a bad transform parks only its own delivery, never the
       batch, and never a sibling subscription;
     * atomicity — a failed materialize rolls the whole event back (nothing stamped);
-    * claim semantics, terminal (poison) events (#60);
+    * claim semantics, terminal (poison) events;
     * the Broadway glue (`prepare_messages`/`handle_message`/`handle_batch`/ack);
     * the real async pipeline over an isolated `start_supervised!` instance.
   """
@@ -73,7 +73,7 @@ defmodule Example.Outbound.DispatchRelayTest do
     end
   end
 
-  describe "batched project (open #2)" do
+  describe "batched project (open question)" do
     setup do
       start_supervised!(ProjectProbe)
       :ok
@@ -94,7 +94,7 @@ defmodule Example.Outbound.DispatchRelayTest do
     end
   end
 
-  describe "#79 invariant: a bad transform never fails the batch nor a sibling" do
+  describe "isolation invariant: a bad transform never fails the batch nor a sibling" do
     test "the failing subscription parks; the sibling delivers; the event is stamped", %{
       owner: owner
     } do
@@ -197,7 +197,7 @@ defmodule Example.Outbound.DispatchRelayTest do
     end
   end
 
-  describe "terminal (poison) events — never auto-resolved (#60)" do
+  describe "terminal (poison) events — never auto-resolved" do
     test "an event at the attempt ceiling is never re-claimed and stays stuck", %{
       connection: conn
     } do

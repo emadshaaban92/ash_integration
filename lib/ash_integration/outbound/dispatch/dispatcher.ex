@@ -18,7 +18,7 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     * `record_dispatch_errors/1` — record a `dispatch_error` on the *failed* path
       (relay ack / poison), never stamping `dispatched_at`.
 
-  Un-sticking a poison event (operator recourse, #60) is just the Event's
+  Un-sticking a poison event (operator recourse) is just the Event's
   `:reset_dispatch` action (reset the bookkeeping so `claim/1` picks it up again);
   the relay re-attempts it on its next poll.
 
@@ -127,7 +127,7 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
   excludes it, so it won't be retried, and we record a poison-flavoured
   `dispatch_error` + emit `[:ash_integration, :dispatch, :poison]` telemetry. This
   fires exactly once — the attempt that crossed the ceiling. We still do **not**
-  stamp `dispatched_at`: the event stays stuck and its lane blocked, by design (#60).
+  stamp `dispatched_at`: the event stays stuck and its lane blocked, by design.
   Find terminal events with `dispatched_at IS NULL AND dispatch_attempts >= N`.
   """
   def record_dispatch_errors([]), do: :ok

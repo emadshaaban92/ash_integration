@@ -1,10 +1,10 @@
 # Connection Health: Derived Suspension & Bounded Probes (Design Doc)
 
-**Status:** Complete, phased (§13). Schema groundwork (`failure_class` + window
-indexes) **landed in #41** (phase 0); the **derived recompute + park + removal of
-`consecutive_failures`** in **#45** (phase 1); the **single-sourced, Ecto**
-schedulable-head query in **#46** (phase 2); the **bounded recovery probe** — a
-second caller of that query, restoring automatic recovery — is **this PR** (phase 3).
+**Status:** Complete, phased (§13). The schema groundwork (`failure_class` + window
+indexes) is phase 0; the derived recompute + park + removal of
+`consecutive_failures` is phase 1; the single-sourced, Ecto schedulable-head query
+is phase 2; the bounded recovery probe — a second caller of that query, restoring
+automatic recovery — is phase 3. All four have shipped.
 · **Scope:** replacing the outbound suspension
 mechanism — today an incrementally-maintained `consecutive_failures` counter plus a
 *manual* unsuspend — with a **derived, windowed** health signal recomputed from the
@@ -62,7 +62,7 @@ Three load-bearing pieces, each independently simple:
    scheduler's own schedulable-head selection** so a probe is held to the exact same
    ordering gates as a normal promotion (§7).
 
-**Phasing (§13).** Pieces 1 and 2 ship first (PR #45). Until the probe lands,
+**Phasing (§13).** Pieces 1 and 2 ship first (phase 1). Until the probe lands,
 recovery stays **manual** — the retained `unsuspend` action, exactly as today — so
 phase 1 is a strict improvement on the hot-row write and slot-pressure axes and
 *neutral* on recovery (it does not regress to "frozen forever": an operator
@@ -149,7 +149,7 @@ set per scope from the `Log` and writes `suspended` **only where it changed**:
 This replaces the per-failure `inc` with a **per-transition** write: rare, off
 the hot path, and bounded by the number of connections actually flipping state.
 
-**`Log` requirement (landed in #41).** The recompute must tell transport failures
+**`Log` requirement (phase 0).** The recompute must tell transport failures
 from response rejections and from successes. The discriminator is now in place: a
 nullable **`failure_class`** column on the `Log` (`:transport` / `:response`, nil
 on non-failures), persisted from the same class `OnDeliveryFailure.classify/1`
@@ -189,18 +189,18 @@ response health, so one success row legitimately counts in both scopes' windows.
 
 Three things make the cost bound hold:
 
-- **The supporting index already exists (#41) — the pre-existing ones don't
+- **The supporting index already exists (phase 0) — the pre-existing ones don't
   serve it.** The `Log` was previously indexed on `(connection_id)`,
   `(created_at)`, and `(connection_id, event_key, created_at)`. The composite
   looks usable but is not: `event_key` sits **between** `connection_id` and the
   recency key, so it orders a connection's rows by key *then* time — to read a
   connection's rows in pure recency order you would have to scan **all** of its
   rows across every `event_key` and re-sort (the full-history sort, on exactly
-  the high-volume connections we care about). So #41 landed the partial,
+  the high-volume connections we care about). So phase 0 added the partial,
   scope-keyed, recency-ordered index this recompute needs:
 
   ```sql
-  -- landed in #41 (outbound_logs_conn_transport_health_idx)
+  -- the outbound_logs_conn_transport_health_idx index
   CREATE INDEX ... ON <log> (connection_id, id)
     INCLUDE (status)
     WHERE status = 'success' OR failure_class = 'transport';
@@ -237,7 +237,7 @@ Three things make the cost bound hold:
   table has a ceiling set by the retention policy rather than growing without
   bound.
 
-Net: the recompute is cheap *given the index* (which #41 already landed), runs
+Net: the recompute is cheap *given the index* (which phase 0 already added), runs
 every ~60s off the hot path, and its cost is set by recent activity, not by `Log`
 size.
 
@@ -342,7 +342,7 @@ promotion is, with no exceptions:
 - the **lane head** rule (an older `pending`/`parked` sibling on the same
   `(connection_id, event_key)` blocks the lane — never promote past a parked head);
 - the **one-in-flight-per-lane** slot-free check;
-- the **high-water gate (#56)** — never promote a head while an older same-key
+- the **high-water gate** — never promote a head while an older same-key
   Event is still undispatched;
 - the **other scope's suspension** — a connection probe must not promote a row whose
   *subscription* is response-suspended, and vice-versa.
@@ -369,7 +369,7 @@ a second caller of it:
   touching the correctness core.
 
 This split is why the probe was deferred past phase 1: **phase 2** refactored the
-scheduler query to the single-parameter, composable form (#46), and **phase 3** adds
+scheduler query to the single-parameter, composable form, and **phase 3** adds
 the probe as its second caller (`Scheduler.promote_probe/2`). Shipping the thinner
 promotion with phase 1 would have been incorrect.
 
@@ -549,20 +549,25 @@ correctly stays suspended.) Because of this, the **default is derived, not a
 free-standing constant**: `recompute_interval_ms` defaults to
 `lease_seconds * 1000 + 30s`, so it scales with the host's `http_max_timeout`
 instead of assuming a sub-30s timeout (which a flat 60s default silently would).
-`probe_interval_ms` should likewise not re-probe an entity whose previous probe is
-still in flight.
+Note the same recompute cadence also **paces trip *detection***, not just recovery:
+the suspended set is only recomputed each interval, so a host that picks a large
+`http_max_timeout` (and thus a long derived interval) waits proportionally longer
+to *mark* a failing entity suspended as well — an operator who wants faster
+tripping there can override `recompute_interval_ms` down, accepting the
+recovery-latency/re-flip-margin caveat above. `probe_interval_ms` should likewise
+not re-probe an entity whose previous probe is still in flight.
 
 **Implementation phases.** Each phase is independently shippable and leaves the
 system correct; recovery stays manual until phase 3.
 
-- **Phase 0 — `Log` discriminator + window indexes — ✅ landed in #41.**
+- **Phase 0 — `Log` discriminator + window indexes — ✅ done.**
   `failure_class` persisted on the delivery `Log`, plus the two partial per-scope
   indexes (`(connection_id, id) … WHERE status='success' OR
   failure_class='transport'` and the `subscription_id`/`response` analog, `INCLUDE
   (status)`) that keep each top-`N`-per-scope read `O(groups × N)` as the `Log`
   grows (§5). Purely additive; no behavior change.
 
-- **Phase 1 — derived recompute + park + removal — PR #45 (both scopes).** The
+- **Phase 1 — derived recompute + park + removal — ✅ done (both scopes).** The
   periodic health pass computing `suspended` from the `Log` (§5), transition-only
   filtered writes, transition telemetry; the park-on-suspend revert (§6); and the
   removal of `consecutive_failures` (attribute, the `inc`, the `record_success`
@@ -572,18 +577,18 @@ system correct; recovery stays manual until phase 3.
   un-leased non-poison `:scheduled` rows return to `pending`, live-leased rows
   drain, poison rows stay, slots free.
 
-- **Phase 2 — single-source the scheduler's schedulable-head query — this PR
+- **Phase 2 — single-source the scheduler's schedulable-head query — ✅ done
   (enabler).** `find_schedulable_events` is refactored to `schedulable_heads/1`,
   whose **suspension predicate is its one parameter** (an Ecto `dynamic`); every
-  other gate (lane head via `lane_heads/0`, slot-free, high-water #56, the other
+  other gate (lane head via `lane_heads/0`, slot-free, high-water, the other
   scope's suspension) is fixed and shared (§7). The normal sweep is the one caller,
   passing `both_healthy/0`. Pure refactor (no behavior change), and the query moved
   off raw SQL **to Ecto** — the host resources are queried as Ecto sources
   (`{table, resource}` / pinned resource modules). *Verified:* the full scheduler
-  ordering suite (lane head, parked-head blocking, suspension, high-water #56,
+  ordering suite (lane head, parked-head blocking, suspension, high-water gate,
   suppression) is unchanged.
 
-- **Phase 3 — bounded recovery probe (both scopes) — this PR.** `Health.probe/0`
+- **Phase 3 — bounded recovery probe (both scopes) — ✅ done.** `Health.probe/0`
   picks `≤ probe_batch` suspended entities per scope (oldest-probed-first by the
   `Log` cursor, skipping any with a live `:scheduled` row) and calls
   `Scheduler.promote_probe/2`, which runs the **phase-2 query** with only that
@@ -593,8 +598,8 @@ system correct; recovery stays manual until phase 3.
   `probe_interval_ms`/`probe_batch` config and `:probe` telemetry; restores automatic
   recovery. *Verified:* `M`-bounded load independent of set size; recovery via probe
   success; and — by reusing the shared query — **a probe never jumps a parked head,
-  an undispatched older event (#56), or a response-suspended subscription** (covered
-  by dedicated tests).
+  an undispatched older event (the high-water gate), or a response-suspended
+  subscription** (covered by dedicated tests).
 
 ## 14. Open questions
 

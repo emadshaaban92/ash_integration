@@ -43,7 +43,7 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
     * `:parked`   — parked backlog at/above the threshold (chronically parked).
 
   Requires `:parked_count` to be loaded — an unloaded aggregate raises rather than
-  silently reading healthy (don't hide a missing load; cf. #14).
+  silently reading healthy (don't hide a missing load).
   """
   @spec status(map()) :: status()
   def status(record) do

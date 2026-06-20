@@ -183,7 +183,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   (`:connection` or `:subscription`), so the relay can observe whether the endpoint
   recovered. The same `schedulable_heads/1` query as the sweep — only this scope's
   suspension is relaxed for `id`; every other gate (lane head / parked-head
-  blocking, slot-free, high-water #56, **the other scope's** suspension) still
+  blocking, slot-free, high-water, **the other scope's** suspension) still
   holds, so a probe can never deliver out of order or to a row the other scope has
   halted. Forces a real `:schedule` (never a content-suppression) so the probe
   actually exercises the transport. Returns `:scheduled` or `:none`.
@@ -238,7 +238,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   #     head — even an older one — blocks its lane);
   #   * slot-free — `slot_taken/0`: the lane's one in-flight (`:scheduled`) slot is
   #     not already occupied;
-  #   * high-water gate (#56) — `older_undispatched/0`: no OLDER same-key Event is
+  #   * high-water gate — `older_undispatched/0`: no OLDER same-key Event is
   #     still undispatched and targeting this connection (an active subscription on
   #     its type/version). Without it a newer event whose delivery already
   #     materialised could be delivered ahead of an older one still fanning out,

@@ -14,7 +14,7 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
 
   The delivery relay claims `:scheduled` `EventDelivery` rows directly and executes
   them — the muscle to the `EventScheduler`'s brain (the scheduler still owns
-  ordering: lane-head selection, the high-water gate #57, suspension). This is the
+  ordering: lane-head selection, the high-water gate, suspension). This is the
   delivery-side mirror of `AshIntegration.Outbound.Dispatch.Supervisor`.
 
   ## Config — one nested key, owned by this stage
@@ -39,7 +39,7 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
   (`AshIntegration.http_max_timeout_ms/0`; a per-connection `timeout_ms` is validated
   ≤ it). So `lease_seconds/0` is `http_max_timeout_ms + margin`, guaranteeing the
   lease always outlives the slowest attempt — there is deliberately no
-  `lease_seconds` knob (#86). A lease sized ≫ the transport timeout bounds both
+  `lease_seconds` knob. A lease sized ≫ the transport timeout bounds both
   duplicate concurrent sends and false poisoning under the soft-lease model.
 
   ## How values reach their readers
@@ -66,7 +66,7 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
 
   # Per-batch wire grouping. 1 = no real transport batching yet: each `:scheduled`
   # row is delivered on its own `deliver_batch/2` call. Kept an internal constant
-  # (not a knob) until a batchable transport lands (#36 CloudEvents batch / a future
+  # (not a knob) until a batchable transport lands (CloudEvents batch / a future
   # DB-insert transport), at which point its headline work is the partial-failure
   # demux. The relay already demuxes per row, so growing this is a one-line change.
   @transport_batch_size 1
@@ -110,7 +110,7 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
         type: :pos_integer,
         default: 20,
         doc:
-          "Claim attempts before an undelivered row becomes terminal (poison): left `:scheduled`, lane blocked, never auto-resolved (#60). Counts CLAIMS (a crashed/lease-expired claim still increments), so a too-short lease can falsely poison a slow-but-fine target — correctness over liveness."
+          "Claim attempts before an undelivered row becomes terminal (poison): left `:scheduled`, lane blocked, never auto-resolved. Counts CLAIMS (a crashed/lease-expired claim still increments), so a too-short lease can falsely poison a slow-but-fine target — correctness over liveness."
       ],
       backoff_base_ms: [
         type: :pos_integer,
@@ -163,7 +163,7 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
   @doc """
   Soft-lease window (seconds) a claimed delivery is reserved before reclaim.
   DERIVED from the (globally-capped) transport timeout plus a fixed margin — not a
-  host knob (#86) — so the lease always outlives the slowest attempt.
+  host knob — so the lease always outlives the slowest attempt.
   """
   def lease_seconds do
     ceil((AshIntegration.http_max_timeout_ms() + @lease_margin_ms) / 1000)

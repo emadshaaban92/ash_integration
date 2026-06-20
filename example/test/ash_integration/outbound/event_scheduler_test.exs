@@ -1,11 +1,10 @@
 defmodule Example.Outbound.EventSchedulerTest do
   @moduledoc """
-  Tests for the event-first scheduler + two-level suspension (Task 4).
+  Tests for the event-first scheduler's promotion/ordering.
 
-  Ordering is keyed on `(connection_id, event_key)` — at most one in-flight
-  event per key across ALL subscriptions of the connection, oldest-first — and
-  suspension is two-level: response rejections suspend the subscription, transport
-  failures suspend the connection, and a successful delivery resets both.
+  Ordering is keyed on `(connection_id, event_key)` — at most one in-flight event
+  per key across ALL subscriptions of the connection, oldest-first. Derived
+  suspension (recompute / park / probe) lives in `Example.Outbound.HealthTest`.
   """
   use Example.DataCase, async: false
 
@@ -111,7 +110,7 @@ defmodule Example.Outbound.EventSchedulerTest do
 
       # …then a newer event's delivery materializes. Ordering is by id (no shared
       # timestamp), so even two events captured back-to-back are unambiguously
-      # ordered — the gate holds the newer behind the older (stale final state, #56).
+      # ordered — the gate holds the newer behind the older (stale final state).
       newer = create_event!(s1, event_key: "p1")
 
       Scheduler.sweep()

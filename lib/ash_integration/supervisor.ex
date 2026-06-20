@@ -34,12 +34,12 @@ defmodule AshIntegration.Supervisor do
       children = [
         AshIntegration.Transport.KafkaClientManager,
         # The scheduler (brain): promotes pending → scheduled, owning ordering
-        # (lane-head selection, the high-water gate #57, suspension).
+        # (lane-head selection, the high-water gate, suspension).
         AshIntegration.Outbound.Delivery.Scheduler,
         # The dispatch stage: owns + validates its config (NimbleOptions) and
         # supervises the Broadway outbox relay that claims undispatched Events and
         # fans them out into EventDelivery rows. The scheduler high-water gate
-        # (#57) keeps ordering correct, so running one pipeline per node is safe.
+        # keeps ordering correct, so running one pipeline per node is safe.
         AshIntegration.Outbound.Dispatch.Supervisor,
         # The delivery stage (muscle): owns + validates its config and supervises
         # the Broadway relay that claims `:scheduled` EventDelivery rows and executes
