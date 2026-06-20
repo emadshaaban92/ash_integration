@@ -43,8 +43,9 @@ defmodule AshIntegration.Outbound.Delivery.Health do
       ],
       recompute_interval_ms: [
         type: :pos_integer,
-        default: :timer.seconds(60),
-        doc: "How often the suspended sets are recomputed."
+        default: default_recompute_interval_ms(),
+        doc:
+          "How often the suspended sets are recomputed. Must comfortably exceed the worst-case probe duration (the soft lease = http_max_timeout + margin), or a recovering entity's in-flight probe success won't have landed before re-evaluation — costing one extra interval of recovery latency (never a mis-flip; with no success logged yet the entity correctly stays suspended). The default is derived as lease + 30s so it scales with http_max_timeout rather than assuming a sub-30s timeout."
       ],
       probe_interval_ms: [
         type: :pos_integer,
@@ -58,6 +59,13 @@ defmodule AshIntegration.Outbound.Delivery.Health do
           "M — suspended entities probed per scope per tick. Keep well below delivery concurrency."
       ]
     ]
+  end
+
+  # Recompute cadence derived from the soft lease (§13): a probe started right after
+  # one recompute resolves within `lease` and is visible to the next, so the interval
+  # must exceed the lease. lease + 30s keeps that margin at any `http_max_timeout`.
+  defp default_recompute_interval_ms do
+    Stage.lease_seconds() * 1000 + :timer.seconds(30)
   end
 
   @doc "Validate a `:health` opts keyword against `opts_schema/0`."
@@ -201,6 +209,11 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   # that row IS its last probe, since park left it no other traffic) — skipping any
   # that still hold a live (non-poison) `:scheduled` delivery so a probe is never
   # stacked. Promotion itself is the scheduler's job (`promote_probe/2`).
+  #
+  # The `JOIN LATERAL … LIMIT 1` is an inner join, so an entity with NO transport/
+  # response `Log` row is excluded — a manual `suspend` on a quiet entity is inert
+  # here (no window to probe), recovered by the operator, not the probe. Derived
+  # suspension can't hit this (a tripped entity has failures in the `Log`). See §8.
   # sobelow_skip ["SQL.Query"]
   defp pick_suspended(scope, m) do
     sql = """

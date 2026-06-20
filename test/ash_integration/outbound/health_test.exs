@@ -10,13 +10,21 @@ defmodule AshIntegration.Outbound.Delivery.HealthTest do
   alias AshIntegration.Outbound.Delivery.Health
 
   describe "opts_schema/0 defaults" do
-    test "match the design doc (N=5, 60s recompute, 30s probe, M=3)" do
+    test "match the design doc (N=5, 30s probe, M=3)" do
       defaults = NimbleOptions.validate!([], Health.opts_schema())
 
       assert defaults[:window_attempts] == 5
-      assert defaults[:recompute_interval_ms] == 60_000
       assert defaults[:probe_interval_ms] == 30_000
       assert defaults[:probe_batch] == 3
+    end
+
+    test "recompute interval derives from the lease (must exceed the worst-case probe)" do
+      defaults = NimbleOptions.validate!([], Health.opts_schema())
+      lease_ms = AshIntegration.Outbound.Delivery.Supervisor.lease_seconds() * 1000
+
+      # lease + 30s, and strictly greater than the lease (§13).
+      assert defaults[:recompute_interval_ms] == lease_ms + 30_000
+      assert defaults[:recompute_interval_ms] > lease_ms
     end
   end
 

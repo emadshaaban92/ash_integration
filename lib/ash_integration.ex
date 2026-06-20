@@ -45,7 +45,8 @@ defmodule AshIntegration do
         ],
         health: [
           window_attempts:       5,
-          recompute_interval_ms: 60_000,
+          # recompute_interval_ms defaults to the soft lease + 30s (so it scales with
+          # http_max_timeout); override only to tune recovery latency.
           probe_interval_ms:     30_000,
           probe_batch:           3
         ]

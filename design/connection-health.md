@@ -388,6 +388,17 @@ action can stay as an operator override that clears `suspended` early (the next
 recompute will re-set it if the connection is still failing), but it is no longer
 *required* for recovery.
 
+**Edge: an operator-suspended entity with no `Log` history is inert under the
+derived machinery.** Both the recompute and the probe key off the entity's
+transport/response `Log` window (the recompute's candidate set is "entities with
+such a row"; the probe orders by each entity's most recent such row). An operator
+who suspends a *quiet* connection — one that has never logged a transport
+failure/success — therefore won't be auto-probed *or* auto-unsuspended: it has no
+window to evaluate. This cannot arise from derived suspension (a tripped entity has
+failures in the `Log` by definition); it is specific to a manual `suspend` on an
+idle entity, and is consistent with "manual suspend ⇒ manual `unsuspend`/`activate`."
+Recovery for such an entity is the operator action that suspended it, not the probe.
+
 ## 9. Cross-node behavior
 
 **This is a library, so it must be cluster-*friendly* without assuming a
@@ -520,29 +531,26 @@ are dashboard aggregates, not telemetry.
 ```elixir
 config :ash_integration,
   health: [
-    window_attempts:      5,        # N — failures-in-a-row to trip (was the suspension threshold)
-    recompute_interval_ms: 60_000   # how often suspended sets are recomputed
-    # phase 3 (probe) adds: probe_interval_ms: 30_000, probe_batch: 3 (M ≪ delivery concurrency)
+    window_attempts:   5,         # N — failures-in-a-row to trip (was the suspension threshold)
+    # recompute_interval_ms — defaults to lease + 30s (derived; see below). Override to tune latency.
+    probe_interval_ms: 30_000,    # the bounded probe tick
+    probe_batch:       3          # M — suspended entities probed per scope per tick (M ≪ concurrency)
   ]
 ```
 
-Phase 1 ships only `window_attempts` and `recompute_interval_ms`; the probe knobs
-arrive with the probe (phase 3), so dead config is never advertised.
-
-`recompute_interval_ms` must comfortably exceed delivery latency, or a
-recovering connection's in-flight probe success won't have landed in the `Log`
-before the recompute re-evaluates and bounces it back into the set. The relevant
-bound is not "typical" latency but the **worst-case probe duration**, which is
-the soft-lease window — `Delivery.Supervisor.lease_seconds/0 = http_max_timeout +
-30s` (§2). A probe that opens just before a slow endpoint's timeout can take the
-full lease to resolve; if `recompute_interval_ms` is shorter than that, the
-recompute can fire on a connection whose probe is still in flight and hold it
-suspended for another whole interval. So `recompute_interval_ms` should be sized
-against the deployment's actual `http_max_timeout` (a high max-timeout demands a
-longer recompute interval, not the 60s default), and `probe_interval_ms`
-similarly should not re-probe a connection whose previous probe is still
-in-flight. These two intervals are **tuning constraints derived from
-`http_max_timeout`**, not free-standing constants.
+`recompute_interval_ms` must comfortably exceed the **worst-case probe
+duration** — not "typical" latency but the soft-lease window,
+`Delivery.Supervisor.lease_seconds/0 = http_max_timeout + 30s` (§2). A probe that
+opens just before a slow endpoint's timeout can take the full lease to resolve; if
+`recompute_interval_ms` were shorter, the recompute could fire while that probe is
+still in flight and hold the entity suspended for another whole interval. (This is
+purely *recovery latency*, never a mis-flip: with no success logged yet, the entity
+correctly stays suspended.) Because of this, the **default is derived, not a
+free-standing constant**: `recompute_interval_ms` defaults to
+`lease_seconds * 1000 + 30s`, so it scales with the host's `http_max_timeout`
+instead of assuming a sub-30s timeout (which a flat 60s default silently would).
+`probe_interval_ms` should likewise not re-probe an entity whose previous probe is
+still in flight.
 
 **Implementation phases.** Each phase is independently shippable and leaves the
 system correct; recovery stays manual until phase 3.
