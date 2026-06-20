@@ -45,7 +45,9 @@ defmodule AshIntegration do
         ],
         health: [
           window_attempts:       5,
-          recompute_interval_ms: 60_000
+          recompute_interval_ms: 60_000,
+          probe_interval_ms:     30_000,
+          probe_batch:           3
         ]
 
   """

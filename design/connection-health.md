@@ -1,11 +1,11 @@
 # Connection Health: Derived Suspension & Bounded Probes (Design Doc)
 
-**Status:** In progress, phased (§13). Schema groundwork (`failure_class` + window
+**Status:** Complete, phased (§13). Schema groundwork (`failure_class` + window
 indexes) **landed in #41** (phase 0); the **derived recompute + park + removal of
-`consecutive_failures`** landed in **#45** (phase 1); the **phase-2** refactor that
-single-sources the scheduler's schedulable-head query (suspension predicate as its
-one parameter, moved to Ecto) is **this PR**. The **bounded probe** follows as phase
-3 — a second caller of that query (see §7/§13). · **Scope:** replacing the outbound suspension
+`consecutive_failures`** in **#45** (phase 1); the **single-sourced, Ecto**
+schedulable-head query in **#46** (phase 2); the **bounded recovery probe** — a
+second caller of that query, restoring automatic recovery — is **this PR** (phase 3).
+· **Scope:** replacing the outbound suspension
 mechanism — today an incrementally-maintained `consecutive_failures` counter plus a
 *manual* unsuspend — with a **derived, windowed** health signal recomputed from the
 delivery `Log`, a **park-on-suspend** step that frees delivery capacity, and a
@@ -368,10 +368,10 @@ a second caller of it:
   (one head per entity, `≤ M` per tick, round-robin by the `Log` cursor) without
   touching the correctness core.
 
-This is **phase 2** (refactor the scheduler query to the single-parameter,
-composable form) gating **phase 3** (the probe as its second caller); see §13. It is
-also why the probe is deferred rather than shipped with phase 1 — shipping the
-thinner promotion would have been incorrect.
+This split is why the probe was deferred past phase 1: **phase 2** refactored the
+scheduler query to the single-parameter, composable form (#46), and **phase 3** adds
+the probe as its second caller (`Scheduler.promote_probe/2`). Shipping the thinner
+promotion with phase 1 would have been incorrect.
 
 ## 8. Manual control is preserved
 
@@ -575,14 +575,18 @@ system correct; recovery stays manual until phase 3.
   ordering suite (lane head, parked-head blocking, suspension, high-water #56,
   suppression) is unchanged.
 
-- **Phase 3 — bounded probe (both scopes).** The probe as a **second caller** of
-  the phase-2 query — relaxing only its own scope's suspension for the chosen `M`
-  ids, bounding composed on top (one head per entity, round-robin by the `Log`
-  cursor) (§7). Adds `probe_interval_ms`/`probe_batch` config and probe telemetry.
-  Restores automatic recovery. *Verify:* `M`-bounded load independent of set size;
-  round-robin fairness; recovery via probe success; **a probe never jumps a parked
-  head, an undispatched older event (#56), or a response-suspended subscription**;
-  fresh head promoted after a probe poisons.
+- **Phase 3 — bounded recovery probe (both scopes) — this PR.** `Health.probe/0`
+  picks `≤ probe_batch` suspended entities per scope (oldest-probed-first by the
+  `Log` cursor, skipping any with a live `:scheduled` row) and calls
+  `Scheduler.promote_probe/2`, which runs the **phase-2 query** with only that
+  entity's own suspension relaxed (`d.id == ^id` / `sub.id == ^id`, the other scope
+  still `false`), composes oldest-first + `limit(1)` on top, and force-`:schedule`s
+  the head (no suppression — a probe must hit the transport). Adds
+  `probe_interval_ms`/`probe_batch` config and `:probe` telemetry; restores automatic
+  recovery. *Verified:* `M`-bounded load independent of set size; recovery via probe
+  success; and — by reusing the shared query — **a probe never jumps a parked head,
+  an undispatched older event (#56), or a response-suspended subscription** (covered
+  by dedicated tests).
 
 ## 14. Open questions
 

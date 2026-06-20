@@ -178,8 +178,56 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
     |> run_heads()
   end
 
+  @doc """
+  Recovery probe: promote the **oldest schedulable head** for one suspended entity
+  (`:connection` or `:subscription`), so the relay can observe whether the endpoint
+  recovered. The same `schedulable_heads/1` query as the sweep — only this scope's
+  suspension is relaxed for `id`; every other gate (lane head / parked-head
+  blocking, slot-free, high-water #56, **the other scope's** suspension) still
+  holds, so a probe can never deliver out of order or to a row the other scope has
+  halted. Forces a real `:schedule` (never a content-suppression) so the probe
+  actually exercises the transport. Returns `:scheduled` or `:none`.
+  """
+  def promote_probe(scope, id) when scope in [:connection, :subscription] do
+    heads =
+      scope
+      |> probe_suspension(id)
+      |> schedulable_heads()
+      |> order_by([head: h], h.event_id)
+      |> limit(1)
+      |> run_heads()
+
+    case heads do
+      [head_id] -> force_schedule(head_id)
+      [] -> :none
+    end
+  end
+
+  # Restrict to the probe entity, ignoring ITS OWN suspension but keeping the other
+  # scope's. (Not "healthy OR this id" — that would also pull in healthy entities the
+  # normal sweep already handles.)
+  defp probe_suspension(:connection, id) do
+    dynamic([connection: d, subscription: sub], d.id == ^id and sub.suspended == false)
+  end
+
+  defp probe_suspension(:subscription, id) do
+    dynamic([connection: d, subscription: sub], d.suspended == false and sub.id == ^id)
+  end
+
+  # Promote a probe head as a real delivery (bypassing content suppression — a probe
+  # must hit the transport to be observed). Still guarded on `state == :pending`.
+  defp force_schedule(head_id) do
+    case Ash.get(AshIntegration.event_delivery_resource(), head_id, authorize?: false) do
+      {:ok, delivery} ->
+        if apply_promotion(delivery, :schedule) == :scheduled, do: :scheduled, else: :none
+
+      {:error, _} ->
+        :none
+    end
+  end
+
   # The single definition of "a legal schedulable lane head", shared by the sweep
-  # (and, in a later phase, the recovery probe). The ONE thing a caller varies is
+  # and the recovery probe (`promote_probe/2`). The ONE thing a caller varies is
   # the `suspension` predicate; every ordering gate below is fixed, so a second
   # caller can never enforce a different (weaker) set of them:
   #

@@ -10,24 +10,29 @@ defmodule AshIntegration.Outbound.Delivery.Health do
       Reads the per-scope partial window index (`status = 'success' OR
       failure_class = '<class>'`, top-N by `id`) and writes `suspended` only on a
       transition, so the per-failure hot-row write is gone.
+    * `probe/0` — picks at most `probe_batch` suspended entities per scope
+      (oldest-probed-first, derived from each one's most recent `Log` row) that have
+      no live `:scheduled` delivery, and asks the **scheduler** to promote one
+      schedulable head each so the relay can observe a recovery. A probe success
+      clears the suspension on the next recompute. Promotion is delegated to
+      `Scheduler.promote_probe/2` — the probe is held to the exact ordering gates of
+      a normal promotion, never a re-derived subset.
 
   Park (freeing delivery slots the moment a connection is suspended) rides the
   `:suspend` transition itself — see
   `AshIntegration.Outbound.Delivery.Changes.ParkOnSuspend`.
 
-  Recovery in this phase is **manual** (the retained `unsuspend` action), exactly
-  as before — the hot-row write and the slot pressure are what change. The bounded
-  automatic-recovery probe is a later phase (design §13), deferred so it can reuse
-  the scheduler's schedulable-head query rather than re-derive a thinner, drift-prone
-  copy of its ordering gates.
-
   Like the retention sweeper this GenServer validates its `:health` config slice
-  at boot and exposes `recompute/0` for direct calls (tests, manual runs).
+  at boot and exposes `recompute/0` / `probe/0` for direct calls (tests, manual
+  runs).
   """
   use GenServer
 
   require Ash.Expr
   require Logger
+
+  alias AshIntegration.Outbound.Delivery.Scheduler
+  alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
 
   def opts_schema do
     [
@@ -40,6 +45,17 @@ defmodule AshIntegration.Outbound.Delivery.Health do
         type: :pos_integer,
         default: :timer.seconds(60),
         doc: "How often the suspended sets are recomputed."
+      ],
+      probe_interval_ms: [
+        type: :pos_integer,
+        default: :timer.seconds(30),
+        doc: "How often the bounded recovery probe pass runs."
+      ],
+      probe_batch: [
+        type: :pos_integer,
+        default: 3,
+        doc:
+          "M — suspended entities probed per scope per tick. Keep well below delivery concurrency."
       ]
     ]
   end
@@ -56,19 +72,33 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     config = validate!(Keyword.merge(Application.get_env(:ash_integration, :health, []), opts))
 
     schedule(:recompute, config[:recompute_interval_ms])
-    {:ok, %{recompute_interval: config[:recompute_interval_ms]}}
+    schedule(:probe, config[:probe_interval_ms])
+
+    {:ok,
+     %{
+       recompute_interval: config[:recompute_interval_ms],
+       probe_interval: config[:probe_interval_ms]
+     }}
   end
 
   @impl true
   def handle_info(:recompute, state) do
-    try do
-      recompute()
-    rescue
-      e -> Logger.error("AshIntegration health recompute failed: #{Exception.message(e)}")
-    end
-
+    run(&recompute/0, "recompute")
     schedule(:recompute, state.recompute_interval)
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:probe, state) do
+    run(&probe/0, "probe")
+    schedule(:probe, state.probe_interval)
+    {:noreply, state}
+  end
+
+  defp run(fun, label) do
+    fun.()
+  rescue
+    e -> Logger.error("AshIntegration health #{label} failed: #{Exception.message(e)}")
   end
 
   defp schedule(msg, interval), do: Process.send_after(self(), msg, interval)
@@ -148,6 +178,55 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     end
   end
 
+  # ── Probe ─────────────────────────────────────────────────────────────────────
+
+  @doc "Run one bounded recovery-probe pass for both scopes."
+  def probe do
+    Enum.each(scopes(), &probe_scope/1)
+  end
+
+  defp probe_scope(scope) do
+    Enum.each(pick_suspended(scope, probe_batch()), fn id ->
+      result = Scheduler.promote_probe(scope.name, id)
+
+      :telemetry.execute([:ash_integration, scope.name, :probe], %{count: 1}, %{
+        id: id,
+        promoted: result == :scheduled
+      })
+    end)
+  end
+
+  # The probe's policy: pick `m` suspended entities, **oldest-probed-first** — ordered
+  # by each one's most recent transport/response `Log` row (for a suspended entity
+  # that row IS its last probe, since park left it no other traffic) — skipping any
+  # that still hold a live (non-poison) `:scheduled` delivery so a probe is never
+  # stacked. Promotion itself is the scheduler's job (`promote_probe/2`).
+  # sobelow_skip ["SQL.Query"]
+  defp pick_suspended(scope, m) do
+    sql = """
+    SELECT e.id::text
+    FROM #{table(scope.resource)} e
+    JOIN LATERAL (
+      SELECT l.id AS last_log_id
+      FROM #{log_table()} l
+      WHERE l.#{scope.id_column} = e.id
+        AND (l.status = 'success' OR l.failure_class = '#{scope.failure_class}')
+      ORDER BY l.id DESC
+      LIMIT 1
+    ) ll ON true
+    WHERE e.suspended = true
+      AND NOT EXISTS (
+        SELECT 1 FROM #{ed_table()} s
+        WHERE s.#{scope.id_column} = e.id AND s.state = 'scheduled' AND s.attempts < $2
+      )
+    ORDER BY ll.last_log_id ASC
+    LIMIT $1
+    """
+
+    %{rows: rows} = query!(sql, [m, Stage.max_attempts()])
+    Enum.map(rows, fn [id] -> id end)
+  end
+
   # ── Scopes / config / repo ──────────────────────────────────────────────────
 
   defp scopes do
@@ -168,10 +247,12 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   end
 
   def window_attempts, do: Keyword.fetch!(config(), :window_attempts)
+  defp probe_batch, do: Keyword.fetch!(config(), :probe_batch)
 
   defp config, do: validate!(Application.get_env(:ash_integration, :health, []))
 
   defp log_table, do: table(AshIntegration.delivery_log_resource())
+  defp ed_table, do: table(AshIntegration.event_delivery_resource())
   defp table(resource), do: AshPostgres.DataLayer.Info.table(resource)
 
   defp query!(sql, params) do

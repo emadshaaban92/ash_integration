@@ -31,6 +31,10 @@ defmodule AshIntegration.Telemetry do
       recompute transition (no successful outcome in the last `window_attempts`).
     * `[:ash_integration, :connection, :unsuspended]` /
       `[:ash_integration, :subscription, :resumed]` — the inverse `unsuspend` action.
+    * `[:ash_integration, :connection, :probe]` /
+      `[:ash_integration, :subscription, :probe]` — a bounded recovery probe pass let
+      a suspended connection/subscription through (`promoted` metadata says whether a
+      head was actually scheduled).
   """
 
   @events [
@@ -44,7 +48,9 @@ defmodule AshIntegration.Telemetry do
     [:ash_integration, :connection, :suspended],
     [:ash_integration, :subscription, :suspended],
     [:ash_integration, :connection, :unsuspended],
-    [:ash_integration, :subscription, :resumed]
+    [:ash_integration, :subscription, :resumed],
+    [:ash_integration, :connection, :probe],
+    [:ash_integration, :subscription, :probe]
   ]
 
   @doc """
