@@ -2,9 +2,10 @@
 
 **Status:** In progress, phased (§13). Schema groundwork (`failure_class` + window
 indexes) **landed in #41** (phase 0); the **derived recompute + park + removal of
-`consecutive_failures`** land in **PR #45** (phase 1). The **bounded probe** is
-deferred to phase 3, behind a phase-2 refactor that single-sources the scheduler's
-schedulable-head query (see §7/§13). · **Scope:** replacing the outbound suspension
+`consecutive_failures`** landed in **#45** (phase 1); the **phase-2** refactor that
+single-sources the scheduler's schedulable-head query (suspension predicate as its
+one parameter, moved to Ecto) is **this PR**. The **bounded probe** follows as phase
+3 — a second caller of that query (see §7/§13). · **Scope:** replacing the outbound suspension
 mechanism — today an incrementally-maintained `consecutive_failures` counter plus a
 *manual* unsuspend — with a **derived, windowed** health signal recomputed from the
 delivery `Log`, a **park-on-suspend** step that frees delivery capacity, and a
@@ -563,13 +564,16 @@ system correct; recovery stays manual until phase 3.
   un-leased non-poison `:scheduled` rows return to `pending`, live-leased rows
   drain, poison rows stay, slots free.
 
-- **Phase 2 — single-source the scheduler's schedulable-head query (enabler).**
-  Refactor `find_schedulable_events` so its **suspension predicate is its one
-  parameter** and every other gate (lane head, slot-free, high-water #56, the
-  other scope's suspension) is shared (§7). The normal sweep is one caller; this is
-  pure refactor (no behavior change) and the natural place to move the query off
-  raw SQL toward Ecto/Ash. *Verify:* the sweep's promoted set is identical
-  before/after.
+- **Phase 2 — single-source the scheduler's schedulable-head query — this PR
+  (enabler).** `find_schedulable_events` is refactored to `schedulable_heads/1`,
+  whose **suspension predicate is its one parameter** (an Ecto `dynamic`); every
+  other gate (lane head via `lane_heads/0`, slot-free, high-water #56, the other
+  scope's suspension) is fixed and shared (§7). The normal sweep is the one caller,
+  passing `both_healthy/0`. Pure refactor (no behavior change), and the query moved
+  off raw SQL **to Ecto** — the host resources are queried as Ecto sources
+  (`{table, resource}` / pinned resource modules). *Verified:* the full scheduler
+  ordering suite (lane head, parked-head blocking, suspension, high-water #56,
+  suppression) is unchanged.
 
 - **Phase 3 — bounded probe (both scopes).** The probe as a **second caller** of
   the phase-2 query — relaxing only its own scope's suspension for the chosen `M`
