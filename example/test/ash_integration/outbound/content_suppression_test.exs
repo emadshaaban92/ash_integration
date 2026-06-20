@@ -82,17 +82,19 @@ defmodule Example.Outbound.ContentSuppressionTest do
       assert_received {:webhook_request, _}
     end
 
-    test "a suppression does NOT reset the failure counters", ctx do
+    test "a suppression writes a neutral :suppressed log (excluded from health windows)", ctx do
       stub_webhook_success()
       sub = create_subscription!(ctx.connection, suppress_unchanged: true)
 
-      # Seed the baseline (real send), then pre-set a non-zero failure counter to
-      # prove the suppression leaves it alone (a suppression touches no transport).
+      # Baseline real send, then an identical body suppresses.
       deliver!(sub, %{"stock" => 5})
-      set_consecutive_failures!(ctx.connection, 7)
+      suppressed = reload(deliver!(sub, %{"stock" => 5}))
+      assert suppressed.state == :suppressed
 
-      assert reload(deliver!(sub, %{"stock" => 5})).state == :suppressed
-      assert reload(ctx.connection).consecutive_failures == 7
+      # The log is `:suppressed` (not success/failure), so the derived-health windows
+      # — successes ∪ transport/response failures — ignore it: a suppression touches
+      # no transport and neither trips nor clears a suspension.
+      assert [%{status: :suppressed, failure_class: nil}] = logs_for(suppressed)
     end
 
     test "dedup_on overrides the body as the comparison target", ctx do
@@ -252,13 +254,6 @@ defmodule Example.Outbound.ContentSuppressionTest do
       authorize?: false
     )
     |> Ash.create!(authorize?: false)
-  end
-
-  defp set_consecutive_failures!(connection, n) do
-    table = AshPostgres.DataLayer.Info.table(Connection)
-
-    from(r in {table, Connection}, where: r.id == ^connection.id)
-    |> Example.Repo.update_all(set: [consecutive_failures: n])
   end
 
   defp logs_for(delivery) do

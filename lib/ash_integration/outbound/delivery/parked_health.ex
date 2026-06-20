@@ -4,11 +4,11 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
   #
   # Park is a recoverable BUILD failure (a `project`/transform raised or returned a
   # bad shape — see `Dispatch.Specs`/`Reprocessor`). It is deliberately NOT a
-  # transport/response failure: it never bumps `consecutive_failures` and never
+  # transport/response failure: it never feeds the derived health windows and never
   # suspends on its own. But a subscription whose transform is permanently broken
-  # parks 100% of its deliveries while `suspended`/`consecutive_failures` stay clean
-  # and every health view reads green — a blind spot. This module closes it WITHOUT
-  # changing when/why a delivery parks:
+  # parks 100% of its deliveries while `suspended` stays clean (it logs no
+  # transport/response failures) and every health view reads green — a blind spot.
+  # This module closes it WITHOUT changing when/why a delivery parks:
   #
   #   * `status/1` derives a health tier (`:healthy | :degraded | :parked`) from the
   #     `parked_count` / `oldest_parked_at` aggregates on Subscription/Connection,
@@ -23,8 +23,8 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
   #     sites themselves (`DispatchEvent.after_batch`, `Reprocessor.park!`).
   #
   # The parked-suspend is a DISTINCT suspension: it sets `suspended` (reprocess- +
-  # unsuspend-resumable) without touching `consecutive_failures`, so it is never
-  # conflated with the transport/response failure-counter suspend. When it fires it
+  # unsuspend-resumable) from the parked backlog, so it is never conflated with the
+  # derived transport/response health suspend. When it fires it
   # reuses the `[:ash_integration, :subscription, :suspended]` event tagged
   # `failure_class: "parked"`, so a suspension monitor catches the opt-in halt.
   require Ash.Expr
@@ -118,10 +118,10 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
     |> Ash.count!(authorize?: false)
   end
 
-  # Filtered (atomic) suspend on `suspended == false`, mirroring the failure-counter
-  # auto-suspend (OnDeliveryFailure): exactly one concurrent crosser wins and logs;
-  # the loser is a clean no-op. Crucially it does NOT bump/clear
-  # `consecutive_failures` — parked-suspend is its own dimension.
+  # Filtered (atomic) suspend on `suspended == false`, mirroring the derived-health
+  # recompute: exactly one concurrent crosser wins and logs; the loser is a clean
+  # no-op. It is its own dimension — driven by the parked backlog, not the
+  # transport/response health windows.
   defp parked_suspend(subscription_id, count) do
     resource = AshIntegration.subscription_resource()
 
@@ -154,14 +154,13 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
 
   # Reuse the shared `[:ash_integration, :subscription, :suspended]` event so a
   # suspension monitor catches the opt-in parked-halt too — disambiguated by
-  # `failure_class: "parked"` (vs `"transport"`/`"response"`). `consecutive_failures`
-  # is 0 (parked-suspend never bumps it); `parked_count` carries the magnitude that
-  # crossed the threshold. Fired once per crossing (only the filtered-update winner
-  # reaches here).
+  # `failure_class: "parked"` (vs `"transport"`/`"response"`). `parked_count`
+  # carries the magnitude that crossed the threshold. Fired once per crossing (only
+  # the filtered-update winner reaches here).
   defp emit_parked_suspended(subscription_id, parked_count, reason) do
     :telemetry.execute(
       [:ash_integration, :subscription, :suspended],
-      %{consecutive_failures: 0, parked_count: parked_count},
+      %{parked_count: parked_count},
       %{
         id: subscription_id,
         threshold: AshIntegration.parked_suspension_threshold(),

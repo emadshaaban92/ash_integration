@@ -2,29 +2,18 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliverySuccess do
   @moduledoc false
   # After-action hook for the `:deliver` action.
   #
-  # Writes a success `Log` and resets `consecutive_failures` on BOTH the
-  # connection and the subscription — a successful delivery proves the transport
-  # is healthy (connection) AND that this subscription's content is accepted
-  # (subscription). All in one transaction.
+  # Writes a success `Log` — the durable record the derived-health recompute
+  # (`AshIntegration.Outbound.Delivery.Health`) reads to clear a connection's or
+  # subscription's suspension. A success proves both transport (connection) and
+  # response (subscription) health, so it counts in both scopes' windows.
   use Ash.Resource.Change
-
-  import Ecto.Query
 
   @impl true
   def change(changeset, _opts, _context) do
     Ash.Changeset.after_action(changeset, fn _changeset, event ->
       create_delivery_log(event)
-      reset_counter(AshIntegration.connection_resource(), event.connection_id)
-      reset_counter(AshIntegration.subscription_resource(), event.subscription_id)
       {:ok, event}
     end)
-  end
-
-  defp reset_counter(resource, id) do
-    table = AshPostgres.DataLayer.Info.table(resource)
-
-    from(r in {table, resource}, where: r.id == ^id)
-    |> AshIntegration.repo().update_all(set: [consecutive_failures: 0])
   end
 
   defp create_delivery_log(event) do

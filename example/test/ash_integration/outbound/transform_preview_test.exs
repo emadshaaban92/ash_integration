@@ -53,7 +53,7 @@ defmodule Example.Outbound.TransformPreviewTest do
     refute Map.has_key?(output["headers"], "x-signature")
   end
 
-  test "no delivery, no Event row, no counter bumps", %{owner: owner, connection: dest} do
+  test "no delivery, no Event row, no health side effects", %{owner: owner, connection: dest} do
     create_widget!(owner)
     sub = create_subscription!(dest, transform_source: "-- noop")
 
@@ -61,8 +61,8 @@ defmodule Example.Outbound.TransformPreviewTest do
 
     assert Ash.count!(Example.Outbound.Event, authorize?: false) == 0
     assert Ash.count!(Example.Outbound.Log, authorize?: false) == 0
-    assert reload(dest).consecutive_failures == 0
-    assert reload(sub).consecutive_failures == 0
+    refute reload(dest).suspended
+    refute reload(sub).suspended
   end
 
   test "a transform that skips reports :skipped with no output", %{owner: owner, connection: dest} do

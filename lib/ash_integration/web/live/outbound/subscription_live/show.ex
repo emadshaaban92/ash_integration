@@ -213,12 +213,12 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
         <div class="flex items-center justify-between gap-4 flex-wrap">
           <div class="flex items-center gap-6 text-sm">
             <div>
-              <div class="text-base-content/50">Consecutive failures</div>
+              <div class="text-base-content/50">Suspended</div>
               <div class={[
                 "font-medium",
-                @subscription.consecutive_failures > 0 && "text-warning"
+                @subscription.suspended && "text-warning"
               ]}>
-                {@subscription.consecutive_failures}
+                {if @subscription.suspended, do: "Suspended", else: "Active"}
               </div>
             </div>
             <div>

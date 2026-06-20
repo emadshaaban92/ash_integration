@@ -11,7 +11,7 @@ defmodule AshIntegration.Outbound.Delivery.Validations.SubscriptionRoute do
 
   @impl true
   def validate(changeset, _opts, _context) do
-    # Stay cheap on health updates (suspend/record_success/…): only consult the
+    # Stay cheap on health updates (suspend/unsuspend/…): only consult the
     # connection when `route_config` is actually changing.
     if Ash.Changeset.changing_attribute?(changeset, :route_config) do
       validate_against_connection(changeset)

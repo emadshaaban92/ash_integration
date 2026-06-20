@@ -146,8 +146,7 @@ defmodule Example.Outbound.ParkedHealthLiveTest do
       version: 1,
       transform_source: transform_source,
       active: true,
-      suspended: false,
-      consecutive_failures: 0
+      suspended: false
     })
   end
 

@@ -26,7 +26,7 @@ defmodule AshIntegration.Outbound.Delivery.Validations.TransformSource do
 
   @impl true
   def validate(changeset, _opts, _context) do
-    # Stay cheap on health updates (suspend/record_success/…): only check when the
+    # Stay cheap on health updates (suspend/unsuspend/…): only check when the
     # script itself is changing.
     if Ash.Changeset.changing_attribute?(changeset, :transform_source) do
       validate_script(changeset)

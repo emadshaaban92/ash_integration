@@ -154,8 +154,8 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
             <div><.active_badge active={@connection.active} /></div>
           </div>
           <div>
-            <div class="text-base-content/50">Consecutive Failures</div>
-            <div class="font-medium">{@connection.consecutive_failures}</div>
+            <div class="text-base-content/50">Suspended</div>
+            <div class="font-medium">{if @connection.suspended, do: "Yes", else: "No"}</div>
           </div>
           <div>
             <div class="text-base-content/50">Parked deliveries</div>
@@ -219,9 +219,9 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
             <td>
               <span class={[
                 "badge badge-sm",
-                if(sub.consecutive_failures > 0, do: "badge-warning", else: "badge-ghost")
+                if(sub.suspended, do: "badge-error", else: "badge-ghost")
               ]}>
-                {sub.consecutive_failures}
+                {if sub.suspended, do: "suspended", else: "ok"}
               </span>
             </td>
             <td>
