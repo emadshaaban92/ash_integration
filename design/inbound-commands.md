@@ -10,9 +10,12 @@ no backward-compatibility constraints.
 > Internal maintainers' doc. It assumes the [outbound
 > architecture](outbound-architecture.md) — the transactional outbox, the
 > dispatch/delivery relays and their claim/lease/fence mechanics, the
-> `(connection, event_key)` lane, the operator-trust Lua boundary — and
-> [content suppression](content-suppression.md). This is the *why*; guides are
-> the *how*. Much of the inbound machine specified here is **lifted from a
+> `(connection, event_key)` lane, the operator-trust Lua boundary —
+> [content suppression](content-suppression.md), and
+> [connection health](connection-health.md) (derived suspension from the
+> delivery `Log`, which replaced the `consecutive_failures` counter — load-
+> bearing for the failure-domain separation in §8). This is the *why*; guides
+> are the *how*. Much of the inbound machine specified here is **lifted from a
 > production host application** that built and proved it; where this doc
 > diverges from that prior art, the divergence is called out and justified.
 
@@ -413,7 +416,12 @@ Two new attributes on the **Subscription** (via its transformer, like
   subscriptions). Interpreted by the subscription's existing
   `transform_runtime` tag — the derive script is a second program in the same
   language, through the same `Transform.Runtime` seam, under the same
-  `Limits`.
+  `Limits`. That seam already hosts more than one entrypoint: since the
+  configurable-signing work (#35) the runtime exposes both `execute/4` (the
+  `transform` function) and `sign_session/3` (the staged `custom` signing
+  callbacks). Adding a `derive` entrypoint is therefore a well-trodden,
+  additive move, not a new capability — the seam was built to carry named
+  functions.
 - `response_command_types :: {:array, :string}, default []` — the
   **allowlist**: the only command types the script may emit. Normalized at
   save (the same downcase), validated at save against the command catalog
@@ -469,9 +477,12 @@ cannot be deferred to any post-hoc reader of the log.)
 Today's path (relay.ex): transport returns `{:ok, metadata}` →
 `finalize(delivery, :deliver, %{delivery_metadata: metadata})`, where
 `:deliver` is guarded on `state == :scheduled`, fenced on the `claimed_at`
-filter at the call site, and runs `OnDeliverySuccess` (log write + counter
-resets) as an after-action hook **inside the update's transaction**. The
-feature extends this in two steps:
+filter at the call site, and runs `OnDeliverySuccess` — a success `Log` write
+— as an after-action hook **inside the update's transaction**. (Since the
+derived-health redesign, #45/[`connection-health.md`](connection-health.md),
+that `Log` row is also what *clears* the connection's/subscription's derived
+suspension on the next recompute; the old `consecutive_failures` reset is
+gone — see §8.) The feature extends this in two steps:
 
 **T1 — derive, outside any transaction.** After the transport returns and
 before `finalize`, if the subscription declares a script: run `derive` in the
@@ -546,19 +557,38 @@ A failing response-command — derive failure, terminal business rejection,
 transient exhaustion — must never:
 
 - park the delivery, or move it out of `delivered`;
-- bump `consecutive_failures` on the subscription or connection;
-- suspend anything;
+- **write a row to the delivery `Log`**;
+- trip the derived suspension of the subscription or connection;
 - block the `(connection, event_key)` lane.
 
+**The "no delivery-`Log` row" rule is now the load-bearing one, and the
+derived-health redesign (#45) is what sharpened it.** Outbound suspension is
+no longer an incrementally-maintained `consecutive_failures` counter that a
+command failure might `inc` by mistake — that counter is *gone*. Health is now
+**derived** from the delivery `Log`: a connection is suspended when none of its
+last *N* `failure_class: :transport` outcomes succeeded, a subscription when
+none of its last *N* `failure_class: :response` outcomes did
+([`connection-health.md`](connection-health.md) §5). So the *only* way a
+host-side apply failure could leak into outbound health is by emitting a
+classified `Log` row — and the invariant is exactly that it never does. A
+command outcome records to the `CommandExecution` row and the
+`[:ash_integration, :command, …]` telemetry, never to the delivery `Log` that
+feeds the recompute. This is cleaner than the counter era: separation is now a
+property of *which table you write*, not of remembering not to touch a shared
+counter.
+
 The transport proved healthy and the subscription's content was accepted;
-counting a host-side apply failure against either would be a category error —
-the same reasoning that keeps a `parked` transform failure (outbound §10) out
-of the suspension counters, applied one stage further downstream. The
-response-command surface has its own states (`:failed`, `:dead_lettered`),
-its own retry affordances (`next_attempt_at`, `retry`, `rederive`), its own
-telemetry, and its own dashboard health signal (a standing dead-letter count,
-§15). The one deliberate coupling is forward-only: the command row is created
-*by* the delivery transaction. Nothing flows back.
+classifying a host-side apply failure as a transport or response outcome would
+be a category error — the same reasoning that keeps a `parked` transform
+failure (outbound §10/§10.1) off the failure surface entirely, applied one
+stage further downstream. The response-command surface has its own states
+(`:failed`, `:dead_lettered`), its own retry affordances (`next_attempt_at`,
+`retry`, `rederive`), its own telemetry, and its own dashboard health signal
+(a standing dead-letter count, §15) — and, by never logging to the delivery
+`Log`, it also stays invisible to the recovery **probe**: a dead-lettering
+command can never cause an outbound delivery to be re-probed. The one
+deliberate coupling is forward-only: the command row is created *by* the
+delivery transaction. Nothing flows back.
 
 ## 9. Ordering — where the delivery lane ends
 
@@ -594,7 +624,16 @@ What `partition_key` on the row buys **today**: the stored key + the reserved
 `(partition_key, id) WHERE state IN ('pending','parked')` index + the
 reserved `:parked` state mean the future **ordering gate** — promote at most
 one `:pending` per key, hold successors `:parked`, scheduler-style — is a
-pure code addition, **no migration**. What is explicitly deferred with it:
+pure code addition, **no migration**. And there is now a concrete pattern to
+copy: the outbound scheduler was refactored (#46) so its schedulable-head
+selection is a single Ecto query whose one parameter is the suspension
+predicate, with the recovery probe (#47) added as a *second caller* of that
+exact query rather than a hand-copied subset of its gates
+([`connection-health.md`](connection-health.md) §7). The inbound gate should
+be built the same way from the start — one `claimable_heads/1`-style query,
+extra callers (a future per-key gate, a future probe-equivalent) composing
+*on top* — so the ordering logic never forks into a drift-prone second copy.
+What is explicitly deferred with it:
 the parking-chain semantics (does a `:dead_lettered` head release or hold its
 key?), per-key claim batching, and whether the gate is opt-in per command
 type or per subscription. Hosts that need strict per-key serialization before
@@ -794,7 +833,7 @@ out of the static check's reach today.
 | Transient infra (DB down, timeout) | execution | bounded inline retry → `:pending` + backoff → relay retries → at ceiling `:dead_lettered` | terminal rows |
 | Worker crash mid-apply | execution | txn rolls back; lease expires; re-claim (relay or redelivery); fence arbitrates | committed state — no half-applies |
 | Stale claimer finalizes late | execution | fence filter matches nothing → its whole txn rolls back | the winning claimer's result |
-| Derive script fails / disallowed type / bad shape | response capture (T1→T2) | `:failed` row **with `raw`** → `rederive` recourse | **the delivery** (stays `delivered`), counters, suspension, the lane |
+| Derive script fails / disallowed type / bad shape | response capture (T1→T2) | `:failed` row **with `raw`** → `rederive` recourse | **the delivery** (stays `delivered`), the delivery `Log`, derived suspension, the lane |
 | Command insert fails in T2 | response capture | whole `:deliver` rolls back → re-send → re-capture | — costs one duplicate send (at-least-once already grants it) |
 | Response-command later fails/dead-letters | execution | its own row, its own telemetry | **everything outbound** (§8) |
 | Allowlist references a vanished command type | boot | loud warning (data drift, never a boot crash) | boot |
@@ -809,7 +848,7 @@ out of the static check's reach today.
 | Idempotent replay | A duplicate of an `:applied`/`:failed` command returns the cached `result`/`error` without re-executing. Horizon = the retention window (§16). |
 | Response capture | A response-command row exists **iff** its delivery is `delivered` (same transaction). A one-shot response is never lost after `delivered` commits. |
 | Response dedup | `command_id = delivery.id` → all retries/duplicates of one delivery collapse to one command. |
-| Failure isolation | No response-command outcome mutates delivery state, failure counters, suspension, or lane availability. |
+| Failure isolation | No response-command outcome writes the delivery `Log`, mutates delivery state, trips derived suspension, or affects lane availability. |
 | Ordering | Response-command **creation** is in delivery-lane order per `(connection, event_key)`; **execution** is FIFO-by-claim with no per-key serialization (the documented default; gate deferred — §9). |
 | Authorization | Every apply runs `authorize?: true` under the per-transport actor; the allowlist + compile-time declarations fence what a script can even request. |
 | Dead letters | Never auto-resolved, never reaped; the `retry` action is the recourse — the inbound mirror of the outbound poison stance. |
@@ -912,10 +951,17 @@ needs **no new connection concept at all** (it rides the existing outbound
 delivery — the connection is already in hand in the relay), and a future
 inbound-from-partner HTTP/Kafka adapter shares with `Connection` only partner
 identity and credentials — none of the ordering domain, suspension machinery,
-or transport-host semantics that make `Connection` what it is. Whether
-inbound-from-partner transports reuse `Connection`, extend it, or get a
-sibling resource is **left open** (out of scope with those adapters) — this
-doc just stops the outbound doc's promise from being silently re-affirmed.
+or transport-host semantics that make `Connection` what it is. And the
+suspension machinery has since become *even more* outbound-specific: derived
+health ([`connection-health.md`](connection-health.md)) computes `suspended`
+from the delivery `Log`'s transport/response `failure_class` windows and
+recovers via a delivery probe — concepts an inbound-from-partner transport
+has no analog for (it can't fail at the transport layer the way a *send*
+can; that doc lists inbound as an explicit non-goal for exactly this reason).
+So whether inbound-from-partner transports reuse `Connection`, extend it, or
+get a sibling resource is **left open** (out of scope with those adapters) —
+this doc just stops the outbound doc's promise from being silently
+re-affirmed.
 
 ## 17. Alternatives considered and rejected
 
@@ -959,11 +1005,13 @@ doc just stops the outbound doc's promise from being silently re-affirmed.
   exist or neither. Force a relay crash between send and finalize: re-send
   produces exactly one command row (identity dedup).
 - **Derive failure surface.** Script error / disallowed type / bad shape →
-  delivery `delivered`, counters untouched, `:failed` row with `raw`;
-  `rederive` after a script fix applies.
+  delivery `delivered`, **no delivery-`Log` row written for the command**,
+  `:failed` row with `raw`; `rederive` after a script fix applies.
 - **Failure-domain separation.** A response-command that dead-letters leaves
-  the subscription/connection counters, suspension state, and lane exactly
-  as a no-command delivery would.
+  the subscription's/connection's delivery `Log` window (and therefore the
+  derived suspension, and the recovery probe), and the lane, exactly as a
+  no-command delivery would — assert by recomputing health before and after
+  and seeing no transition.
 - **Echo-loop guard.** A fixture where the allowlisted type targets an action
   producing the subscription's event type → boot warning fires; plus the
   converging-pattern integration test: with a narrow projection +
