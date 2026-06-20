@@ -31,7 +31,8 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   use GenServer
 
   require Logger
-  import Ash.Expr
+  require Ash.Expr
+  import Ecto.Query
 
   alias AshIntegration.Outbound.Delivery.Dedup
 
@@ -132,7 +133,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   defp apply_promotion(delivery, action) do
     delivery
     |> Ash.Changeset.for_update(action, %{}, authorize?: false)
-    |> Ash.Changeset.filter(expr(state == :pending))
+    |> Ash.Changeset.filter(Ash.Expr.expr(state == :pending))
     |> Ash.update(authorize?: false)
     |> case do
       {:ok, _} -> promoted_result(action)
@@ -167,79 +168,124 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   defp suppress?(_delivery), do: false
 
   @doc false
-  # One set-based query returns the **event id to schedule** for every ready lane:
+  # The normal sweep: every ready lane's head, across all NON-suspended
+  # connections/subscriptions. Just `schedulable_heads/1` with the "both scopes
+  # healthy" suspension predicate — see that function for the shared gates.
+  def find_schedulable_events(batch_size) do
+    both_healthy()
+    |> schedulable_heads()
+    |> limit(^batch_size)
+    |> run_heads()
+  end
+
+  # The single definition of "a legal schedulable lane head", shared by the sweep
+  # (and, in a later phase, the recovery probe). The ONE thing a caller varies is
+  # the `suspension` predicate; every ordering gate below is fixed, so a second
+  # caller can never enforce a different (weaker) set of them:
   #
-  #   * `DISTINCT ON (connection_id, event_key) … ORDER BY event_id` picks each
-  #     lane's head — the oldest event in the `pending`/`parked` frontier. We
-  #     order by the parent Event's UUIDv7 (`event_id`), which is occurrence-
-  #     ordered; the delivery's own `id` is dispatch-time, so it is NOT a valid
-  #     ordering key;
-  #   * `head.state = 'pending'` keeps only lanes whose head is deliverable (a
-  #     `parked` head — even an *older* one — blocks the lane and is excluded);
-  #   * `sub.suspended = false` / `d.suspended = false` exclude suspended heads /
-  #     connections;
-  #   * `NOT EXISTS (… 'scheduled')` excludes lanes whose one in-flight slot is
-  #     taken (this is a *slot-free* check, independent of the head — keep it).
+  #   * lane head — `lane_heads/0` takes `DISTINCT ON (connection_id, event_key)
+  #     ORDER BY event_id` (the parent Event's occurrence-ordered UUIDv7; the
+  #     delivery's own `id` is dispatch-time, NOT an ordering key), and the outer
+  #     `head.state == :pending` drops a lane whose head is `:parked` (a parked
+  #     head — even an older one — blocks its lane);
+  #   * slot-free — `slot_taken/0`: the lane's one in-flight (`:scheduled`) slot is
+  #     not already occupied;
+  #   * high-water gate (#56) — `older_undispatched/0`: no OLDER same-key Event is
+  #     still undispatched and targeting this connection (an active subscription on
+  #     its type/version). Without it a newer event whose delivery already
+  #     materialised could be delivered ahead of an older one still fanning out,
+  #     leaving the consumer on a stale final state. Gated on *dispatch*, so it only
+  #     spans the dispatch window.
   #
   # Blocked lanes never appear, so the sweep loop terminates and parked/suspended
   # lanes don't generate per-pass log noise.
-  def find_schedulable_events(batch_size) do
-    repo = AshIntegration.repo()
-    event_table = AshPostgres.DataLayer.Info.table(AshIntegration.event_delivery_resource())
-    events_table = AshPostgres.DataLayer.Info.table(AshIntegration.event_resource())
-    connection_table = AshPostgres.DataLayer.Info.table(AshIntegration.connection_resource())
-    subscription_table = AshPostgres.DataLayer.Info.table(AshIntegration.subscription_resource())
+  defp schedulable_heads(suspension) do
+    conn_res = AshIntegration.connection_resource()
+    sub_res = AshIntegration.subscription_resource()
 
-    # The final `NOT EXISTS` is the high-water gate: don't schedule a lane's head
-    # while an OLDER same-`event_key` Event is still undispatched (`dispatched_at IS
-    # NULL`) and would target this connection (an active subscription on its
-    # type/version). Without it, a newer event whose delivery already materialized
-    # could be scheduled and delivered before an older one finishes fanning out —
-    # leaving the consumer on a stale final state (bug #56). We gate on *dispatch*
-    # (not delivery): once the older event is dispatched, its outcome (a delivery,
-    # or a `project` skip) is known, so blocking only spans the dispatch window.
-    query = """
-    SELECT head.id::text
-    FROM (
-      SELECT DISTINCT ON (e.connection_id, e.event_key)
-             e.id, e.connection_id, e.event_key, e.state, e.subscription_id, e.event_id
-      FROM #{event_table} e
-      WHERE e.state IN ('pending', 'parked')
-      ORDER BY e.connection_id, e.event_key, e.event_id ASC
-    ) head
-    JOIN #{connection_table} d ON d.id = head.connection_id
-    JOIN #{subscription_table} sub ON sub.id = head.subscription_id
-    WHERE head.state = 'pending'
-      AND d.suspended = false
-      AND sub.suspended = false
-      AND NOT EXISTS (
-        SELECT 1 FROM #{event_table} s
-        WHERE s.connection_id = head.connection_id
-          AND s.event_key = head.event_key
-          AND s.state = 'scheduled'
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM #{events_table} ev
-        JOIN #{subscription_table} s2
-          ON s2.connection_id = head.connection_id
-         AND s2.event_type = ev.event_type
-         AND s2.version = ev.version
-         AND s2.active = true
-        WHERE ev.event_key = head.event_key
-          AND ev.id < head.event_id
-          AND ev.dispatched_at IS NULL
-      )
-    LIMIT $1
-    """
-
-    case repo.query(query, [batch_size], log: AshIntegration.query_log_level()) do
-      {:ok, %{rows: rows}} ->
-        Enum.map(rows, fn [id] -> id end)
-
-      {:error, error} ->
-        Logger.error("Scheduler: find_schedulable_events failed: #{inspect(error)}")
-        []
-    end
+    from(head in subquery(lane_heads()),
+      as: :head,
+      join: d in ^conn_res,
+      as: :connection,
+      on: d.id == head.connection_id,
+      join: s in ^sub_res,
+      as: :subscription,
+      on: s.id == head.subscription_id,
+      where: head.state == ^:pending,
+      where: ^suspension,
+      where: not exists(slot_taken()),
+      where: not exists(older_undispatched()),
+      select: fragment("?::text", head.id)
+    )
   end
+
+  # The normal sweep's suspension predicate: both scopes must be healthy. A probe
+  # (later phase) is the same query with this one predicate relaxed for its set.
+  defp both_healthy do
+    dynamic([connection: d, subscription: sub], d.suspended == false and sub.suspended == false)
+  end
+
+  # Each lane's head = the oldest (`pending`/`parked`) row per
+  # `(connection_id, event_key)`.
+  defp lane_heads do
+    {tbl, res} = source(AshIntegration.event_delivery_resource())
+
+    from(e in {tbl, res},
+      where: e.state in ^[:pending, :parked],
+      distinct: [e.connection_id, e.event_key],
+      order_by: [e.connection_id, e.event_key, e.event_id],
+      select: %{
+        id: e.id,
+        connection_id: e.connection_id,
+        event_key: e.event_key,
+        state: e.state,
+        subscription_id: e.subscription_id,
+        event_id: e.event_id
+      }
+    )
+  end
+
+  # The lane's single in-flight slot is taken (a `:scheduled` row on it exists).
+  defp slot_taken do
+    {tbl, res} = source(AshIntegration.event_delivery_resource())
+
+    from(s in {tbl, res},
+      where:
+        s.connection_id == parent_as(:head).connection_id and
+          s.event_key == parent_as(:head).event_key and
+          s.state == ^:scheduled
+    )
+  end
+
+  # An OLDER same-key Event is still undispatched and targets this connection.
+  defp older_undispatched do
+    {events, events_res} = source(AshIntegration.event_resource())
+    sub_res = AshIntegration.subscription_resource()
+
+    from(ev in {events, events_res},
+      join: s2 in ^sub_res,
+      on:
+        s2.connection_id == parent_as(:head).connection_id and
+          s2.event_type == ev.event_type and
+          s2.version == ev.version and
+          s2.active == true,
+      where:
+        ev.event_key == parent_as(:head).event_key and
+          ev.id < parent_as(:head).event_id and
+          is_nil(ev.dispatched_at)
+    )
+  end
+
+  defp run_heads(query) do
+    AshIntegration.repo().all(query, log: AshIntegration.query_log_level())
+  rescue
+    e ->
+      Logger.error("Scheduler: find_schedulable_events failed: #{Exception.message(e)}")
+      []
+  end
+
+  # `{table, resource}` — the Ecto source for a host-configured Ash resource: the
+  # explicit table plus the resource (a valid Ecto schema under AshPostgres) for
+  # field typing.
+  defp source(resource), do: {AshPostgres.DataLayer.Info.table(resource), resource}
 end
