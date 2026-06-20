@@ -1,9 +1,9 @@
 defmodule Example.Outbound.HealthTest do
   @moduledoc """
   DB-backed coverage for derived suspension (`design/connection-health.md`): the
-  recompute trip signal (§5), park-on-suspend (§6), and the bounded probe (§7).
-  Suspension is no longer an inline counter — it is recomputed from the delivery
-  `Log` ("no success among the last N transport/response outcomes").
+  recompute trip signal (§5) and park-on-suspend (§6). Suspension is no longer an
+  inline counter — it is recomputed from the delivery `Log` ("no success among the
+  last N transport/response outcomes"). The recovery probe (§7) is a later phase.
   """
   use Example.DataCase, async: false
 
@@ -99,50 +99,9 @@ defmodule Example.Outbound.HealthTest do
     end
   end
 
-  describe "bounded probe" do
-    test "promotes one pending head for a suspended connection; a probe success recovers it",
-         %{connection: dest} do
-      with_window(1, fn ->
-        s1 = create_subscription!(dest, "widget.updated")
-        ev = create_event!(s1, event_key: "p1", state: :scheduled)
-
-        record_failure!(ev, "transport")
-        Health.recompute()
-        assert reload(dest).suspended
-        assert reload(ev).state == :pending, "parked on suspend"
-
-        Health.probe()
-        assert reload(ev).state == :scheduled, "exactly one probe promoted"
-
-        deliver!(reload(ev))
-        Health.recompute()
-        refute reload(dest).suspended, "observed success clears suspension"
-      end)
-    end
-
-    test "probe load is bounded by probe_batch, independent of how many are suspended",
-         %{connection: dest} do
-      with_health([window_attempts: 1, probe_batch: 1], fn ->
-        other = create_connection!(create_user!())
-
-        # dest fails first → older last-log → probed first under round-robin.
-        d1 = create_event!(create_subscription!(dest, "widget.updated"), state: :scheduled)
-        record_failure!(d1, "transport")
-        Health.recompute()
-
-        d2 = create_event!(create_subscription!(other, "widget.updated"), state: :scheduled)
-        record_failure!(d2, "transport")
-        Health.recompute()
-
-        assert reload(dest).suspended and reload(other).suspended
-
-        Health.probe()
-
-        scheduled = Enum.count([reload(d1), reload(d2)], &(&1.state == :scheduled))
-        assert scheduled == 1, "probe_batch=1 promotes exactly one probe across the suspended set"
-      end)
-    end
-  end
+  # The bounded automatic-recovery probe is a later phase (design §13). In this
+  # phase recovery is manual (`unsuspend`); a logged success clearing suspension on
+  # the next recompute is covered above.
 
   # ── Helpers ───────────────────────────────────────────────────────────────
 

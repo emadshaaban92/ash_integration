@@ -48,9 +48,9 @@ defmodule AshIntegration.Supervisor do
         # another pass re-claims (idempotent), the same model as the dispatch relay.
         AshIntegration.Outbound.Delivery.Supervisor,
         # Health stage: periodically recomputes derived connection/subscription
-        # suspension from the delivery Log (no per-failure write) and runs the
-        # bounded recovery probe. Per-node + idempotent — correctness rests on
-        # filtered transition writes + SKIP LOCKED, not on a singleton.
+        # suspension from the delivery Log (no per-failure write). Per-node +
+        # idempotent — correctness rests on filtered transition writes, not on a
+        # singleton. (The automatic-recovery probe is a later phase.)
         AshIntegration.Outbound.Delivery.Health,
         # Retention stage: an autovacuum-style GenServer that owns + validates its
         # config and trims aged Event / EventDelivery / Log rows in bounded passes.

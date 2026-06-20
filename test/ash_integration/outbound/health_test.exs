@@ -10,13 +10,11 @@ defmodule AshIntegration.Outbound.Delivery.HealthTest do
   alias AshIntegration.Outbound.Delivery.Health
 
   describe "opts_schema/0 defaults" do
-    test "match the design doc (N=5, 60s recompute, 30s probe, M=3)" do
+    test "match the design doc (N=5, 60s recompute)" do
       defaults = NimbleOptions.validate!([], Health.opts_schema())
 
       assert defaults[:window_attempts] == 5
       assert defaults[:recompute_interval_ms] == 60_000
-      assert defaults[:probe_interval_ms] == 30_000
-      assert defaults[:probe_batch] == 3
     end
   end
 
