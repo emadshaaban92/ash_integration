@@ -7,6 +7,7 @@ defmodule Example.Integration do
     resource Example.Outbound.Event
     resource Example.Outbound.EventDelivery
     resource Example.Outbound.Log
+    resource Example.Inbound.CommandExecution
   end
 
   authorization do

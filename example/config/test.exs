@@ -3,6 +3,12 @@ config :example, token_signing_secret: "yKpBZKMIc9DzUybshKt11cOyyArcE4XS"
 config :bcrypt_elixir, log_rounds: 1
 config :ash, policies: [show_policy_breakdowns?: true], disable_async?: true
 
+# The inbound command core finalizes a row inside the same transaction as the
+# host action (the fenced apply+finalize), so Ash can't deliver notifications for
+# those internal bookkeeping writes — nobody subscribes to them. Silence the
+# expected "missed notifications" warning in tests.
+config :ash, :missed_notifications, :ignore
+
 # Configure your database
 #
 # The MIX_TEST_PARTITION environment variable can be used

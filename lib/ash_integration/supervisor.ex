@@ -31,6 +31,15 @@ defmodule AshIntegration.Supervisor do
 
       warn_if_catalog_empty()
 
+      # Inbound command stage (opt-in): only when the host has wired a
+      # CommandExecution resource. Verify the command catalog (uniqueness + handler
+      # callbacks — code bugs that raise at boot) and warm the routing map, exactly
+      # like the outbound registry.
+      if inbound_configured?() do
+        AshIntegration.Inbound.Declare.Registry.verify!()
+        AshIntegration.Inbound.Declare.Registry.warm()
+      end
+
       children = [
         AshIntegration.Transport.KafkaClientManager,
         # The scheduler (brain): promotes pending → scheduled, owning ordering
@@ -65,10 +74,24 @@ defmodule AshIntegration.Supervisor do
         )
       ]
 
+      # The command-execution stage (Broadway relay): claims `:pending`
+      # CommandExecution rows and executes them. Only started when the host wired
+      # the resource; the relay is the universal crash-recovery sweep across
+      # transports.
+      children =
+        children ++
+          if inbound_configured?(), do: [AshIntegration.Inbound.Execute.Supervisor], else: []
+
       Supervisor.init(children, strategy: :one_for_one)
     else
       :ignore
     end
+  end
+
+  # The inbound command stage is opt-in: a host wires it by configuring a
+  # `command_execution_resource`. Absent it, no inbound boot checks or relay run.
+  defp inbound_configured? do
+    Keyword.has_key?(AshIntegration.config(), :command_execution_resource)
   end
 
   # The runtime is enabled but no resource declares an `outbound_events` block — so

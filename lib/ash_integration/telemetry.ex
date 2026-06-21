@@ -35,6 +35,10 @@ defmodule AshIntegration.Telemetry do
       `[:ash_integration, :subscription, :probe]` — a bounded recovery probe pass let
       a suspended connection/subscription through (`promoted` metadata says whether a
       head was actually scheduled).
+    * `[:ash_integration, :command, :applied]` / `:failed` / `:dead_lettered` /
+      `:duplicate` — inbound command-execution outcomes (`:dead_lettered` is the
+      loud one — a command stuck at the attempt ceiling with an operator `retry`
+      as the recourse).
   """
 
   @events [
@@ -50,7 +54,11 @@ defmodule AshIntegration.Telemetry do
     [:ash_integration, :connection, :unsuspended],
     [:ash_integration, :subscription, :resumed],
     [:ash_integration, :connection, :probe],
-    [:ash_integration, :subscription, :probe]
+    [:ash_integration, :subscription, :probe],
+    [:ash_integration, :command, :applied],
+    [:ash_integration, :command, :failed],
+    [:ash_integration, :command, :dead_lettered],
+    [:ash_integration, :command, :duplicate]
   ]
 
   @doc """
