@@ -90,9 +90,7 @@ defmodule AshIntegration.Supervisor do
 
   # The inbound command stage is opt-in: a host wires it by configuring a
   # `command_execution_resource`. Absent it, no inbound boot checks or relay run.
-  defp inbound_configured? do
-    Keyword.has_key?(AshIntegration.config(), :command_execution_resource)
-  end
+  defp inbound_configured?, do: AshIntegration.inbound_configured?()
 
   # The runtime is enabled but no resource declares an `outbound_events` block — so
   # nothing will ever be captured or delivered. Almost always a misconfiguration

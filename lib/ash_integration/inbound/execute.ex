@@ -184,20 +184,32 @@ defmodule AshIntegration.Inbound.Execute do
   defp apply_in_transaction(row, changeset) do
     transaction(fn ->
       case run_changeset(changeset) do
-        {:ok, record} -> commit_apply_success(row, record)
+        {:ok, record, notifications} -> commit_apply_success(row, record, notifications)
         {:error, error} -> rollback({classify(error), error})
       end
     end)
   end
 
-  defp commit_apply_success(row, record) do
-    case fenced_update(row, :apply_success, %{result: result_of(record)}) do
-      {:ok, _} -> {:applied, result_of(record)}
-      {:error, _stale} -> rollback(:superseded)
+  defp commit_apply_success(row, record, host_notifications) do
+    # `:apply_success` commits inside this same transaction, so its notifications —
+    # like the host action's — must be collected and emitted *after* the commit
+    # (Ash can't flush from a manually-managed transaction). Carry both sets out.
+    row
+    |> Ash.Changeset.for_update(:apply_success, %{result: result_of(record)}, authorize?: false)
+    |> Ash.Changeset.filter(expr(claimed_at == ^row.claimed_at))
+    |> Ash.update(authorize?: false, return_notifications?: true)
+    |> case do
+      {:ok, _record, finalize_notifications} ->
+        {:applied, result_of(record), host_notifications ++ finalize_notifications}
+
+      {:error, _stale} ->
+        rollback(:superseded)
     end
   end
 
-  defp resolve_outcome({:ok, {:applied, res}}, row), do: applied(row, res)
+  defp resolve_outcome({:ok, {:applied, res, notifications}}, row),
+    do: applied(row, res, notifications)
+
   defp resolve_outcome({:error, :superseded}, _row), do: {:transient, :superseded}
   defp resolve_outcome({:error, {:terminal, error}}, row), do: terminal(row, error)
   defp resolve_outcome({:error, {:transient, error}}, row), do: transient(row, error)
@@ -209,7 +221,13 @@ defmodule AshIntegration.Inbound.Execute do
     end
   end
 
-  defp applied(row, res) do
+  defp applied(row, res, notifications) do
+    # Emit the host action's (and the finalize's) notifications now that the fenced
+    # transaction has committed — so an action applied via a command fans out to
+    # PubSub / ash_events / LiveView subscribers exactly as the same action does
+    # when run normally.
+    Ash.Notifier.notify(notifications)
+
     :telemetry.execute(
       [:ash_integration, :command, :applied],
       %{count: 1, attempts: row.attempts},
@@ -226,13 +244,12 @@ defmodule AshIntegration.Inbound.Execute do
 
   defp transient(row, error) do
     if row.attempts >= Stage.max_attempts() do
-      fenced_update(row, :dead_letter, %{error: scrub(format_error(error))})
-
-      :telemetry.execute(
-        [:ash_integration, :command, :dead_lettered],
-        %{count: 1, attempts: row.attempts},
-        telemetry_meta(row)
-      )
+      # Only report the dead-letter once it actually applied; a stale no-op means
+      # another pass already owns the row's outcome.
+      case fenced_update(row, :dead_letter, %{error: scrub(format_error(error))}) do
+        {:ok, _} -> emit_command_event(:dead_lettered, row)
+        {:error, _stale} -> :ok
+      end
 
       {:dead_lettered, error}
     else
@@ -246,15 +263,18 @@ defmodule AshIntegration.Inbound.Execute do
   end
 
   defp finalize_failure(row, error) do
-    fenced_update(row, :apply_failure, %{error: scrub(error)})
+    case fenced_update(row, :apply_failure, %{error: scrub(error)}) do
+      {:ok, _} -> emit_command_event(:failed, row)
+      {:error, _stale} -> :ok
+    end
+  end
 
+  defp emit_command_event(event, row) do
     :telemetry.execute(
-      [:ash_integration, :command, :failed],
+      [:ash_integration, :command, event],
       %{count: 1, attempts: row.attempts},
       telemetry_meta(row)
     )
-
-    :ok
   end
 
   # ── Decode / extract / normalize ──────────────────────────────────────────
@@ -497,14 +517,17 @@ defmodule AshIntegration.Inbound.Execute do
     end
   end
 
+  # `return_notifications?: true` so the host action's notifications are collected
+  # (not flushed) — it runs inside our manual transaction, where Ash has no commit
+  # hook to flush them; `apply_and_finalize` emits them after the commit.
   defp run_changeset(%Ash.Changeset{action_type: :create} = cs),
-    do: Ash.create(cs, authorize?: true)
+    do: Ash.create(cs, authorize?: true, return_notifications?: true)
 
   defp run_changeset(%Ash.Changeset{action_type: :update} = cs),
-    do: Ash.update(cs, authorize?: true)
+    do: Ash.update(cs, authorize?: true, return_notifications?: true)
 
   defp run_changeset(%Ash.Changeset{action_type: :destroy} = cs),
-    do: Ash.destroy(cs, return_destroyed?: true, authorize?: true)
+    do: Ash.destroy(cs, return_destroyed?: true, authorize?: true, return_notifications?: true)
 
   defp result_of(%{id: id}), do: %{"id" => to_string(id)}
   defp result_of(_), do: %{}

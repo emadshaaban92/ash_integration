@@ -108,9 +108,24 @@ defmodule AshIntegration.Outbound.Retention do
     %{
       delivery_log: bounded_delete(log_query(now, delivery_days), limit),
       event_delivery: bounded_delete(delivery_query(now, delivery_days), limit),
-      event: bounded_delete(event_query(now, event_days), limit),
-      command_execution: bounded_delete(command_query(now, command_days()), limit)
+      event: bounded_delete(event_query(now, event_days), limit)
     }
+    |> sweep_commands(now, limit)
+  end
+
+  # The command-row sweep is inbound-only: a pure-outbound host hasn't wired a
+  # `command_execution_resource`, so reaching for it (a `Keyword.fetch!`) would
+  # raise on every pass. Gate it on the same opt-in switch the supervisor uses.
+  defp sweep_commands(result, now, limit) do
+    if AshIntegration.inbound_configured?() do
+      Map.put(
+        result,
+        :command_execution,
+        bounded_delete(command_query(now, command_days()), limit)
+      )
+    else
+      result
+    end
   end
 
   @impl true

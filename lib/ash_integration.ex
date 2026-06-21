@@ -133,6 +133,16 @@ defmodule AshIntegration do
   end
 
   @doc """
+  Whether the host has opted into the inbound command stage by wiring a
+  `command_execution_resource`. Pure-outbound hosts leave it unset; everything
+  inbound (boot verification, the relay, the retention sweep of command rows)
+  gates on this so an unconfigured host is never touched.
+  """
+  def inbound_configured? do
+    Keyword.has_key?(config(), :command_execution_resource)
+  end
+
+  @doc """
   Domains scanned to build the inbound command catalog
   (`AshIntegration.Inbound.Declare.Registry`). Each domain's resources are
   filtered to those carrying the `AshIntegration.Inbound.Declare.Commands`

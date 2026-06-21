@@ -16,6 +16,7 @@ defmodule Example.Inbound.CommandExecutionTest do
   alias AshIntegration.Inbound.Execute
   alias AshIntegration.Inbound.Execute.Claimer
   alias AshIntegration.Inbound.Execute.Relay
+  alias AshIntegration.Inbound.Execute.Supervisor, as: Stage
   alias AshIntegration.Outbound.Retention
   alias Example.Catalog.Product
   alias Example.Inbound.CommandExecution
@@ -266,6 +267,61 @@ defmodule Example.Inbound.CommandExecutionTest do
     assert all_rows() == []
   end
 
+  # ── Host-action notifications ─────────────────────────────────────────────
+
+  test "a host action applied via a command fans out its notifications post-commit", ctx do
+    Example.InboundTestSupport.TestNotifier.register(self())
+    on_exit(&Example.InboundTestSupport.TestNotifier.unregister/0)
+
+    routing = %{
+      "touch" => %Registration{
+        command_type: "touch",
+        resource: Example.InboundTestSupport.Exploder,
+        action: :touch,
+        handler: Example.InboundTestSupport.TouchHandler
+      }
+    }
+
+    envelope = command("touch", %{"id" => ctx.product.id, "ref" => "TOUCHED"})
+    assert {:applied, _} = Execute.handle(envelope, meta(ctx), routing)
+
+    # The action ran inside the fenced transaction, but its notification is emitted
+    # after commit — so a subscriber (here, the test notifier) still receives it.
+    assert_receive {:command_notified, Example.InboundTestSupport.Exploder, :touch}, 1_000
+  end
+
+  # ── The ceiling reaper (crash-on-final-attempt recovery) ──────────────────
+
+  test "the reaper dead-letters a :pending row stranded at the ceiling, sparing in-flight rows",
+       ctx do
+    max = Stage.max_attempts()
+    expired = DateTime.add(DateTime.utc_now(), -(Stage.lease_seconds() + 5), :second)
+
+    # The crash case: pending, at the ceiling, lease expired → never re-claimable by
+    # `attempts < max`, so the reaper must dead-letter it.
+    stranded =
+      seed_row(ctx, command_id: "stranded", state: :pending, attempts: max, claimed_at: expired)
+
+    # A ceiling row a worker is still executing (fresh lease) must be spared.
+    in_flight =
+      seed_row(ctx,
+        command_id: "inflight",
+        state: :pending,
+        attempts: max,
+        claimed_at: DateTime.utc_now()
+      )
+
+    # A below-ceiling row must be spared.
+    healthy = seed_row(ctx, command_id: "healthy", state: :pending, attempts: 0)
+
+    assert Claimer.reap_exhausted() == 1
+
+    assert reload_row(stranded.id).state == :dead_lettered
+    assert reload_row(stranded.id).error =~ "stranded"
+    assert reload_row(in_flight.id).state == :pending
+    assert reload_row(healthy.id).state == :pending
+  end
+
   # NOTE (tracked): the `claimed_at` fence is exercised above via a synthesized
   # stale token, not two genuinely concurrent `SKIP LOCKED` transactions racing on
   # one row. A real lease-expiry race is hard to make deterministic under the
@@ -291,6 +347,21 @@ defmodule Example.Inbound.CommandExecutionTest do
     refute MapSet.member?(ids, failed.id), "old :failed should be reaped"
     assert MapSet.member?(ids, dead.id), ":dead_lettered is never reaped"
     assert MapSet.member?(ids, pending.id), ":pending is never reaped"
+  end
+
+  test "retention does not touch command rows for a pure-outbound host (no resource wired)" do
+    # Simulate a host that opted out of inbound: no `command_execution_resource`.
+    # The sweep must skip the command table entirely rather than raise a KeyError.
+    original = Application.fetch_env!(:ash_integration, :command_execution_resource)
+    Application.delete_env(:ash_integration, :command_execution_resource)
+
+    try do
+      refute AshIntegration.inbound_configured?()
+      result = Retention.sweep()
+      refute Map.has_key?(result, :command_execution)
+    after
+      Application.put_env(:ash_integration, :command_execution_resource, original)
+    end
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────

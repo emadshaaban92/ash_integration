@@ -67,4 +67,69 @@ defmodule AshIntegration.Inbound.Execute.Claimer do
     # Preserve the claim's FIFO order (the read does not guarantee it).
     |> Enum.sort_by(& &1.id)
   end
+
+  @reap_reason "dead-lettered by reaper: stranded :pending at the attempt ceiling " <>
+                 "(a worker crashed after the claim that hit the ceiling, before any finalize)"
+
+  @doc """
+  Dead-letter `:pending` rows that are **at or over the attempt ceiling** and whose
+  lease has expired — the one case the normal flow can't resolve.
+
+  `claim/1`'s gate is `attempts < max_attempts`, and `attempts` is bumped at claim
+  time and committed independently of execution. A hard crash after the claim that
+  bumped `attempts` to exactly `max_attempts`, but before any finalize commits,
+  leaves the row `:pending` at the ceiling: the lease expires, yet the next claim's
+  `max_attempts < max_attempts` is false, so it would never be re-claimed, executed,
+  or dead-lettered — and retention never reaps `:pending`. This sweep closes that
+  gap, restoring the "bounds a crash loop" guarantee.
+
+  The lease guard in the `WHERE` makes it race-safe: a row a worker just claimed
+  (fresh `claimed_at`) does not match, so an in-flight row is never dead-lettered
+  out from under its executor. Returns the number of rows reaped.
+  """
+  def reap_exhausted do
+    repo = AshIntegration.repo()
+    table = AshPostgres.DataLayer.Info.table(AshIntegration.command_execution_resource())
+    lease = Stage.lease_seconds()
+    max_attempts = Stage.max_attempts()
+
+    sql = """
+    UPDATE #{table}
+    SET state = 'dead_lettered', error = $1, claimed_at = NULL
+    WHERE state = 'pending'
+      AND attempts >= $2
+      AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $3))
+    RETURNING id::text
+    """
+
+    case repo.query(sql, [@reap_reason, max_attempts, lease],
+           log: AshIntegration.query_log_level()
+         ) do
+      {:ok, %{rows: rows}} ->
+        report_reaped(rows)
+
+      {:error, error} ->
+        Logger.error("Inbound command: reap query failed: #{inspect(error)}")
+        0
+    end
+  end
+
+  defp report_reaped([]), do: 0
+
+  defp report_reaped(rows) do
+    count = length(rows)
+
+    Logger.warning(
+      "Inbound command: dead-lettered #{count} stranded :pending row(s) at/over the attempt " <>
+        "ceiling (a worker likely crashed after the final claim). Operator `retry` is the recourse."
+    )
+
+    :telemetry.execute(
+      [:ash_integration, :command, :dead_lettered],
+      %{count: count},
+      %{reason: :ceiling_stranded}
+    )
+
+    count
+  end
 end

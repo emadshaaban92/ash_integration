@@ -37,10 +37,21 @@ defmodule AshIntegration.Inbound.Execute.RelayProducer do
   @impl true
   def handle_info(:poll, state) do
     schedule_poll(state.poll_interval)
+    reap_exhausted()
     produce(state)
   end
 
   def handle_info(_msg, state), do: {:noreply, [], state}
+
+  # On each poll, dead-letter any lease-expired `:pending` row stranded at the
+  # attempt ceiling by a crash after its final claim (Claimer.reap_exhausted/0).
+  # Normally a no-op (the `WHERE` matches nothing); a transient DB error must not
+  # crash the producer, so swallow and let the next poll retry.
+  defp reap_exhausted do
+    Claimer.reap_exhausted()
+  rescue
+    e -> Logger.error("Inbound command producer: reap failed: #{Exception.message(e)}")
+  end
 
   # A transient DB error during a claim must never crash the producer (which would
   # tear down the whole pipeline) — log, hold the demand, and let the next
