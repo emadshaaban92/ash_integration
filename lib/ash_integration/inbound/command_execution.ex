@@ -11,6 +11,15 @@ defmodule AshIntegration.Inbound.CommandExecution do
   the same committed-claim + soft-lease + `claimed_at`-fence triple the outbound
   delivery relay uses.
 
+  > #### Idempotency horizon {: .info}
+  >
+  > Dedup lasts only as long as the row does. Retention reaps terminal
+  > (`:applied`/`:failed`) rows older than `command_days` (default 90), so a
+  > redelivery of a command **older than that window** finds no row and
+  > re-applies. The reap window *is* the idempotency horizon — size
+  > `command_days` above the longest redelivery horizon a transport can present
+  > (e.g. raise it before replaying months-old Kafka offsets from zero).
+
   Host applications attach this extension to their own resource and wire it via
   `config :ash_integration, command_execution_resource: MyApp.Inbound.CommandExecution`.
   The transformer injects schema, actions, identities, and indexes (all

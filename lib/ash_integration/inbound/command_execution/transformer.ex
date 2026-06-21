@@ -171,8 +171,13 @@ defmodule AshIntegration.Inbound.CommandExecution.Transformer do
   # ── Relationships ───────────────────────────────────────────────────────
 
   # The actor snapshot taken at admission. Snapshotted — not resolved live at
-  # apply — so execution survives a later owner change or connection deletion, and
-  # a retry replays under the same authority the command was admitted with.
+  # apply — so execution survives an owner *reassignment* (e.g. a connection's
+  # owner changes) and the deletion of the source connection/delivery, and a retry
+  # replays under the same authority the command was admitted with. Deleting the
+  # *actor record itself* is the one exception: the FK is `on_delete: :nilify`, so
+  # the snapshot clears and the apply then runs with `actor: nil` (fails closed
+  # under any policy that requires an actor) — chosen over `:restrict` so a stuck
+  # command can never block deleting a user.
   defp add_actor_relationship_if_not_exists(dsl_state) do
     if Info.relationship(dsl_state, :actor) do
       dsl_state

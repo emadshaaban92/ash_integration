@@ -14,8 +14,6 @@ defmodule AshIntegration.Inbound.Declare.Registry do
   no DSL passes its own. The dependency arrow points one way (DSL → data → core).
   """
 
-  require Logger
-
   alias AshIntegration.Inbound.Declare.Info
   alias AshIntegration.Inbound.Declare.Registration
 

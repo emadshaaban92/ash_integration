@@ -15,6 +15,7 @@ defmodule Example.Inbound.CommandExecutionTest do
   alias AshIntegration.Inbound.Declare.Registry
   alias AshIntegration.Inbound.Execute
   alias AshIntegration.Inbound.Execute.Claimer
+  alias AshIntegration.Inbound.Execute.Relay
   alias AshIntegration.Outbound.Retention
   alias Example.Catalog.Product
   alias Example.Inbound.CommandExecution
@@ -224,6 +225,54 @@ defmodule Example.Inbound.CommandExecutionTest do
     assert reload_row(claimable.id).claimed_at
   end
 
+  # ── The async relay (real Broadway pipeline) ──────────────────────────────
+
+  test "an isolated start_supervised! relay claims a :pending row and applies it end-to-end",
+       ctx do
+    # An unclaimed `:pending` row, exactly as the response transport will create it
+    # (claimed_at nil) — the relay must discover, claim, and execute it.
+    row =
+      seed_row(ctx,
+        command_id: "relay-e2e",
+        state: :pending,
+        command_type: "record_partner_ref",
+        payload: %{"product_id" => ctx.product.id, "ref" => "VIA-RELAY"}
+      )
+
+    # A per-test pipeline (the app supervisor's runtime is off in :test). Its
+    # producer claims from the shared-sandbox DB and runs the real processor stage.
+    start_supervised!({Relay, name: :"command_relay_#{System.unique_integer([:positive])}"})
+
+    assert eventually(fn -> reload_row(row.id).state == :applied end)
+    assert reload(ctx.product).partner_ref == "VIA-RELAY"
+  end
+
+  # ── Admission failure classification ──────────────────────────────────────
+
+  test "a terminal admission failure (invalid insert, no existing row) returns :failed", ctx do
+    # An out-of-`one_of` transport makes the `:admit` insert fail with a validation
+    # error (terminal) — and with no existing row to dedup against, admission must
+    # classify it `{:failed, …}`, never crash. (The transient sibling reuses the
+    # same `classify/1` proven by the execution dead-letter tests.)
+    bad_meta = %{transport: :nonexistent_transport, command_source: "test", actor_id: ctx.user.id}
+
+    assert {:failed, {:admission, _}} =
+             Execute.admit(
+               command("record_partner_ref", %{"product_id" => ctx.product.id, "ref" => "X"}),
+               bad_meta,
+               ctx.routing
+             )
+
+    assert all_rows() == []
+  end
+
+  # NOTE (tracked): the `claimed_at` fence is exercised above via a synthesized
+  # stale token, not two genuinely concurrent `SKIP LOCKED` transactions racing on
+  # one row. A real lease-expiry race is hard to make deterministic under the
+  # shared SQL sandbox (one connection); the synthesized proxy covers the fence
+  # logic, and the SKIP-LOCKED claim is the same primitive the outbound delivery
+  # relay proves under load. A real-concurrency test is a follow-up.
+
   # ── Retention ─────────────────────────────────────────────────────────────
 
   test "retention reaps terminal command rows but keeps dead-lettered and pending", ctx do
@@ -307,14 +356,16 @@ defmodule Example.Inbound.CommandExecutionTest do
   defp seed_product_with_example_id(_), do: :ok
 
   defp seed_row(ctx, opts) do
+    type = Keyword.get(opts, :command_type, "record_partner_ref")
+
     Ash.Seed.seed!(
       CommandExecution,
       Map.merge(
         %{
           command_source: "test-source",
           command_id: opts[:command_id],
-          command_type: "record_partner_ref",
-          raw_command_type: "record_partner_ref",
+          command_type: type,
+          raw_command_type: type,
           transport: :http,
           state: opts[:state],
           attempts: Keyword.get(opts, :attempts, 0),
@@ -326,7 +377,7 @@ defmodule Example.Inbound.CommandExecutionTest do
   end
 
   defp seed_optionals(opts) do
-    [:updated_at, :next_attempt_at, :claimed_at]
+    [:updated_at, :next_attempt_at, :claimed_at, :payload]
     |> Enum.reduce(%{}, fn key, acc ->
       case Keyword.get(opts, key) do
         nil -> acc
@@ -347,4 +398,14 @@ defmodule Example.Inbound.CommandExecutionTest do
   defp reload_row(id), do: Ash.get!(CommandExecution, id, authorize?: false)
 
   defp all_rows, do: Ash.read!(CommandExecution, authorize?: false)
+
+  # Poll a condition for up to ~2s — for the test that drives the real async relay
+  # (everything else runs the core in-process and is deterministic).
+  defp eventually(fun, retries \\ 40) do
+    cond do
+      fun.() -> true
+      retries == 0 -> false
+      true -> Process.sleep(50) && eventually(fun, retries - 1)
+    end
+  end
 end

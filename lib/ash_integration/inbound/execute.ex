@@ -19,6 +19,13 @@ defmodule AshIntegration.Inbound.Execute do
   recoverable records a terminal `:failed` row; one with no readable `command_id`
   cannot be an idempotency record and returns `{:failed, …}` with no row.
 
+  Admission classifies its *own* failures with the same terminal/transient split
+  as execution: when the record insert fails for an infrastructure reason (a DB
+  blip) and there is no existing row to dedup against, admission returns
+  `{:transient, …}` — **not** `{:failed, …}` — so an at-least-once transport
+  re-presents the command rather than dropping it. `{:failed, …}` always means
+  terminal (deterministic; re-presenting won't help).
+
   ## Execution (claim → build → apply → classify → finalize)
 
   `apply` (the host's declared Ash action under the snapshotted actor) and the
@@ -73,11 +80,16 @@ defmodule AshIntegration.Inbound.Execute do
 
   @doc """
   Decode → normalize → route-check → record. Returns `{:ok, pending_row}`,
-  `{:duplicate, state, cached}`, or `{:failed, reason}` (terminal — a recorded
-  `:failed` row when identity was recoverable, no row otherwise).
+  `{:duplicate, state, cached}`, `{:failed, reason}` (terminal — a recorded
+  `:failed` row when identity was recoverable, no row otherwise), or
+  `{:transient, reason}` (the record insert failed for an infrastructure reason
+  with no existing row — re-present the command).
   """
   @spec admit(term(), meta(), map()) ::
-          {:ok, Ash.Resource.record()} | {:duplicate, atom(), term()} | {:failed, term()}
+          {:ok, Ash.Resource.record()}
+          | {:duplicate, atom(), term()}
+          | {:failed, term()}
+          | {:transient, term()}
   def admit(raw, meta, routing \\ Registry.routing()) do
     with {:ok, decoded} <- decode(raw),
          {:ok, fields} <- extract(decoded) do
@@ -362,12 +374,21 @@ defmodule AshIntegration.Inbound.Execute do
 
       {:error, error} ->
         # The expected `:error` here is the identity unique-violation — read the
-        # existing row and answer `{:duplicate, …}`. Anything else (or no existing
-        # row) is a genuine admission failure.
+        # existing row and answer `{:duplicate, …}`. With no existing row the insert
+        # genuinely failed: classify it so a transient DB blip is reported
+        # `{:transient, …}` (re-present) rather than terminal `{:failed, …}` (drop) —
+        # this admission path is the seam every at-least-once transport sits on.
         case get_by_identity(meta.command_source, fields.command_id) do
           {:ok, %{} = existing} -> duplicate(existing)
-          _ -> {:failed, {:admission, format_error(error)}}
+          _ -> admission_failure(error)
         end
+    end
+  end
+
+  defp admission_failure(error) do
+    case classify(error) do
+      :transient -> {:transient, {:admission, format_error(error)}}
+      :terminal -> {:failed, {:admission, format_error(error)}}
     end
   end
 
@@ -413,11 +434,27 @@ defmodule AshIntegration.Inbound.Execute do
         meta[:partition_key]
 
       registration && function_exported?(registration.handler, :partition_key, 1) ->
-        registration.handler.partition_key(payload || %{})
+        safe_partition_key(registration.handler, payload || %{})
 
       true ->
         nil
     end
+  end
+
+  # The optional `partition_key/1` carries no runtime behavior yet (it feeds the
+  # reserved ordering gate), so a raising one must not crash admission and lose the
+  # row — fall back to `nil` and log, rather than dropping the command. Mirrors the
+  # `safe_build_input/3` posture on the (load-bearing) build path.
+  defp safe_partition_key(handler, payload) do
+    handler.partition_key(payload)
+  rescue
+    e ->
+      Logger.warning(
+        "Inbound command: #{inspect(handler)}.partition_key/1 raised " <>
+          "(#{Exception.message(e)}); storing nil partition key."
+      )
+
+      nil
   end
 
   # ── Handler / action plumbing ────────────────────────────────────────────
