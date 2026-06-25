@@ -100,25 +100,38 @@ defmodule Example.Outbound.HealthTest do
       end)
     end
 
-    test "a poison :scheduled row is parked too, with its attempt budget reset",
+    test "a poison lane stays terminal on suspend; the probe recovers via a healthy lane",
          %{connection: dest} do
+      # Regression guard: forgiving a poison row on suspend (resetting it to :pending)
+      # turns a known-dead head into the oldest schedulable lane head, which the probe
+      # promotes first, fails, resets, and re-promotes forever — starving the healthy
+      # lane and never recovering. The poison row must stay :scheduled (terminal) so it
+      # is never a lane head, leaving the probe to recover via the healthy lane.
       with_window(1, fn ->
         s1 = create_subscription!(dest, "widget.updated")
-        # A poison row (attempts at the ceiling) on its own lane — previously left
-        # `:scheduled` (lane blocked forever, and the entity never probe-eligible).
+
+        # Poison lane (created first → oldest event_id) and a separate healthy lane.
         poison = create_event!(s1, event_key: "poison", state: :scheduled)
         stamp_attempts!(poison, Stage.max_attempts())
+        healthy = create_event!(s1, event_key: "healthy", state: :pending)
 
-        # A separate lane trips the connection's suspension.
-        trip = create_event!(s1, event_key: "trip", state: :scheduled)
-        record_failure!(trip, "transport")
+        # Trip the connection's suspension off the poison lane's failure.
+        record_failure!(poison, "transport")
         Health.recompute()
-
         assert reload(dest).suspended
 
-        reloaded = reload(poison)
-        assert reloaded.state == :pending, "poison row parked back to pending"
-        assert reloaded.attempts == 0, "attempt budget reset so recovery can resume it"
+        # Park leaves the poison row terminal (NOT forgiven to :pending).
+        assert reload(poison).state == :scheduled, "poison row left terminal, lane blocked"
+
+        # The probe skips the slot-blocked poison lane and promotes the healthy head.
+        Health.probe()
+        assert reload(healthy).state == :scheduled, "probe recovers via the healthy lane"
+        assert reload(poison).state == :scheduled, "poison lane untouched by the probe"
+
+        # A success on the probed (healthy) head clears the suspension.
+        deliver!(reload(healthy))
+        Health.recompute()
+        refute reload(dest).suspended
       end)
     end
   end
