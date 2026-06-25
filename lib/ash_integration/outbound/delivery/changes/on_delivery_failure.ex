@@ -13,12 +13,20 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
   # An unclassified failure defaults to `:response` (the narrower blast radius).
   # Suspension is no longer decided here — it is derived from this log by the
   # periodic recompute (`AshIntegration.Outbound.Delivery.Health`).
+  #
+  # A caller may force the class with `failure_class:` (e.g. `:probe` for the
+  # `:record_suspended_failure` action). A forced class that is NOT a recompute scope
+  # (`:transport`/`:response`) — like `:probe` — is logged for observability but is
+  # invisible to the health windows, so recovery-probe failures are visible without
+  # perturbing the suspend/unsuspend math.
   use Ash.Resource.Change
 
   @impl true
-  def change(changeset, _opts, _context) do
+  def change(changeset, opts, _context) do
+    forced_class = opts[:failure_class]
+
     Ash.Changeset.after_action(changeset, fn _changeset, event ->
-      create_delivery_log(event)
+      create_delivery_log(event, forced_class)
       {:ok, event}
     end)
   end
@@ -30,7 +38,7 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
     end
   end
 
-  defp create_delivery_log(event) do
+  defp create_delivery_log(event, forced_class) do
     metadata = event.delivery_metadata || %{}
 
     AshIntegration.delivery_log_resource()
@@ -51,8 +59,9 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
         status: :failed,
         # Persist the class so the derived-health recompute
         # (design/connection-health.md §5) can scope this row to the connection
-        # (transport) or subscription (response) window.
-        failure_class: classify(metadata),
+        # (transport) or subscription (response) window. A forced class outside those
+        # scopes (e.g. `:probe`) is recorded but ignored by every window.
+        failure_class: forced_class || classify(metadata),
         subscription_id: event.subscription_id,
         connection_id: event.connection_id,
         event_delivery_id: event.id

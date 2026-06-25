@@ -155,9 +155,15 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     if suspended?(delivery) do
       # A failure for a suspended entity is not a delivery attempt to retry: send the
       # row back to `:pending` (one-shot) so the recovery probe paces the next try,
-      # and never let it march toward the poison ceiling. `reset_to_pending` clears
-      # the lease/backoff and (via `ClearClaim`) the attempt count.
-      finalize(delivery, :reset_to_pending, %{})
+      # and never let it march toward the poison ceiling. `:record_suspended_failure`
+      # clears the lease/backoff/attempts (like `:reset_to_pending`) AND logs the
+      # failure as `failure_class: :probe` — observable, but excluded from the health
+      # windows so it never perturbs the suspend/unsuspend math.
+      finalize(delivery, :record_suspended_failure, %{
+        last_error: Map.get(metadata, :error_message, "Unknown error"),
+        delivery_metadata: metadata
+      })
+
       :ok
     else
       error_message = Map.get(metadata, :error_message, "Unknown error")

@@ -37,10 +37,15 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
      # connection's transport window vs. a subscription's response window — see
      # `design/connection-health.md` §5. It is already computed at failure time by
      # `OnDeliveryFailure.classify/1`; this column just stops discarding it.
+     #
+     # `:probe` is a non-scope class: a recovery-probe attempt that failed while the
+     # entity was suspended. It is recorded for observability but is excluded from
+     # BOTH health windows (the partial indexes below match only `transport`/
+     # `response`), so probe failures never perturb the suspend/unsuspend math.
      |> add_attribute_if_not_exists(:failure_class, :atom,
        allow_nil?: true,
        public?: true,
-       constraints: [one_of: [:transport, :response]]
+       constraints: [one_of: [:transport, :response, :probe]]
      )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_subscription_relationship_if_not_exists()

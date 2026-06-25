@@ -80,6 +80,29 @@ defmodule Example.Outbound.HealthTest do
         assert reload(dest).suspended_at == first
       end)
     end
+
+    test "a :probe-class failure is logged but ignored by recompute", %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+        ev = create_event!(s1, state: :scheduled)
+
+        # The suspended-failure path: writes a Log row forced to `failure_class: :probe`
+        # and one-shots the delivery back to `:pending`. The underlying error is a
+        # transport one, but the forced class wins.
+        record_suspended_failure!(ev)
+
+        assert [log] = logs()
+        assert log.status == :failed
+        assert log.failure_class == :probe
+        assert reload(ev).state == :pending
+
+        # window = 1, yet a `:probe` failure is outside both health windows, so it does
+        # NOT trip suspension (a `:transport` failure on its own would).
+        Health.recompute()
+        refute reload(dest).suspended
+        refute reload(s1).suspended
+      end)
+    end
   end
 
   describe "park on the suspend transition" do
@@ -327,6 +350,18 @@ defmodule Example.Outbound.HealthTest do
 
   defp schedule!(event) do
     Ash.update!(Ash.Changeset.for_update(event, :schedule, %{}, authorize?: false),
+      authorize?: false
+    )
+  end
+
+  defp record_suspended_failure!(event) do
+    Ash.update!(
+      Ash.Changeset.for_update(
+        event,
+        :record_suspended_failure,
+        %{last_error: "boom", delivery_metadata: %{"failure_class" => "transport"}},
+        authorize?: false
+      ),
       authorize?: false
     )
   end
