@@ -20,11 +20,13 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   ordering hazard, and batching (deferred) is ordering-safe by construction.
 
   **Outcomes (per row).** A success → `:deliver` (slot freed). A retryable failure
-  → `:record_attempt_error`: stamp `next_attempt_at` (durable backoff), leave the
-  row `:scheduled` so the lane stays blocked while it retries (in-order-per-key).
-  At the poison ceiling (`attempts >= max_attempts`, counted on the claim) → leave
-  `:scheduled`, surface loudly once, never auto-resolve. Suspension
-  mid-flight → `:reset_to_pending` (the scheduler re-promotes once unsuspended).
+  on a HEALTHY entity → `:record_attempt_error`: stamp `next_attempt_at` (durable
+  backoff), leave the row `:scheduled` so the lane stays blocked while it retries
+  (in-order-per-key). At the poison ceiling (`attempts >= max_attempts`, counted on
+  the claim) → leave `:scheduled`, surface loudly once, never auto-resolve. A failure
+  for a SUSPENDED entity → `:reset_to_pending` (one-shot): the recovery probe paces
+  re-tries and the attempt count is cleared, so a suspended delivery never poisons;
+  the scheduler re-promotes once unsuspended.
 
   **The lease-token fence.** Every result-writing action is filtered on
   `claimed_at == <the value the claimer saw>` (plus the baked `state == :scheduled`
@@ -135,12 +137,10 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
 
   # ── Per-row outcome application (with the lease-token fence) ──────────────────
 
-  defp apply_non_deliver(%Message{data: delivery}) do
-    case decision(delivery) do
-      :halt_suspended -> finalize(delivery, :reset_to_pending, %{})
-      :noop -> :ok
-    end
-  end
+  # A non-deliverable row is a no-op: its state changed between claim and batch
+  # (cancelled / already delivered). Suspension is no longer handled here — a
+  # suspended row is delivered (the recovery probe) and only diverted on failure.
+  defp apply_non_deliver(%Message{data: _delivery}), do: :ok
 
   defp apply_result(delivery, {:ok, metadata}) do
     # Emit `:delivered` only when the fenced `:deliver` actually applied (a stale
@@ -152,23 +152,32 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   end
 
   defp apply_result(delivery, {:error, metadata}) do
-    error_message = Map.get(metadata, :error_message, "Unknown error")
-    poison? = Dispatcher.poison?(delivery)
+    if suspended?(delivery) do
+      # A failure for a suspended entity is not a delivery attempt to retry: send the
+      # row back to `:pending` (one-shot) so the recovery probe paces the next try,
+      # and never let it march toward the poison ceiling. `reset_to_pending` clears
+      # the lease/backoff and (via `ClearClaim`) the attempt count.
+      finalize(delivery, :reset_to_pending, %{})
+      :ok
+    else
+      error_message = Map.get(metadata, :error_message, "Unknown error")
+      poison? = Dispatcher.poison?(delivery)
 
-    last_error =
-      if poison?,
-        do: Dispatcher.poison_message(delivery.attempts, error_message),
-        else: error_message
+      last_error =
+        if poison?,
+          do: Dispatcher.poison_message(delivery.attempts, error_message),
+          else: error_message
 
-    finalize(delivery, :record_attempt_error, %{
-      last_error: last_error,
-      delivery_metadata: metadata,
-      # Backoff is irrelevant for a terminal row (never re-claimed), but harmless.
-      next_attempt_at: Dispatcher.backoff_until(delivery.attempts)
-    })
+      finalize(delivery, :record_attempt_error, %{
+        last_error: last_error,
+        delivery_metadata: metadata,
+        # Backoff is irrelevant for a terminal row (never re-claimed), but harmless.
+        next_attempt_at: Dispatcher.backoff_until(delivery.attempts)
+      })
 
-    if poison?, do: Dispatcher.record_poison(delivery, error_message)
-    :ok
+      if poison?, do: Dispatcher.record_poison(delivery, error_message)
+      :ok
+    end
   end
 
   # `deliver_batch/2` must return a result for every id; a missing one is a transport
@@ -233,14 +242,24 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
 
     * `:noop` — no longer `:scheduled` (cancelled / already delivered between claim
       and execution).
-    * `:halt_suspended` — the connection OR the subscription is suspended;
-      in-flight delivery must stop (the row resets to `:pending`).
-    * `:deliver` — deliver normally.
+    * `:deliver` — deliver it.
+
+  Suspension is intentionally NOT a gate here. A suspended entity is never given a
+  backlog to deliver (the scheduler skips it and `ParkOnSuspend` drains its
+  `:scheduled` rows to `:pending`); the only `:scheduled` row it has is the recovery
+  probe's head, which MUST hit the transport to observe recovery. A suspended
+  delivery's *failure* is what stops it — see `apply_result/2`, which one-shots it
+  back to `:pending` instead of retrying.
   """
   def decision(%{state: state}) when state != :scheduled, do: :noop
-  def decision(%{connection: %{suspended: true}}), do: :halt_suspended
-  def decision(%{subscription: %{suspended: true}}), do: :halt_suspended
   def decision(_delivery), do: :deliver
+
+  # The claimed row's entity is suspended (as loaded at claim time). On the failure
+  # path this diverts a suspended delivery to a one-shot `:reset_to_pending` instead
+  # of a poison-accruing retry.
+  defp suspended?(%{connection: connection, subscription: subscription}) do
+    match?(%{suspended: true}, connection) or match?(%{suspended: true}, subscription)
+  end
 
   # Broadway hashes the partition with `rem/2`, so this must be a non-negative
   # integer. Same connection → same processor (so a future batch forms per-connection).

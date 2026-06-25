@@ -9,6 +9,7 @@ defmodule Example.Outbound.HealthTest do
   use Example.DataCase, async: false
 
   alias AshIntegration.Outbound.Delivery.Health
+  alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
   alias Example.Outbound.{Connection, Log, Subscription}
 
   setup do
@@ -96,6 +97,28 @@ defmodule Example.Outbound.HealthTest do
         assert reload(dest).suspended
         assert reload(unleased).state == :pending, "un-leased row parked back to pending"
         assert reload(leased).state == :scheduled, "live-leased row left to drain"
+      end)
+    end
+
+    test "a poison :scheduled row is parked too, with its attempt budget reset",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+        # A poison row (attempts at the ceiling) on its own lane — previously left
+        # `:scheduled` (lane blocked forever, and the entity never probe-eligible).
+        poison = create_event!(s1, event_key: "poison", state: :scheduled)
+        stamp_attempts!(poison, Stage.max_attempts())
+
+        # A separate lane trips the connection's suspension.
+        trip = create_event!(s1, event_key: "trip", state: :scheduled)
+        record_failure!(trip, "transport")
+        Health.recompute()
+
+        assert reload(dest).suspended
+
+        reloaded = reload(poison)
+        assert reloaded.state == :pending, "poison row parked back to pending"
+        assert reloaded.attempts == 0, "attempt budget reset so recovery can resume it"
       end)
     end
   end
@@ -306,6 +329,13 @@ defmodule Example.Outbound.HealthTest do
     Example.Repo.update_all(
       from(d in "outbound_event_deliveries", where: d.id == type(^delivery.id, Ecto.UUID)),
       set: [claimed_at: at]
+    )
+  end
+
+  defp stamp_attempts!(delivery, n) do
+    Example.Repo.update_all(
+      from(d in "outbound_event_deliveries", where: d.id == type(^delivery.id, Ecto.UUID)),
+      set: [attempts: n]
     )
   end
 

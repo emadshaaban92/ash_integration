@@ -23,19 +23,21 @@ defmodule AshIntegration.Outbound.Delivery.Changes.ParkOnSuspend do
   defp park_unleased(column, id) do
     table = AshPostgres.DataLayer.Info.table(AshIntegration.event_delivery_resource())
 
-    # Poison rows (attempts at the ceiling) are left `:scheduled`, lane blocked —
-    # the terminal policy is unchanged; only the live backlog is parked.
+    # Reset `attempts = 0` alongside the park: a suspension halt is not a transport
+    # attempt, so the recovered entity resumes with a clean budget. This also parks
+    # POISON rows (`attempts` at the ceiling) — left `:scheduled` they would block
+    # the lane forever and keep the entity out of the recovery probe rotation; under
+    # suspension the terminal verdict is forgiven, recovered like the rest.
     sql = """
-    UPDATE #{table} SET state = 'pending', claimed_at = NULL
+    UPDATE #{table} SET state = 'pending', claimed_at = NULL, attempts = 0
     WHERE #{column} = $1
       AND state = 'scheduled'
-      AND attempts < $2
-      AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $3))
+      AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $2))
     """
 
     AshIntegration.repo().query!(
       sql,
-      [Ecto.UUID.dump!(id), Stage.max_attempts(), Stage.lease_seconds()],
+      [Ecto.UUID.dump!(id), Stage.lease_seconds()],
       log: AshIntegration.query_log_level()
     )
   end
