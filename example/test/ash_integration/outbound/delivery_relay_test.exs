@@ -127,14 +127,65 @@ defmodule Example.Outbound.DeliveryRelayTest do
       refute is_nil(reloaded.last_error)
     end
 
-    test "a suspended connection halts in-flight delivery back to :pending", %{connection: conn} do
+    test "a suspended entity's :scheduled row is DELIVERED (recovery probe), not halted", %{
+      connection: conn
+    } do
+      # Suspend first, THEN schedule — exactly what the recovery probe does (it
+      # promotes one head for a suspended entity). `ParkOnSuspend` already ran on the
+      # suspend transition, so this row stays `:scheduled` and is claimed with the
+      # entity loaded as suspended. The relay no longer halts on suspension — it
+      # delivers, so the probe actually reaches the transport.
+      suspend!(conn)
       stub_webhook_success()
       d = scheduled_delivery!(create_subscription!(conn))
-      suspend!(conn)
 
       drain_delivery!()
 
-      assert reload(d).state == :pending
+      # A probe success terminates the delivery (and a later recompute clears the
+      # suspension off the logged success).
+      assert reload(d).state == :delivered
+    end
+
+    test "a suspended entity's FAILED delivery is one-shot to :pending with attempts cleared", %{
+      connection: conn
+    } do
+      suspend!(conn)
+      stub_webhook_failure(503)
+      d = scheduled_delivery!(create_subscription!(conn))
+      # Pretend it had already accrued attempts before suspension; the reset must
+      # clear them so a suspended delivery can never march to the poison ceiling.
+      set_fields!(d, attempts: 5)
+
+      drain_delivery!()
+
+      reloaded = reload(d)
+      # Not retried in place (that would accrue toward poison) — sent back to pending
+      # for the probe to pace the next attempt, with a clean lease/backoff/attempt.
+      assert reloaded.state == :pending
+      assert reloaded.attempts == 0
+      assert is_nil(reloaded.claimed_at)
+      assert is_nil(reloaded.next_attempt_at)
+    end
+
+    test "a suspended entity's delivery never poisons, even at the ceiling", %{connection: conn} do
+      # The exact "reset → re-scheduled → stuck on max_attempts" trap: a row one claim
+      # below the ceiling. For a HEALTHY entity the next claim→fail would poison it
+      # (left `:scheduled`, lane blocked). Suspended, it must one-shot to `:pending`
+      # with a fresh budget instead — never poison, never stuck.
+      suspend!(conn)
+      stub_webhook_failure(503)
+      d = scheduled_delivery!(create_subscription!(conn))
+      set_fields!(d, attempts: Stage.max_attempts() - 1)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [[:ash_integration, :delivery, :poison]])
+
+      drain_delivery!()
+
+      refute_received {[:ash_integration, :delivery, :poison], ^ref, _, _}
+      reloaded = reload(d)
+      assert reloaded.state == :pending
+      assert reloaded.attempts == 0
     end
 
     test "an unresolvable endpoint (base_url NXDOMAIN) is a :transport failure (connection scope)",
@@ -261,9 +312,9 @@ defmodule Example.Outbound.DeliveryRelayTest do
       connection: conn
     } do
       # Broadway requires `handle_batch/4` to return ALL messages it was given. The
-      # relay applies the suspended/`:noop` rows' outcomes for their side effects only
-      # and must still pass them through — dropping any makes Broadway log an error per
-      # batch and skips their normal ack.
+      # relay skips the `:noop` rows (state changed between claim and batch) and must
+      # still pass them through — dropping any makes Broadway log an error per batch
+      # and skips their normal ack.
       stub_webhook_success()
       s = create_subscription!(conn)
       scheduled_delivery!(s, "p-deliver")

@@ -24,7 +24,12 @@ defmodule AshIntegration.Outbound.Delivery.Changes.ParkOnSuspend do
     table = AshPostgres.DataLayer.Info.table(AshIntegration.event_delivery_resource())
 
     # Poison rows (attempts at the ceiling) are left `:scheduled`, lane blocked —
-    # the terminal policy is unchanged; only the live backlog is parked.
+    # the terminal policy is unchanged; only the live backlog is parked. Forgiving
+    # them here would resurrect a known-dead head as `:pending`, and since the probe
+    # promotes the oldest schedulable head first, that head would starve the entity's
+    # healthy lanes out of the recovery rotation. A re-promoted parked row still gets
+    # a clean attempt budget — `ClearClaim` zeroes `attempts` on the `:schedule` that
+    # re-promotes it — so this leaves no poison-on-reschedule trap.
     sql = """
     UPDATE #{table} SET state = 'pending', claimed_at = NULL
     WHERE #{column} = $1
