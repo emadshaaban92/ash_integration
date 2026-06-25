@@ -99,6 +99,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
      |> add_reprocess_action_if_not_exists()
      |> add_park_action_if_not_exists()
      |> add_reset_to_pending_action_if_not_exists()
+     |> add_record_suspended_failure_action_if_not_exists()
      |> add_code_interface_if_not_exists()
      |> add_unique_delivery_identity_if_not_exists()
      |> add_reference_if_not_exists(:event, on_delete: :delete, on_update: :restrict)
@@ -611,6 +612,35 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     end
   end
 
+  defp add_record_suspended_failure_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :record_suspended_failure) do
+      dsl_state
+    else
+      # A delivery that FAILED while its connection/subscription was suspended — in
+      # practice the recovery probe. Same one-shot state outcome as `:reset_to_pending`
+      # (back to `:pending`, lease/backoff/attempts cleared, so it never marches toward
+      # poison), but it ALSO writes the failure to the `Log` as `failure_class: :probe`.
+      # That keeps the probe attempt observable while staying out of both health windows
+      # (recompute scopes only `transport`/`response`), so it never perturbs the
+      # suspend/unsuspend math. Guarded on `state == :scheduled` like the other
+      # relay-raced writes.
+      {:ok, action} =
+        Transformer.build_entity(Dsl, [:actions], :update,
+          name: :record_suspended_failure,
+          accept: [:last_error, :delivery_metadata],
+          require_atomic?: false,
+          changes: [
+            guard_scheduled(),
+            set_state(:pending),
+            clear_claim(),
+            record_probe_failure_log()
+          ]
+        )
+
+      Transformer.add_entity(dsl_state, [:actions], action, type: :append)
+    end
+  end
+
   defp set_state(value) do
     Transformer.build_entity!(Dsl, [:actions, :update], :change,
       change: {Change.SetAttribute, [attribute: :state, value: value]}
@@ -637,6 +667,15 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   defp clear_claim do
     Transformer.build_entity!(Dsl, [:actions, :update], :change,
       change: AshIntegration.Outbound.Delivery.Changes.ClearClaim
+    )
+  end
+
+  # Write the failure to the delivery `Log` forced to `failure_class: :probe` — a
+  # suspended-entity (recovery-probe) failure, observable but excluded from the
+  # transport/response health windows.
+  defp record_probe_failure_log do
+    Transformer.build_entity!(Dsl, [:actions, :update], :change,
+      change: {AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure, failure_class: :probe}
     )
   end
 

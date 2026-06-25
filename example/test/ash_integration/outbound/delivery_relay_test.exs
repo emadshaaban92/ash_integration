@@ -26,7 +26,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
   alias AshIntegration.Outbound.Delivery.Health
   alias AshIntegration.Outbound.Delivery.Relay
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
-  alias Example.Outbound.{Connection, Event, EventDelivery, Subscription}
+  alias Example.Outbound.{Connection, Event, EventDelivery, Log, Subscription}
 
   setup do
     owner = create_user!()
@@ -165,6 +165,13 @@ defmodule Example.Outbound.DeliveryRelayTest do
       assert reloaded.attempts == 0
       assert is_nil(reloaded.claimed_at)
       assert is_nil(reloaded.next_attempt_at)
+
+      # The failure is still observable: a Log row is written, classed `:probe` so it
+      # stays out of the transport/response health windows.
+      assert [log] = Ash.read!(Log, authorize?: false)
+      assert log.status == :failed
+      assert log.failure_class == :probe
+      assert log.event_delivery_id == d.id
     end
 
     test "a suspended entity's delivery never poisons, even at the ceiling", %{connection: conn} do
