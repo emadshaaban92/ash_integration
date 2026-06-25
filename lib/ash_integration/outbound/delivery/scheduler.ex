@@ -179,7 +179,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   end
 
   @doc """
-  Recovery probe: promote the **oldest schedulable head** for one suspended entity
+  Recovery probe: promote **one schedulable head** for one suspended entity
   (`:connection` or `:subscription`), so the relay can observe whether the endpoint
   recovered. The same `schedulable_heads/1` query as the sweep — only this scope's
   suspension is relaxed for `id`; every other gate (lane head / parked-head
@@ -187,13 +187,18 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   holds, so a probe can never deliver out of order or to a row the other scope has
   halted. Forces a real `:schedule` (never a content-suppression) so the probe
   actually exercises the transport. Returns `:scheduled` or `:none`.
+
+  Which head: the entity's lanes are probed **round-robin, least-recently-probed
+  first** (`rotate_lanes/2`), not strict-oldest — otherwise a deterministically
+  failing oldest lane monopolises the one probe slot and starves the entity's
+  other lanes, holding it suspended even after recovery. See that function.
   """
   def promote_probe(scope, id) when scope in [:connection, :subscription] do
     heads =
       scope
       |> probe_suspension(id)
       |> schedulable_heads()
-      |> order_by([head: h], h.event_id)
+      |> rotate_lanes(scope)
       |> limit(1)
       |> run_heads()
 
@@ -202,6 +207,77 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
       [] -> :none
     end
   end
+
+  # Rotate the single probe across the suspended entity's lanes instead of always
+  # taking its strict-oldest head. The starvation it fixes: a non-poison head that
+  # deterministically fails (e.g. a per-payload response rejection) and is the
+  # entity's oldest is re-promoted every pass — its failure resets without the lane
+  # advancing — so it monopolises the one probe slot and the entity's *other* lanes
+  # never get a turn. The endpoint can be healthy and a sibling lane's probe would
+  # succeed and clear the suspension, but it is never tried, so the entity stays
+  # suspended (and all its lanes frozen) indefinitely.
+  #
+  # Order the candidate lane heads by each lane's **most recent probe** — the max
+  # `Log` id for that `(entity, event_key)` over the same per-scope window the
+  # entity-level cursor uses (`status = :success OR failure_class = <scope>`). After
+  # park a suspended entity has no traffic but its probes, so that row *is* the
+  # lane's last probe; no cursor column or process state is needed. Ascending, so
+  # the least-recently-probed lane goes first; a lane never probed (no row) sorts
+  # first via NULLS FIRST. `event_id` breaks ties and orders the very first pass —
+  # so before any lane has been probed this is exactly the old strict-oldest pick.
+  #
+  # Ordering-safe: cross-lane heads carry distinct `event_key`s, so choosing a
+  # different lane never reorders delivery *within* a `(connection_id, event_key)`
+  # lane — the shared `schedulable_heads/1` query still hands back each lane's strict
+  # head. This is the same `Log`-derived-cursor technique the entity-level
+  # round-robin already uses (`Health.pick_suspended/2`), applied one level down.
+  defp rotate_lanes(query, scope) do
+    query
+    |> join(:left_lateral, [head: h], c in subquery(last_lane_probe(scope)),
+      on: true,
+      as: :lane_cursor
+    )
+    |> order_by([head: h, lane_cursor: c], asc_nulls_first: c.last_log_id, asc: h.event_id)
+  end
+
+  # The lane's most recent probe: the newest `Log` id for this `(entity, event_key)`
+  # within the scope's health window. Correlated to the outer `:head` via
+  # `parent_as/1` (lateral join), `limit 1` over the recency-ordered window — so at
+  # most one row per lane, NULL when the lane has never been probed.
+  defp last_lane_probe(scope) do
+    {tbl, res} = source(AshIntegration.delivery_log_resource())
+    failure_class = probe_failure_class(scope)
+
+    from(l in {tbl, res},
+      where: ^lane_cursor_match(scope),
+      where: l.status == ^:success or l.failure_class == ^failure_class,
+      order_by: [desc: l.id],
+      limit: 1,
+      select: %{last_log_id: l.id}
+    )
+  end
+
+  # Same lane key the scheduler orders on `(connection_id, event_key)`, scoped to the
+  # probe entity's id column so the cursor counts only this entity's probes.
+  defp lane_cursor_match(:connection) do
+    dynamic(
+      [l],
+      l.connection_id == parent_as(:head).connection_id and
+        l.event_key == parent_as(:head).event_key
+    )
+  end
+
+  defp lane_cursor_match(:subscription) do
+    dynamic(
+      [l],
+      l.subscription_id == parent_as(:head).subscription_id and
+        l.event_key == parent_as(:head).event_key
+    )
+  end
+
+  # Each scope's health-window failure class — the `Log` discriminator §5 keys on.
+  defp probe_failure_class(:connection), do: :transport
+  defp probe_failure_class(:subscription), do: :response
 
   # Restrict to the probe entity, ignoring ITS OWN suspension but keeping the other
   # scope's. (Not "healthy OR this id" — that would also pull in healthy entities the
