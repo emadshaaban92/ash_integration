@@ -329,9 +329,12 @@ below. The policy half:
   turn). This is the **same `Log`-derived-cursor** technique used for entity
   selection, applied one level down: order the candidate lane heads by each lane's
   most recent probe — the max `Log` id for that `(entity, event_key)` over the
-  scope's health window — ascending, NULLS first for a never-probed lane, `event_id`
-  breaking ties (so before any lane has been probed the pick is exactly the old
-  strict-oldest). It is **ordering-safe**: cross-lane heads carry distinct
+  scope's health window — ascending, NULLS first for a lane with no in-window row,
+  `event_id` breaking ties (so when the window is *empty* — e.g. a manual suspension on
+  a quiet entity — the pick is exactly the old strict-oldest; a **derived** suspension
+  trips on logged failures, so those lanes' cursors are already seeded and the first
+  probe is least-recently-failed first, not strict-oldest — still a valid rotation). It
+  is **ordering-safe**: cross-lane heads carry distinct
   `event_key`s, so rotating which lane is probed never reorders delivery *within* a
   `(connection_id, event_key)` lane — the shared scheduler query still returns each
   lane's strict head (`Scheduler.rotate_lanes/2`).

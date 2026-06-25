@@ -217,14 +217,21 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   # succeed and clear the suspension, but it is never tried, so the entity stays
   # suspended (and all its lanes frozen) indefinitely.
   #
-  # Order the candidate lane heads by each lane's **most recent probe** — the max
-  # `Log` id for that `(entity, event_key)` over the same per-scope window the
+  # Order the candidate lane heads by each lane's **most recent in-window outcome** —
+  # the max `Log` id for that `(entity, event_key)` over the same per-scope window the
   # entity-level cursor uses (`status = :success OR failure_class = <scope>`). After
-  # park a suspended entity has no traffic but its probes, so that row *is* the
-  # lane's last probe; no cursor column or process state is needed. Ascending, so
-  # the least-recently-probed lane goes first; a lane never probed (no row) sorts
-  # first via NULLS FIRST. `event_id` breaks ties and orders the very first pass —
-  # so before any lane has been probed this is exactly the old strict-oldest pick.
+  # park a suspended entity has no traffic but its probes, so going forward that row
+  # *is* the lane's last probe; no cursor column or process state is needed. Ascending,
+  # so the least-recently-touched lane goes first; a lane with no in-window row sorts
+  # first via NULLS FIRST. `event_id` breaks ties.
+  #
+  # First-pass note: this is exactly the old strict-oldest pick only when the window is
+  # *empty* (e.g. a manual suspension on a quiet entity). A **derived** suspension trips
+  # *because* its last N in-scope outcomes failed, so the lanes that caused it already
+  # carry matching `Log` rows before the first probe — their cursors are non-NULL and
+  # seeded by pre-park traffic, so the first probe is "least-recently-failed first", not
+  # strict-oldest. That is harmless (still a valid rotation, and it never reorders within
+  # a lane) — just not literally the pre-fix pick on that path.
   #
   # Ordering-safe: cross-lane heads carry distinct `event_key`s, so choosing a
   # different lane never reorders delivery *within* a `(connection_id, event_key)`

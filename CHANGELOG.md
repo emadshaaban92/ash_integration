@@ -20,8 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entity-level round-robin already uses (the max `Log` id per `(entity, event_key)`),
   applied one level down. Ordering-safe — cross-lane heads carry distinct
   `event_key`s, so rotating which lane is probed never reorders delivery within a
-  `(connection_id, event_key)` lane; before any lane has been probed the pick is
-  still the strict oldest. No config or schema change.
+  `(connection_id, event_key)` lane; when the health window is empty the pick is still
+  the strict oldest (a derived suspension seeds the window with the failures that
+  tripped it, so the first probe is least-recently-failed first). No config or schema
+  change.
 
 ### Changed
 
