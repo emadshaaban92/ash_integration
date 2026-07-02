@@ -646,9 +646,9 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     if Info.action(dsl_state, :record_permanent_failure) do
       dsl_state
     else
-      # A delivery whose transport reported a NON-retryable failure (`retryable:
-      # false`) — a deterministic rejection (HTTP 4xx, blocked egress, undecryptable
-      # credential) a retry cannot fix. Take it terminal on the FIRST occurrence
+      # A delivery whose transport reported a NON-retryable `:response`-class rejection
+      # (`retryable: false` — a deterministic HTTP 4xx/3xx the target refuses regardless
+      # of its health) a retry cannot fix. Take it terminal on the FIRST occurrence
       # rather than marching it through backoff/suspension/probe cycles it can never
       # clear: force `attempts` to the poison ceiling (`MarkTerminal`) so `claim/1`
       # never re-picks it and the row is bucketed as terminal, leaving it `:scheduled`

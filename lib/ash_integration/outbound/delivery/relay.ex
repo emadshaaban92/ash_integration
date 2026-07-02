@@ -19,14 +19,17 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   batch is a set of DISTINCT-`event_key` heads — there is no intra-batch same-key
   ordering hazard, and batching (deferred) is ordering-safe by construction.
 
-  **Outcomes (per row).** A success → `:deliver` (slot freed). A NON-retryable failure
-  (the transport flagged `retryable: false` — a deterministic HTTP 4xx, blocked
-  egress, undecryptable credential) → `:record_permanent_failure`: terminal on the
-  FIRST occurrence (forced to the poison ceiling, never re-claimed, lane left blocked),
-  surfaced loudly and logged `failure_class: :permanent` so it stays out of the health
-  windows — a retry can't fix it and must not falsely suspend a healthy endpoint. A
-  retryable failure on a HEALTHY entity → `:record_attempt_error`: stamp
-  `next_attempt_at` (durable backoff), leave the row `:scheduled` so the lane stays
+  **Outcomes (per row).** A success → `:deliver` (slot freed). A NON-retryable RESPONSE
+  rejection (the transport flagged `retryable: false` on a `:response`-class failure — a
+  deterministic HTTP 4xx/3xx the target refuses regardless of its health) →
+  `:record_permanent_failure`: terminal on the FIRST occurrence (forced to the poison
+  ceiling, never re-claimed, lane left blocked), surfaced loudly and logged
+  `failure_class: :permanent` so it stays out of the health windows — a retry can't fix
+  it and it must not falsely suspend a healthy endpoint. (A non-retryable *transport*
+  failure — NXDOMAIN, blocked egress, a bad credential — is NOT terminal here: it
+  reflects endpoint health, so it keeps feeding the connection window like any other
+  transport failure.) A retryable failure on a HEALTHY entity → `:record_attempt_error`:
+  stamp `next_attempt_at` (durable backoff), leave the row `:scheduled` so the lane stays
   blocked while it retries (in-order-per-key). At the poison ceiling (`attempts >=
   max_attempts`, counted on the claim) → leave `:scheduled`, surface loudly once,
   never auto-resolve. A retryable failure for a SUSPENDED entity → `:reset_to_pending`
@@ -158,12 +161,15 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
 
   defp apply_result(delivery, {:error, metadata}) do
     cond do
-      # The transport classified the failure as NON-retryable — a deterministic
-      # rejection (HTTP 4xx, blocked egress, undecryptable credential) a retry cannot
-      # fix. Take it terminal immediately, regardless of suspension: retrying it only
-      # burns attempts and, worse, feeds the health window until a healthy endpoint is
-      # falsely suspended and the row loops on the recovery probe forever.
-      not retryable?(metadata) ->
+      # A deterministic RESPONSE rejection the transport flagged non-retryable (an HTTP
+      # 4xx/3xx — the target refused this exact payload). A retry cannot fix it, so take
+      # it terminal immediately, regardless of suspension: retrying only burns attempts
+      # and, worse, feeds the subscription health window until a healthy endpoint is
+      # falsely suspended and the row loops on the recovery probe forever. NON-retryable
+      # TRANSPORT failures (NXDOMAIN, blocked egress, a bad credential) are deliberately
+      # NOT terminal here — they reflect endpoint health, so they keep feeding the
+      # connection window to drive suspension + recovery probing (see `permanent_failure?/1`).
+      permanent_failure?(metadata) ->
         record_permanent_failure(delivery, metadata)
 
       suspended?(delivery) ->
@@ -208,10 +214,10 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     apply_result(delivery, {:error, %{error_message: "transport returned no result"}})
   end
 
-  # A non-retryable failure is terminal on the FIRST occurrence: force the row to the
-  # poison ceiling (never re-claimed, lane left blocked to preserve per-key order) and
-  # surface it loudly. Logged as `failure_class: :permanent`, so it stays observable
-  # without perturbing the connection/subscription health windows.
+  # A permanent (non-retryable response) failure is terminal on the FIRST occurrence:
+  # force the row to the poison ceiling (never re-claimed, lane left blocked to preserve
+  # per-key order) and surface it loudly. Logged as `failure_class: :permanent`, so it
+  # stays observable without perturbing the connection/subscription health windows.
   defp record_permanent_failure(delivery, metadata) do
     error_message = Map.get(metadata, :error_message, "Unknown error")
 
@@ -224,14 +230,31 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     :ok
   end
 
-  # A transport failure is retryable unless it explicitly says otherwise. A missing
-  # key ⇒ retryable (safe default: a transport predating the flag, or the synthesized
-  # "no result" contract-bug error, still gets the durable backoff). Handles both atom
-  # (a fresh transport result) and string (a round-tripped map) keys.
+  # A failure is PERMANENT (terminal, no retry) only when it is BOTH non-retryable AND
+  # a `:response`-class rejection — a deterministic HTTP 4xx/3xx the target will refuse
+  # no matter how healthy it is. A non-retryable `:transport` failure (NXDOMAIN, blocked
+  # egress, a removed transport, a bad credential) is NOT permanent here: it reflects
+  # endpoint health and must keep feeding the connection window (suspend + probe for
+  # recovery), so it falls through to the ordinary retryable/suspended handling.
+  defp permanent_failure?(metadata) do
+    not retryable?(metadata) and response_class?(metadata)
+  end
+
+  # A transport failure is retryable unless it explicitly says otherwise. A missing key
+  # ⇒ retryable (safe default: a transport predating the flag, or the synthesized "no
+  # result" contract-bug error, still gets the durable backoff). Handles both atom (a
+  # fresh transport result) and string (a round-tripped map) keys.
   defp retryable?(metadata) do
     case Map.get(metadata, :retryable, Map.get(metadata, "retryable", true)) do
       false -> false
       _ -> true
+    end
+  end
+
+  defp response_class?(metadata) do
+    case Map.get(metadata, :failure_class, Map.get(metadata, "failure_class")) do
+      class when class in [:response, "response"] -> true
+      _ -> false
     end
   end
 

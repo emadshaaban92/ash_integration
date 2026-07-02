@@ -5,9 +5,9 @@ defmodule AshIntegration.Outbound.Delivery.Changes.MarkTerminal do
   # gate never re-picks it, `Dispatcher.poison?/1` reports it as terminal, and the
   # dashboard poison view buckets it — all without a new state or column.
   #
-  # Used by `:record_permanent_failure`, where the transport reported a
-  # NON-retryable error (`retryable: false`) — a deterministic rejection (HTTP 4xx,
-  # a blocked egress target, an undecryptable credential) that a retry cannot fix.
+  # Used by `:record_permanent_failure`, where the transport reported a NON-retryable
+  # `:response`-class rejection (`retryable: false` — a deterministic HTTP 4xx/3xx the
+  # target refuses regardless of its health) that a retry cannot fix.
   # Unlike the ordinary poison ceiling (reached by exhausting `max_attempts` real
   # attempts) this takes the row terminal on the FIRST such failure, so the row is
   # left `:scheduled` with its lane blocked (preserving per-key order) instead of

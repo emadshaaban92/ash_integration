@@ -234,17 +234,21 @@ defmodule Example.Outbound.TransportHttpTest do
     assert Enum.all?(classes, &(&1 == :response))
   end
 
-  test "a 4xx response is a :response failure, not retried", %{connection: dest} do
+  test "a 4xx response is a non-retryable :permanent failure, terminal on the first attempt", %{
+    connection: dest
+  } do
     stub_webhook_failure(422)
 
     s1 = create_subscription!(dest)
     create_event!(s1)
 
-    # A 4xx is recorded as a `:response` failure; the row stays `:scheduled` with a
-    # backoff. The derived subscription-scope recompute is what halts a
-    # persistently-rejecting subscription.
+    # A 4xx is a deterministic response rejection (`retryable: false`) — the target
+    # refuses this exact payload regardless of its health. It is taken terminal at once
+    # and logged `:permanent`, a non-scope class excluded from the subscription health
+    # window (so one bad payload never suspends the whole subscription), rather than
+    # retried with backoff until suspension.
     drain_delivery!()
-    assert [:response] = failed_log_classes(:subscription_id, s1.id)
+    assert [:permanent] = failed_log_classes(:subscription_id, s1.id)
   end
 
   test "a connection error is a :transport failure (connection scope)", %{connection: dest} do
@@ -290,9 +294,10 @@ defmodule Example.Outbound.TransportHttpTest do
     # …but the redirect to the metadata host was never chased.
     refute_received {:redirect_target, "169.254.169.254"}
 
-    # A 302 is a non-2xx rejection: classified `:response`, never delivered.
+    # A 302 is a non-2xx rejection: non-retryable `:response`, so it is terminal and
+    # logged `:permanent`; never delivered.
     refute reload(event).state == :delivered
-    assert [:response] = failed_log_classes(:subscription_id, s1.id)
+    assert [:permanent] = failed_log_classes(:subscription_id, s1.id)
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────

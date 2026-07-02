@@ -86,22 +86,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Non-retryable delivery failures are now terminal instead of retried forever.**
-  Every transport already classifies each failure with a `retryable` flag
-  (`retryable: false` for a deterministic rejection — HTTP 4xx, a blocked egress
-  target, an undecryptable credential), but the delivery relay ignored it: a
-  non-retryable failure went through the same backoff ladder as a transient one,
-  filled the connection/subscription health window, tripped auto-suspension, and
-  then looped on the recovery probe every `probe_interval_ms` (~30s) indefinitely —
-  never reaching the backoff cap or the poison ceiling because each probe cycle
-  cleared its `attempts`/backoff. The relay now honours `retryable: false` via a new
-  `:record_permanent_failure` outcome: the row is taken terminal on the FIRST
-  occurrence (forced to the poison ceiling, never re-claimed, left `:scheduled` so
-  its lane stays blocked to preserve per-key order) and surfaced loudly
-  (`[:ash_integration, :delivery, :non_retryable]` telemetry + an operator log). The
-  failure is written to the `Log` as `failure_class: :permanent` — observable but
-  excluded from both health windows, so a healthy endpoint returning a 4xx for one
-  bad payload never suspends the whole subscription. A missing `retryable` key still
+- **A non-retryable response rejection (HTTP 4xx/3xx) is now terminal instead of
+  retried forever.** Every transport classifies each failure with a `retryable` flag,
+  but the delivery relay ignored it: a deterministic `:response` rejection
+  (`retryable: false` — e.g. a 4xx "validation failed") went through the same backoff
+  ladder as a transient failure, filled the subscription health window, tripped
+  auto-suspension, and then looped on the recovery probe every `probe_interval_ms`
+  (~30s) indefinitely — never reaching the backoff cap or the poison ceiling because
+  each probe cycle cleared its `attempts`/backoff. The relay now takes a
+  **non-retryable `:response` failure** terminal on the FIRST occurrence via a new
+  `:record_permanent_failure` outcome (forced to the poison ceiling, never re-claimed,
+  left `:scheduled` so its lane stays blocked to preserve per-key order) and surfaces
+  it loudly (`[:ash_integration, :delivery, :non_retryable]` telemetry + an operator
+  log). The failure is logged as `failure_class: :permanent` — observable but excluded
+  from both health windows, so a healthy endpoint returning a 4xx for one bad payload
+  never suspends the whole subscription. Non-retryable **`:transport`** failures
+  (NXDOMAIN, blocked egress, a removed transport, a bad credential) are deliberately
+  left unchanged: they reflect endpoint health, so they keep feeding the connection
+  window to drive suspension + recovery probing. A missing `retryable` key still
   defaults to retryable, so third-party transports keep their durable backoff.
 
 ## [0.2.0]
