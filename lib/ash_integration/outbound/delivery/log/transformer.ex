@@ -42,10 +42,14 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
      # entity was suspended. It is recorded for observability but is excluded from
      # BOTH health windows (the partial indexes below match only `transport`/
      # `response`), so probe failures never perturb the suspend/unsuspend math.
+     # `:permanent` is likewise a non-scope class: a non-retryable (`retryable:
+     # false`) delivery failure, terminal on the first occurrence. Recorded for
+     # observability but excluded from both windows — a healthy endpoint returning a
+     # deterministic 4xx for one bad payload must not suspend the whole subscription.
      |> add_attribute_if_not_exists(:failure_class, :atom,
        allow_nil?: true,
        public?: true,
-       constraints: [one_of: [:transport, :response, :probe]]
+       constraints: [one_of: [:transport, :response, :probe, :permanent]]
      )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_subscription_relationship_if_not_exists()

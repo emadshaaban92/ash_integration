@@ -19,14 +19,19 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   batch is a set of DISTINCT-`event_key` heads — there is no intra-batch same-key
   ordering hazard, and batching (deferred) is ordering-safe by construction.
 
-  **Outcomes (per row).** A success → `:deliver` (slot freed). A retryable failure
-  on a HEALTHY entity → `:record_attempt_error`: stamp `next_attempt_at` (durable
-  backoff), leave the row `:scheduled` so the lane stays blocked while it retries
-  (in-order-per-key). At the poison ceiling (`attempts >= max_attempts`, counted on
-  the claim) → leave `:scheduled`, surface loudly once, never auto-resolve. A failure
-  for a SUSPENDED entity → `:reset_to_pending` (one-shot): the recovery probe paces
-  re-tries and the attempt count is cleared, so a suspended delivery never poisons;
-  the scheduler re-promotes once unsuspended.
+  **Outcomes (per row).** A success → `:deliver` (slot freed). A NON-retryable failure
+  (the transport flagged `retryable: false` — a deterministic HTTP 4xx, blocked
+  egress, undecryptable credential) → `:record_permanent_failure`: terminal on the
+  FIRST occurrence (forced to the poison ceiling, never re-claimed, lane left blocked),
+  surfaced loudly and logged `failure_class: :permanent` so it stays out of the health
+  windows — a retry can't fix it and must not falsely suspend a healthy endpoint. A
+  retryable failure on a HEALTHY entity → `:record_attempt_error`: stamp
+  `next_attempt_at` (durable backoff), leave the row `:scheduled` so the lane stays
+  blocked while it retries (in-order-per-key). At the poison ceiling (`attempts >=
+  max_attempts`, counted on the claim) → leave `:scheduled`, surface loudly once,
+  never auto-resolve. A retryable failure for a SUSPENDED entity → `:reset_to_pending`
+  (one-shot): the recovery probe paces re-tries and the attempt count is cleared, so a
+  suspended delivery never poisons; the scheduler re-promotes once unsuspended.
 
   **The lease-token fence.** Every result-writing action is filtered on
   `claimed_at == <the value the claimer saw>` (plus the baked `state == :scheduled`
@@ -152,45 +157,82 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   end
 
   defp apply_result(delivery, {:error, metadata}) do
-    if suspended?(delivery) do
-      # A failure for a suspended entity is not a delivery attempt to retry: send the
-      # row back to `:pending` (one-shot) so the recovery probe paces the next try,
-      # and never let it march toward the poison ceiling. `:record_suspended_failure`
-      # clears the lease/backoff/attempts (like `:reset_to_pending`) AND logs the
-      # failure as `failure_class: :probe` — observable, but excluded from the health
-      # windows so it never perturbs the suspend/unsuspend math.
-      finalize(delivery, :record_suspended_failure, %{
-        last_error: Map.get(metadata, :error_message, "Unknown error"),
-        delivery_metadata: metadata
-      })
+    cond do
+      # The transport classified the failure as NON-retryable — a deterministic
+      # rejection (HTTP 4xx, blocked egress, undecryptable credential) a retry cannot
+      # fix. Take it terminal immediately, regardless of suspension: retrying it only
+      # burns attempts and, worse, feeds the health window until a healthy endpoint is
+      # falsely suspended and the row loops on the recovery probe forever.
+      not retryable?(metadata) ->
+        record_permanent_failure(delivery, metadata)
 
-      :ok
-    else
-      error_message = Map.get(metadata, :error_message, "Unknown error")
-      poison? = Dispatcher.poison?(delivery)
+      suspended?(delivery) ->
+        # A failure for a suspended entity is not a delivery attempt to retry: send the
+        # row back to `:pending` (one-shot) so the recovery probe paces the next try,
+        # and never let it march toward the poison ceiling. `:record_suspended_failure`
+        # clears the lease/backoff/attempts (like `:reset_to_pending`) AND logs the
+        # failure as `failure_class: :probe` — observable, but excluded from the health
+        # windows so it never perturbs the suspend/unsuspend math.
+        finalize(delivery, :record_suspended_failure, %{
+          last_error: Map.get(metadata, :error_message, "Unknown error"),
+          delivery_metadata: metadata
+        })
 
-      last_error =
-        if poison?,
-          do: Dispatcher.poison_message(delivery.attempts, error_message),
-          else: error_message
+        :ok
 
-      finalize(delivery, :record_attempt_error, %{
-        last_error: last_error,
-        delivery_metadata: metadata,
-        # Backoff is irrelevant for a terminal row (never re-claimed), but harmless.
-        next_attempt_at: Dispatcher.backoff_until(delivery.attempts)
-      })
+      true ->
+        error_message = Map.get(metadata, :error_message, "Unknown error")
+        poison? = Dispatcher.poison?(delivery)
 
-      if poison?, do: Dispatcher.record_poison(delivery, error_message)
-      :ok
+        last_error =
+          if poison?,
+            do: Dispatcher.poison_message(delivery.attempts, error_message),
+            else: error_message
+
+        finalize(delivery, :record_attempt_error, %{
+          last_error: last_error,
+          delivery_metadata: metadata,
+          # Backoff is irrelevant for a terminal row (never re-claimed), but harmless.
+          next_attempt_at: Dispatcher.backoff_until(delivery.attempts)
+        })
+
+        if poison?, do: Dispatcher.record_poison(delivery, error_message)
+        :ok
     end
   end
 
   # `deliver_batch/2` must return a result for every id; a missing one is a transport
   # contract bug. Treat it as a retryable failure so the lease re-emits the row,
-  # rather than silently dropping it.
+  # rather than silently dropping it. No `retryable` key ⇒ retryable (see `retryable?/1`).
   defp apply_result(delivery, nil) do
     apply_result(delivery, {:error, %{error_message: "transport returned no result"}})
+  end
+
+  # A non-retryable failure is terminal on the FIRST occurrence: force the row to the
+  # poison ceiling (never re-claimed, lane left blocked to preserve per-key order) and
+  # surface it loudly. Logged as `failure_class: :permanent`, so it stays observable
+  # without perturbing the connection/subscription health windows.
+  defp record_permanent_failure(delivery, metadata) do
+    error_message = Map.get(metadata, :error_message, "Unknown error")
+
+    finalize(delivery, :record_permanent_failure, %{
+      last_error: Dispatcher.permanent_message(error_message),
+      delivery_metadata: metadata
+    })
+
+    Dispatcher.record_permanent(delivery, error_message)
+    :ok
+  end
+
+  # A transport failure is retryable unless it explicitly says otherwise. A missing
+  # key ⇒ retryable (safe default: a transport predating the flag, or the synthesized
+  # "no result" contract-bug error, still gets the durable backoff). Handles both atom
+  # (a fresh transport result) and string (a round-tripped map) keys.
+  defp retryable?(metadata) do
+    case Map.get(metadata, :retryable, Map.get(metadata, "retryable", true)) do
+      false -> false
+      _ -> true
+    end
   end
 
   # Apply a state-transition action, fenced on the lease token (`claimed_at` the

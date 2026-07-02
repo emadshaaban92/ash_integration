@@ -166,4 +166,44 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
     "poison: stuck after #{attempts} delivery attempts (no auto-resolve; left " <>
       "scheduled, lane blocked); last error: #{reason}"
   end
+
+  # ── Non-retryable (permanent) failure policy ─────────────────────────────────
+
+  @doc """
+  The `last_error` recorded on a NON-retryable (permanent) delivery failure — a
+  deterministic rejection the transport flagged `retryable: false`.
+  """
+  def permanent_message(reason) do
+    "permanent: non-retryable delivery failure (no retry; left scheduled, lane " <>
+      "blocked, no auto-resolve); last error: #{reason}"
+  end
+
+  @doc """
+  Surface a NON-retryable (permanent) delivery failure loudly — operator log +
+  `[:ash_integration, :delivery, :non_retryable]` telemetry. Like poison the row is
+  left `:scheduled` (lane blocked) and never auto-resolved, but it is terminal on the
+  FIRST failure because the transport reported the error can never succeed. `attempts`
+  is the real (post-claim) count at the moment of failure, not the forced ceiling.
+  """
+  def record_permanent(delivery, reason) do
+    Logger.error(
+      "Outbound delivery: non-retryable delivery #{delivery.id} (#{delivery.event_type}, key " <>
+        "#{delivery.event_key}) failed permanently after #{delivery.attempts} attempt(s) — left " <>
+        "scheduled, lane blocked (no auto-resolve); last error: #{reason}"
+    )
+
+    :telemetry.execute(
+      [:ash_integration, :delivery, :non_retryable],
+      %{attempts: delivery.attempts},
+      %{
+        event_delivery_id: delivery.id,
+        event_type: delivery.event_type,
+        event_key: delivery.event_key,
+        connection_id: delivery.connection_id,
+        subscription_id: delivery.subscription_id
+      }
+    )
+
+    :ok
+  end
 end

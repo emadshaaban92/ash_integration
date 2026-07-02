@@ -272,6 +272,80 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
+  describe "non-retryable (permanent) failure — terminal on first occurrence" do
+    test "an HTTP 4xx (retryable: false) is terminal at once, surfaced, never re-claimed", %{
+      connection: conn
+    } do
+      # A deterministic 400 (e.g. a validation rejection). The transport classifies it
+      # `retryable: false`, so it must NOT march through the backoff/poison ladder — it
+      # is terminal on the first attempt.
+      stub_webhook_failure(400)
+      d = scheduled_delivery!(create_subscription!(conn))
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:ash_integration, :delivery, :non_retryable]
+        ])
+
+      drain_delivery!()
+
+      assert_received {[:ash_integration, :delivery, :non_retryable], ^ref, %{attempts: 1}, %{}}
+
+      reloaded = reload(d)
+      # Terminal like poison: left `:scheduled` (lane blocked), forced to the ceiling,
+      # surfaced, and never claimed again — no 30s retry loop.
+      assert reloaded.state == :scheduled
+      assert reloaded.attempts == Stage.max_attempts()
+      assert reloaded.last_error =~ "permanent"
+      assert is_nil(reloaded.claimed_at)
+      # No backoff cursor is stamped — it is never meant to be retried.
+      assert is_nil(reloaded.next_attempt_at)
+      assert [] = Dispatcher.claim(10)
+    end
+
+    test "the permanent failure is logged as :permanent and never suspends the subscription", %{
+      connection: conn
+    } do
+      stub_webhook_failure(400)
+      s = create_subscription!(conn)
+      d = scheduled_delivery!(s)
+
+      # Window of 1: a single response failure would normally trip the subscription on
+      # the next recompute. A `:permanent` failure is excluded from the window, so even
+      # here it does not.
+      with_window(1, fn ->
+        drain_delivery!()
+        Health.recompute()
+      end)
+
+      assert [log] = Ash.read!(Log, authorize?: false)
+      assert log.status == :failed
+      assert log.failure_class == :permanent
+      assert log.event_delivery_id == d.id
+      refute reload(s).suspended
+    end
+
+    test "a non-retryable failure while suspended is also terminal, not looped to :pending", %{
+      connection: conn
+    } do
+      # A suspended entity's probe delivery that fails NON-retryably must not one-shot
+      # back to `:pending` (which would let the probe re-promote it every tick forever)
+      # — a deterministic rejection can never recover, so it goes terminal like any
+      # other non-retryable failure.
+      suspend!(conn)
+      stub_webhook_failure(400)
+      d = scheduled_delivery!(create_subscription!(conn))
+
+      drain_delivery!()
+
+      reloaded = reload(d)
+      assert reloaded.state == :scheduled
+      assert reloaded.attempts == Stage.max_attempts()
+      assert reloaded.last_error =~ "permanent"
+      assert [] = Dispatcher.claim(10)
+    end
+  end
+
   describe "lease-token fence (stale claimer can't finalize a re-claimed row)" do
     test ":deliver does not apply when the claimed_at token no longer matches", %{
       connection: conn

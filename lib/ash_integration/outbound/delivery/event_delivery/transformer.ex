@@ -100,6 +100,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
      |> add_park_action_if_not_exists()
      |> add_reset_to_pending_action_if_not_exists()
      |> add_record_suspended_failure_action_if_not_exists()
+     |> add_record_permanent_failure_action_if_not_exists()
      |> add_code_interface_if_not_exists()
      |> add_unique_delivery_identity_if_not_exists()
      |> add_reference_if_not_exists(:event, on_delete: :delete, on_update: :restrict)
@@ -641,6 +642,38 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     end
   end
 
+  defp add_record_permanent_failure_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :record_permanent_failure) do
+      dsl_state
+    else
+      # A delivery whose transport reported a NON-retryable failure (`retryable:
+      # false`) — a deterministic rejection (HTTP 4xx, blocked egress, undecryptable
+      # credential) a retry cannot fix. Take it terminal on the FIRST occurrence
+      # rather than marching it through backoff/suspension/probe cycles it can never
+      # clear: force `attempts` to the poison ceiling (`MarkTerminal`) so `claim/1`
+      # never re-picks it and the row is bucketed as terminal, leaving it `:scheduled`
+      # with its lane blocked (preserving per-key order, exactly like poison). Writes
+      # the failure to the `Log` as `failure_class: :permanent` — observable but out
+      # of BOTH health windows, so a healthy endpoint returning a 4xx for one bad
+      # payload never suspends the whole subscription. Guarded on `state ==
+      # :scheduled` like the other relay-raced writes.
+      {:ok, action} =
+        Transformer.build_entity(Dsl, [:actions], :update,
+          name: :record_permanent_failure,
+          accept: [:last_error, :delivery_metadata],
+          require_atomic?: false,
+          changes: [
+            guard_scheduled(),
+            release_lease(),
+            mark_terminal(),
+            record_permanent_failure_log()
+          ]
+        )
+
+      Transformer.add_entity(dsl_state, [:actions], action, type: :append)
+    end
+  end
+
   defp set_state(value) do
     Transformer.build_entity!(Dsl, [:actions, :update], :change,
       change: {Change.SetAttribute, [attribute: :state, value: value]}
@@ -676,6 +709,25 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   defp record_probe_failure_log do
     Transformer.build_entity!(Dsl, [:actions, :update], :change,
       change: {AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure, failure_class: :probe}
+    )
+  end
+
+  # Write the failure to the delivery `Log` forced to `failure_class: :permanent` — a
+  # non-retryable delivery failure, observable but excluded from both health windows
+  # (recompute scopes only `transport`/`response`) so it never perturbs the
+  # suspend/unsuspend math.
+  defp record_permanent_failure_log do
+    Transformer.build_entity!(Dsl, [:actions, :update], :change,
+      change:
+        {AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure, failure_class: :permanent}
+    )
+  end
+
+  # Force `attempts` to the poison ceiling so a non-retryable failure is terminal on
+  # the first occurrence — never re-claimed, lane left blocked. See the change module.
+  defp mark_terminal do
+    Transformer.build_entity!(Dsl, [:actions, :update], :change,
+      change: AshIntegration.Outbound.Delivery.Changes.MarkTerminal
     )
   end
 
