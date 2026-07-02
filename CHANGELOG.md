@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recovery probe no longer starves a suspended entity's other lanes.** The
+  bounded probe (`design/connection-health.md` §7) promoted a suspended
+  connection/subscription's **strict-oldest** schedulable head, so a non-poison head
+  that deterministically fails (e.g. a per-payload response rejection) and is the
+  oldest would be re-promoted every pass — monopolising the one probe slot and never
+  observing the entity's *other* lanes, leaving it suspended indefinitely even after
+  its endpoint recovered. The probe now **rotates across lanes round-robin,
+  least-recently-probed first**, using the same `Log`-derived cursor the
+  entity-level round-robin already uses (the max `Log` id per `(entity, event_key)`),
+  applied one level down. Ordering-safe — cross-lane heads carry distinct
+  `event_key`s, so rotating which lane is probed never reorders delivery within a
+  `(connection_id, event_key)` lane; when the health window is empty the pick is still
+  the strict oldest (a derived suspension seeds the window with the failures that
+  tripped it, so the first probe is least-recently-failed first). No config or schema
+  change.
+
 ### Changed
 
 - **BREAKING: configurable request signing.** The implicit "secret present ⇒ sign"

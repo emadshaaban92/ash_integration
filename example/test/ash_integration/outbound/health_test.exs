@@ -9,6 +9,7 @@ defmodule Example.Outbound.HealthTest do
   use Example.DataCase, async: false
 
   alias AshIntegration.Outbound.Delivery.Health
+  alias AshIntegration.Outbound.Delivery.Scheduler
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
   alias Example.Outbound.{Connection, Log, Subscription}
 
@@ -276,6 +277,74 @@ defmodule Example.Outbound.HealthTest do
     end
   end
 
+  describe "probe lane rotation (Log cursor)" do
+    test "rotates to a less-recently-probed lane instead of the entity's strict oldest",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+
+        # Two lanes for the one suspended subscription. L1 ("a") is the OLDER head and
+        # the starvation trigger: a head that deterministically fails on every probe
+        # (e.g. a per-payload 4xx) and resets back to :pending — so without rotation it
+        # is the oldest schedulable head every pass and is re-selected forever.
+        l1 = create_event!(s1, event_key: "a", state: :pending)
+        l2 = create_event!(s1, event_key: "b", state: :pending)
+
+        suspend!(s1)
+
+        # L1 has already been probed (its deterministic response failure logged); L2
+        # never has. The Log id is the lane cursor `rotate_lanes/2` reads.
+        log_attempt!(s1, "a", :failed, :response)
+
+        # The probe must rotate to the least-recently-probed lane (L2), NOT re-pick the
+        # older, perpetually-failing L1 — otherwise L2 (whose probe could clear the
+        # suspension) is starved and the subscription stays suspended forever.
+        assert Scheduler.promote_probe(:subscription, s1.id) == :scheduled
+        assert reload(l2).state == :scheduled, "probe rotated to the unprobed lane"
+
+        assert reload(l1).state == :pending,
+               "the recently-probed oldest lane is skipped this pass"
+      end)
+    end
+
+    test "with no prior probes, falls back to the strict-oldest lane (event_id tiebreak)",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+        l1 = create_event!(s1, event_key: "a", state: :pending)
+        l2 = create_event!(s1, event_key: "b", state: :pending)
+        suspend!(s1)
+
+        # No lane has a Log row → the cursors tie on NULL, broken by event_id: the
+        # oldest wins, exactly the pre-fix behaviour on the first pass.
+        assert Scheduler.promote_probe(:subscription, s1.id) == :scheduled
+        assert reload(l1).state == :scheduled, "oldest lane probed first when none probed yet"
+        assert reload(l2).state == :pending
+      end)
+    end
+
+    test "the cursor is scoped per lane — a probe on one lane doesn't reorder the others",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+        # Three lanes, oldest→newest: a, b, c. "a" was probed most recently, "b" earlier.
+        la = create_event!(s1, event_key: "a", state: :pending)
+        lb = create_event!(s1, event_key: "b", state: :pending)
+        lc = create_event!(s1, event_key: "c", state: :pending)
+        suspend!(s1)
+
+        log_attempt!(s1, "b", :failed, :response)
+        log_attempt!(s1, "a", :failed, :response)
+
+        # "c" has no cursor (NULLS FIRST) → it is probed before either already-probed lane.
+        assert Scheduler.promote_probe(:subscription, s1.id) == :scheduled
+        assert reload(lc).state == :scheduled
+        assert reload(la).state == :pending
+        assert reload(lb).state == :pending
+      end)
+    end
+  end
+
   # ── Helpers ───────────────────────────────────────────────────────────────
 
   defp cancel!(event) do
@@ -426,6 +495,27 @@ defmodule Example.Outbound.HealthTest do
         event_type: event_type,
         version: 1,
         transform_source: "function transform(event, defaults) return event end"
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
+  end
+
+  # A delivery-attempt `Log` row on a lane — the cursor `rotate_lanes/2` reads to tell
+  # which lane was probed least recently. Mirrors what a real probe attempt persists
+  # (event_key + failure_class), without driving the full relay loop.
+  defp log_attempt!(sub, event_key, status, failure_class) do
+    Log
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        event_type: sub.event_type,
+        version: sub.version,
+        event_key: event_key,
+        status: status,
+        failure_class: failure_class,
+        subscription_id: sub.id,
+        connection_id: sub.connection_id
       },
       authorize?: false
     )

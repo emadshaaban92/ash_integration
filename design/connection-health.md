@@ -319,6 +319,25 @@ below. The policy half:
   schedulable head for it (the "Promotion" subsection below). That single row is
   then claimed and sent by the **normal relay** — no special claim path, because
   after the park (§6) the connection has no *other* `:scheduled` rows competing.
+- **Which head, when the entity has more than one lane: round-robin across its
+  lanes, least-recently-probed first** — *not* its strict-oldest head. A non-poison
+  head that deterministically fails (e.g. a per-payload response rejection) and is
+  the entity's oldest would otherwise be re-promoted every pass — its failure resets
+  the row without the lane advancing — monopolising the one probe slot so the
+  entity's *other* lanes are never observed, and the entity stays suspended even
+  after its endpoint recovered (a sibling lane whose probe would succeed never gets a
+  turn). This is the **same `Log`-derived-cursor** technique used for entity
+  selection, applied one level down: order the candidate lane heads by each lane's
+  most recent probe — the max `Log` id for that `(entity, event_key)` over the
+  scope's health window — ascending, NULLS first for a lane with no in-window row,
+  `event_id` breaking ties (so when the window is *empty* — e.g. a manual suspension on
+  a quiet entity — the pick is exactly the old strict-oldest; a **derived** suspension
+  trips on logged failures, so those lanes' cursors are already seeded and the first
+  probe is least-recently-failed first, not strict-oldest — still a valid rotation). It
+  is **ordering-safe**: cross-lane heads carry distinct
+  `event_key`s, so rotating which lane is probed never reorders delivery *within* a
+  `(connection_id, event_key)` lane — the shared scheduler query still returns each
+  lane's strict head (`Scheduler.rotate_lanes/2`).
 - A probe **success** writes a `status: :success` `Log` row; the next recompute
   (§5) sees a success in the last `N` and **unsuspends** the connection, after which
   the scheduler resumes normal promotion in order. A probe **failure** backs off
@@ -605,10 +624,11 @@ system correct; recovery stays manual until phase 3.
 
 - **`N` per scope or shared?** Transport flakiness and response rejection may
   warrant different thresholds. Start shared; split if a real workload asks.
-- **Probe ordering vs. freshness.** The probe promotes the connection's *oldest*
-  pending head. For a connection whose oldest rows are stale-but-still-wanted
-  that's correct; if a host would rather probe with the *newest* (freshest
-  payload), that's a per-connection policy knob — deferred until asked.
+- **Probe ordering vs. freshness.** The probe promotes the *oldest* head **within**
+  the lane it picks (lanes themselves rotate round-robin, §7). For a connection whose
+  oldest rows are stale-but-still-wanted that's correct; if a host would rather probe
+  with the *newest* (freshest payload), that's a per-connection policy knob —
+  deferred until asked.
 - **Dedicated probe capacity.** Probes currently share the 25-slot pool (bounded
   by `M`). If probe-vs-healthy contention ever bites under a very small pool, a
   tiny reserved probe concurrency lane is the upgrade path. Deferred.
