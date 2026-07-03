@@ -247,6 +247,36 @@ defmodule Example.Outbound.TransportHttpTest do
     assert [:response] = failed_log_classes(:subscription_id, s1.id)
   end
 
+  test "a 429 (Too Many Requests) is a RETRYABLE :response failure", %{connection: dest} do
+    stub_webhook_failure(429)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    # 429 is a transient rate-limit — the request was fine, the target is just busy.
+    # It must stay `retryable: true`: logged `:response`, backed off, still claimable
+    # (not taken terminal like a deterministic 4xx).
+    drain_delivery!()
+
+    assert [:response] = failed_log_classes(:subscription_id, s1.id)
+
+    reloaded = reload(d)
+    assert reloaded.state == :scheduled
+    refute is_nil(reloaded.next_attempt_at)
+    assert reloaded.attempts < AshIntegration.Outbound.Delivery.Supervisor.max_attempts()
+  end
+
+  test "a 408 (Request Timeout) is a RETRYABLE :response failure", %{connection: dest} do
+    stub_webhook_failure(408)
+
+    s1 = create_subscription!(dest)
+    create_event!(s1)
+
+    drain_delivery!()
+
+    assert [:response] = failed_log_classes(:subscription_id, s1.id)
+  end
+
   test "a connection error is a :transport failure (connection scope)", %{connection: dest} do
     Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn plug_conn ->
       Req.Test.transport_error(plug_conn, :econnrefused)

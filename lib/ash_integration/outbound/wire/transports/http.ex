@@ -115,7 +115,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
          %{
            failure_class: :response,
            error_message: "HTTP #{status}",
-           retryable: status >= 500,
+           retryable: retryable_status?(status),
            response_status: status,
            response_body: Utils.body_to_string(resp)
          }}
@@ -136,6 +136,18 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
        retryable: true
      }}
   end
+
+  # Which non-2xx statuses are worth retrying. A 5xx is a server-side hiccup; 408
+  # (Request Timeout) and 429 (Too Many Requests) are the only two 4xx codes that
+  # explicitly mean "the request was fine, try again later" — a transient, load- or
+  # timing-driven rejection, not a verdict on this payload. Every OTHER 4xx
+  # (400/401/403/404/409/422 …) and every 3xx is deterministic: the target will
+  # reject this exact payload no matter how healthy it is, so it is non-retryable.
+  # This flag is what the delivery relay's permanent-failure discriminator keys on
+  # (`retryable: false` + `:response` ⇒ terminal at once), so misclassifying a
+  # transient 429/408 as non-retryable would wrongly take a recoverable delivery
+  # terminal on the first hit.
+  defp retryable_status?(status), do: status >= 500 or status in [408, 429]
 
   # A blocked egress target won't fix itself on retry — surface it as a
   # non-retryable transport failure rather than looping.
