@@ -207,8 +207,11 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   # The probe's policy: pick `m` suspended entities, **oldest-probed-first** — ordered
   # by each one's most recent transport/response `Log` row (for a suspended entity
   # that row IS its last probe, since park left it no other traffic) — skipping any
-  # that still hold a live (non-poison) `:scheduled` delivery so a probe is never
-  # stacked. Promotion itself is the scheduler's job (`promote_probe/2`).
+  # that still hold a live (non-terminal) `:scheduled` delivery so a probe is never
+  # stacked. "Terminal" here is BOTH the poison ceiling (`attempts >= max_attempts`)
+  # and an explicit `terminal_reason` verdict: a permanently-failed head is dead, so
+  # it must not count as live traffic that blocks the entity from being probed via its
+  # other lanes. Promotion itself is the scheduler's job (`promote_probe/2`).
   #
   # The `JOIN LATERAL … LIMIT 1` is an inner join, so an entity with NO transport/
   # response `Log` row is excluded — a manual `suspend` on a quiet entity is inert
@@ -230,7 +233,8 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     WHERE e.suspended = true
       AND NOT EXISTS (
         SELECT 1 FROM #{ed_table()} s
-        WHERE s.#{scope.id_column} = e.id AND s.state = 'scheduled' AND s.attempts < $2
+        WHERE s.#{scope.id_column} = e.id AND s.state = 'scheduled'
+          AND s.attempts < $2 AND s.terminal_reason IS NULL
       )
     ORDER BY ll.last_log_id ASC
     LIMIT $1

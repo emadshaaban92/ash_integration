@@ -56,6 +56,22 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
      )
      |> add_attribute_if_not_exists(:last_error, :string, allow_nil?: true, public?: true)
      |> add_attribute_if_not_exists(:delivery_metadata, :map, allow_nil?: true, public?: true)
+     # Terminal-verdict marker, kept DISTINCT from the `attempts` retry ledger. A row
+     # is unclaimable-terminal for either of two independent reasons: it exhausted its
+     # retry budget (`attempts >= max_attempts` — the poison ceiling, legitimately
+     # derived from the counter), OR the transport returned a verdict no retry can
+     # clear (`terminal_reason`). Giving the verdict its own column is what lets
+     # `attempts` stay an honest count of real delivery attempts (never inflated to
+     # fake a ceiling): `claim/1`, `Health.pick_suspended`, and `ParkOnSuspend` each
+     # treat `terminal_reason IS NOT NULL` as terminal ALONGSIDE the ceiling. Today the
+     # only value is `:permanent` (a non-retryable `:response` rejection — HTTP 4xx/3xx
+     # the target refuses regardless of its health); the column is the seam for any
+     # future first-occurrence-terminal verdict.
+     |> add_attribute_if_not_exists(:terminal_reason, :atom,
+       allow_nil?: true,
+       public?: true,
+       constraints: [one_of: [:permanent]]
+     )
      # Soft-lease stamp: when the delivery relay claims a `:scheduled` row it sets
      # `claimed_at = now()` (and bumps `attempts`) so a second pass/node skips it
      # until the lease expires. Also the relay's fence token — a result-writing
@@ -650,9 +666,10 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
       # (`retryable: false` — a deterministic HTTP 4xx/3xx the target refuses regardless
       # of its health) a retry cannot fix. Take it terminal on the FIRST occurrence
       # rather than marching it through backoff/suspension/probe cycles it can never
-      # clear: force `attempts` to the poison ceiling (`MarkTerminal`) so `claim/1`
-      # never re-picks it and the row is bucketed as terminal, leaving it `:scheduled`
-      # with its lane blocked (preserving per-key order, exactly like poison). Writes
+      # clear: stamp an explicit `terminal_reason: :permanent` verdict (`mark_terminal`)
+      # so `claim/1` never re-picks it and it is bucketed as terminal, leaving it
+      # `:scheduled` with its lane blocked (preserving per-key order, exactly like
+      # poison) — WITHOUT inflating `attempts`, which stays a truthful count. Writes
       # the failure to the `Log` as `failure_class: :permanent` — observable but out
       # of BOTH health windows, so a healthy endpoint returning a 4xx for one bad
       # payload never suspends the whole subscription. Guarded on `state ==
@@ -723,11 +740,16 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     )
   end
 
-  # Force `attempts` to the poison ceiling so a non-retryable failure is terminal on
-  # the first occurrence — never re-claimed, lane left blocked. See the change module.
+  # Mark the row terminal with an explicit verdict (`terminal_reason: :permanent`) so a
+  # non-retryable failure is terminal on the FIRST occurrence WITHOUT touching the
+  # `attempts` counter — the count stays a truthful record of real delivery attempts.
+  # `claim/1`, `Health.pick_suspended`, and `ParkOnSuspend` all treat a set
+  # `terminal_reason` as terminal (never re-claimed, never parked back to `:pending`,
+  # lane left blocked to preserve per-key order). Forced (not accepted) so callers
+  # never set it.
   defp mark_terminal do
     Transformer.build_entity!(Dsl, [:actions, :update], :change,
-      change: AshIntegration.Outbound.Delivery.Changes.MarkTerminal
+      change: {Change.SetAttribute, [attribute: :terminal_reason, value: :permanent]}
     )
   end
 

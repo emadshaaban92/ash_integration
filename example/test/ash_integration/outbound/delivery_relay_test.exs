@@ -292,10 +292,13 @@ defmodule Example.Outbound.DeliveryRelayTest do
       assert_received {[:ash_integration, :delivery, :non_retryable], ^ref, %{attempts: 1}, %{}}
 
       reloaded = reload(d)
-      # Terminal like poison: left `:scheduled` (lane blocked), forced to the ceiling,
-      # surfaced, and never claimed again — no 30s retry loop.
+      # Terminal like poison: left `:scheduled` (lane blocked), surfaced, and never
+      # claimed again — no 30s retry loop. But the terminal signal is an explicit
+      # `terminal_reason` verdict, NOT an inflated attempt count: `attempts` stays the
+      # truthful 1 (it really was attempted exactly once).
       assert reloaded.state == :scheduled
-      assert reloaded.attempts == Stage.max_attempts()
+      assert reloaded.terminal_reason == :permanent
+      assert reloaded.attempts == 1
       assert reloaded.last_error =~ "permanent"
       assert is_nil(reloaded.claimed_at)
       # No backoff cursor is stamped — it is never meant to be retried.
@@ -340,8 +343,32 @@ defmodule Example.Outbound.DeliveryRelayTest do
 
       reloaded = reload(d)
       assert reloaded.state == :scheduled
-      assert reloaded.attempts == Stage.max_attempts()
+      assert reloaded.terminal_reason == :permanent
+      assert reloaded.attempts == 1
       assert reloaded.last_error =~ "permanent"
+      assert [] = Dispatcher.claim(10)
+    end
+
+    test "a permanent row is NOT resurrected to :pending when its entity is later suspended",
+         %{connection: conn} do
+      # Regression for the `attempts`/terminal disentangling: a permanent row carries a
+      # truthful low `attempts` (1), so `ParkOnSuspend` — which parks the live backlog
+      # back to `:pending` on suspend — must exclude it by `terminal_reason`, not by the
+      # attempt ceiling. If it didn't, suspending the connection would flip this dead
+      # head back to `:pending` and the recovery probe would loop it forever.
+      d = scheduled_delivery!(create_subscription!(conn))
+      stub_webhook_failure(400)
+      drain_delivery!()
+
+      assert reload(d).terminal_reason == :permanent
+
+      # Suspending the connection fires ParkOnSuspend over its `:scheduled` backlog.
+      suspend!(conn)
+
+      reloaded = reload(d)
+      # Left terminal and `:scheduled` (lane blocked) — never parked, never re-claimed.
+      assert reloaded.state == :scheduled
+      assert reloaded.terminal_reason == :permanent
       assert [] = Dispatcher.claim(10)
     end
   end

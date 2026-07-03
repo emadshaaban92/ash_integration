@@ -23,18 +23,22 @@ defmodule AshIntegration.Outbound.Delivery.Changes.ParkOnSuspend do
   defp park_unleased(column, id) do
     table = AshPostgres.DataLayer.Info.table(AshIntegration.event_delivery_resource())
 
-    # Poison rows (attempts at the ceiling) are left `:scheduled`, lane blocked —
-    # the terminal policy is unchanged; only the live backlog is parked. Forgiving
-    # them here would resurrect a known-dead head as `:pending`, and since the probe
-    # promotes the oldest schedulable head first, that head would starve the entity's
-    # healthy lanes out of the recovery rotation. A re-promoted parked row still gets
-    # a clean attempt budget — `ClearClaim` zeroes `attempts` on the `:schedule` that
-    # re-promotes it — so this leaves no poison-on-reschedule trap.
+    # Terminal rows are left `:scheduled`, lane blocked — the terminal policy is
+    # unchanged; only the live backlog is parked. "Terminal" is BOTH the poison ceiling
+    # (`attempts >= max_attempts`) and an explicit `terminal_reason` verdict (a
+    # non-retryable rejection): a permanent row carries a truthful low `attempts`, so
+    # WITHOUT the `terminal_reason IS NULL` guard park would resurrect it as `:pending`
+    # and the probe would loop it forever. Forgiving a terminal head here would also
+    # starve the entity's healthy lanes out of the recovery rotation (the probe
+    # promotes the oldest schedulable head first). A re-promoted parked (non-terminal)
+    # row still gets a clean attempt budget — `ClearClaim` zeroes `attempts` on the
+    # `:schedule` that re-promotes it — so this leaves no poison-on-reschedule trap.
     sql = """
     UPDATE #{table} SET state = 'pending', claimed_at = NULL
     WHERE #{column} = $1
       AND state = 'scheduled'
       AND attempts < $2
+      AND terminal_reason IS NULL
       AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $3))
     """
 

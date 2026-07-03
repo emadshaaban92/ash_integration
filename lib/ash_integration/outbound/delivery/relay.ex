@@ -22,8 +22,9 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   **Outcomes (per row).** A success → `:deliver` (slot freed). A NON-retryable RESPONSE
   rejection (the transport flagged `retryable: false` on a `:response`-class failure — a
   deterministic HTTP 4xx/3xx the target refuses regardless of its health) →
-  `:record_permanent_failure`: terminal on the FIRST occurrence (forced to the poison
-  ceiling, never re-claimed, lane left blocked), surfaced loudly and logged
+  `:record_permanent_failure`: terminal on the FIRST occurrence (an explicit
+  `terminal_reason` verdict — NOT an inflated `attempts` — never re-claimed, lane left
+  blocked), surfaced loudly and logged
   `failure_class: :permanent` so it stays out of the health windows — a retry can't fix
   it and it must not falsely suspend a healthy endpoint. (A non-retryable *transport*
   failure — NXDOMAIN, blocked egress, a bad credential — is NOT terminal here: it
@@ -215,9 +216,10 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   end
 
   # A permanent (non-retryable response) failure is terminal on the FIRST occurrence:
-  # force the row to the poison ceiling (never re-claimed, lane left blocked to preserve
-  # per-key order) and surface it loudly. Logged as `failure_class: :permanent`, so it
-  # stays observable without perturbing the connection/subscription health windows.
+  # stamp an explicit `terminal_reason: :permanent` verdict (never re-claimed, lane left
+  # blocked to preserve per-key order) and surface it loudly. Unlike poison this does
+  # NOT touch `attempts`, so the count stays truthful. Logged as `failure_class:
+  # :permanent`, so it stays observable without perturbing the health windows.
   defp record_permanent_failure(delivery, metadata) do
     error_message = Map.get(metadata, :error_message, "Unknown error")
 

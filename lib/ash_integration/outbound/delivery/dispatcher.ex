@@ -37,16 +37,19 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   and return them as loaded structs (connection + subscription loaded), oldest
   (`event_id`, the parent Event's occurrence-ordered UUIDv7) first.
 
-  A row is claimable when it is `:scheduled`, under the attempt ceiling, its backoff
-  has elapsed (`next_attempt_at` null/past), and its lease is free (`claimed_at`
-  null or older than the lease window). `FOR UPDATE SKIP LOCKED` lets multiple
-  passes/nodes claim disjoint rows in parallel; the partial unique index
-  `(connection_id, event_key) WHERE state = 'scheduled'` is the one-in-flight
-  backstop. The single UPDATE stamps `claimed_at` and bumps `attempts`, so two
-  claimers can never grab the same row.
+  A row is claimable when it is `:scheduled`, non-terminal, its backoff has elapsed
+  (`next_attempt_at` null/past), and its lease is free (`claimed_at` null or older
+  than the lease window). `FOR UPDATE SKIP LOCKED` lets multiple passes/nodes claim
+  disjoint rows in parallel; the partial unique index `(connection_id, event_key)
+  WHERE state = 'scheduled'` is the one-in-flight backstop. The single UPDATE stamps
+  `claimed_at` and bumps `attempts`, so two claimers can never grab the same row.
 
-  Rows at/over `max_attempts` are **never claimed** — terminal (poison), left
-  `:scheduled` with their lane blocked until a human/host intervenes.
+  A row is **terminal** — never claimed, left `:scheduled` with its lane blocked
+  until a human/host intervenes — for either of two independent reasons: it exhausted
+  its retry budget (`attempts >= max_attempts`, the poison ceiling) OR it carries an
+  explicit `terminal_reason` verdict (a non-retryable rejection a retry can't fix).
+  The two are kept separate so `attempts` never has to be inflated to signal the
+  latter.
   """
   def claim(limit) when is_integer(limit) and limit > 0 do
     repo = AshIntegration.repo()
@@ -61,6 +64,7 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
       SELECT id FROM #{table}
       WHERE state = 'scheduled'
         AND attempts < $2
+        AND terminal_reason IS NULL
         AND (next_attempt_at IS NULL OR next_attempt_at <= now())
         AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1))
       ORDER BY event_id ASC
@@ -182,8 +186,9 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   Surface a NON-retryable (permanent) delivery failure loudly — operator log +
   `[:ash_integration, :delivery, :non_retryable]` telemetry. Like poison the row is
   left `:scheduled` (lane blocked) and never auto-resolved, but it is terminal on the
-  FIRST failure because the transport reported the error can never succeed. `attempts`
-  is the real (post-claim) count at the moment of failure, not the forced ceiling.
+  FIRST failure (via `terminal_reason`, not the attempt ceiling) because the transport
+  reported the error can never succeed. `attempts` is the real (post-claim) count at
+  the moment of failure — the permanent verdict never inflates it.
   """
   def record_permanent(delivery, reason) do
     Logger.error(

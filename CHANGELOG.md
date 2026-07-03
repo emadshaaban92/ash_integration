@@ -95,16 +95,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (~30s) indefinitely — never reaching the backoff cap or the poison ceiling because
   each probe cycle cleared its `attempts`/backoff. The relay now takes a
   **non-retryable `:response` failure** terminal on the FIRST occurrence via a new
-  `:record_permanent_failure` outcome (forced to the poison ceiling, never re-claimed,
-  left `:scheduled` so its lane stays blocked to preserve per-key order) and surfaces
-  it loudly (`[:ash_integration, :delivery, :non_retryable]` telemetry + an operator
-  log). The failure is logged as `failure_class: :permanent` — observable but excluded
-  from both health windows, so a healthy endpoint returning a 4xx for one bad payload
-  never suspends the whole subscription. Non-retryable **`:transport`** failures
-  (NXDOMAIN, blocked egress, a removed transport, a bad credential) are deliberately
-  left unchanged: they reflect endpoint health, so they keep feeding the connection
-  window to drive suspension + recovery probing. A missing `retryable` key still
-  defaults to retryable, so third-party transports keep their durable backoff.
+  `:record_permanent_failure` outcome (marked terminal with an explicit
+  `terminal_reason: :permanent` verdict — never re-claimed, left `:scheduled` so its
+  lane stays blocked to preserve per-key order) and surfaces it loudly
+  (`[:ash_integration, :delivery, :non_retryable]` telemetry + an operator log). The
+  failure is logged as `failure_class: :permanent` — observable but excluded from both
+  health windows, so a healthy endpoint returning a 4xx for one bad payload never
+  suspends the whole subscription. Non-retryable **`:transport`** failures (NXDOMAIN,
+  blocked egress, a removed transport, a bad credential) are deliberately left
+  unchanged: they reflect endpoint health, so they keep feeding the connection window
+  to drive suspension + recovery probing. A missing `retryable` key still defaults to
+  retryable, so third-party transports keep their durable backoff.
+- The permanent verdict lives in a new `EventDelivery.terminal_reason` column rather
+  than by forcing `attempts` to the poison ceiling, so `attempts` stays a truthful
+  count of real delivery attempts. `claim/1`, the recovery-probe picker, and the
+  suspend-time park all treat a row as terminal when `attempts >= max_attempts` **or**
+  `terminal_reason IS NOT NULL`.
+- HTTP `408 Request Timeout` and `429 Too Many Requests` are now classified
+  `retryable: true` (transient) instead of being lumped in with deterministic 4xx
+  rejections, so the relay backs them off and retries rather than taking them terminal
+  on the first hit.
 
 ## [0.2.0]
 
