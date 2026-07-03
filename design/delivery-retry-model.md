@@ -210,8 +210,7 @@ functions* (`backoff(attempts)`, "is this classification terminal").
   Maximally dumb relay, but a heavier promotion query and `retry_after = nil` on a
   `:failed` row becomes context-dependent ("unclassified" vs "ASAP").
 
-A1 keeps the relay *decisions*-free while avoiding the ambiguity; it's the
-recommendation. **This is a decision to ratify (§16).**
+A1 keeps the relay *decisions*-free while avoiding the ambiguity. **Ratified: A1.**
 
 ## 8. Failure taxonomy → outcome
 
@@ -373,21 +372,19 @@ code that should have returned an error.
 | `max_delivery_age` | opt-in `:expired` policy; **nullable** | `nil` (never) |
 | ~~`max_attempts`~~ | **removed** — no attempt ceiling | — |
 
-## 16. Decisions to ratify
+## 16. Decisions (ratified)
 
-1. **Sub-decision A (§7):** relay stamps derived `retry_after`/`terminal_reason`
-   (A1, recommended) vs scheduler computes on the fly (A2).
-2. **`:parked` reconciliation (§11):** confirm `:parked` and the opt-in
-   parked-suspend keep their own state/semantics unchanged (recommended — they are a
-   separate concern), i.e. this design touches only `:pending`/`:scheduled`/
-   `:failed`/`:delivered`/`:cancelled`.
-3. **Ship the `408`/`429` transport-classification fix independently** to `main`
-   now, ahead of this redesign — it is orthogonal HTTP correctness and shouldn't wait
-   on the larger change.
-
-Already ratified in discussion: block the lane on terminal (never auto-advance
-past a permanent head; ordering is inviolable); `max_delivery_age` default `nil`;
-no crash backstop.
+1. **Sub-decision A (§7): A1** — the relay stamps the derived
+   `retry_after`/`terminal_reason` as pure functions of the transport result.
+2. **`:parked` reconciliation (§11): untouched** — `:parked` and the opt-in
+   parked-suspend keep their own state/semantics; this design touches only
+   `:pending`/`:scheduled`/`:failed`/`:delivered`/`:cancelled`.
+3. **The `408`/`429` transport-classification fix ships as part of this change**
+   (not a separate PR) — it's the first, standalone commit in the sequence.
+4. **Ordering is inviolable** — block the lane on terminal; never auto-advance past
+   a permanent head.
+5. **`max_delivery_age` default `nil`** (never expire) — safe by default.
+6. **No crash backstop** — let it crash (§14).
 
 ## 17. Ordering test matrix (the non-negotiable suite)
 
