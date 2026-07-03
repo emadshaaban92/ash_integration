@@ -24,7 +24,7 @@ fine target falsely poisoned by lease expiry).
 This design rests on one rule — **one field, one fact** — and one structural move:
 
 1. **Three orthogonal facts, three fields.** *When* it may run next
-   (`retry_after`), *how many* attempts it has had (`attempts`), and *whether it is
+   (`next_attempt_at`), *how many* attempts it has had (`attempts`), and *whether it is
    terminal* (`terminal_reason`). No field is ever forced to a sentinel to stand in
    for another.
 2. **A new `:failed` state, and the lane's uniqueness index widened to
@@ -71,15 +71,15 @@ Consequences we've actually hit:
 
 | Fact | Field | `nil` / zero means | Never encodes |
 |------|-------|--------------------|---------------|
-| *When* may it run next | `retry_after :: utc_datetime_usec?` | no wait — eligible as soon as the lane frees | terminal-ness |
+| *When* may it run next | `next_attempt_at :: utc_datetime_usec?` | no wait — eligible as soon as the lane frees | terminal-ness |
 | *How many* attempts | `attempts :: integer` (default 0) | never attempted | terminal-ness, gating |
 | *Is it terminal* | `terminal_reason :: atom?` | not terminal | timing |
 
-The fresh state is `(attempts=0, retry_after=nil, terminal_reason=nil)` — obvious:
+The fresh state is `(attempts=0, next_attempt_at=nil, terminal_reason=nil)` — obvious:
 deliver as soon as this is the lane head. Every transition below moves exactly these
 fields plus `state`.
 
-Rejected alternative — *"non-retryable ⇒ `retry_after = nil`"*: `nil` already means
+Rejected alternative — *"non-retryable ⇒ `next_attempt_at = nil`"*: `nil` already means
 "eligible now," so a terminal row set to `nil` is re-claimed on the next poll. That
 is the original forever-loop. Terminal is its own bit; timing never carries it.
 
@@ -112,7 +112,7 @@ is the original forever-loop. Terminal is its own bit; timing never carries it.
 
 The key shift from today: **retrying and terminal rows leave `:scheduled` for
 `:failed`.** `:scheduled` becomes single-meaning. `:failed` is a *pool with
-attributes* (retrying vs terminal, disambiguated by `retry_after`/`terminal_reason`)
+attributes* (retrying vs terminal, disambiguated by `next_attempt_at`/`terminal_reason`)
 — not a sentinel overload, because the distinguishing facts live in their own fields.
 
 ## 5. The lane invariant (the crown jewel)
@@ -160,9 +160,10 @@ only when its head reaches `:delivered` or `:cancelled`.
   `attempts` is exactly its own consecutive-failure streak, so
   `backoff(attempts)` is correct without a separate streak counter. **No ceiling** —
   `attempts` never gates claiming.
-- **`retry_after :: utc_datetime_usec?`.** Earliest time the row may become the
-  active head again. `nil` = no wait. Purely timing. (This is today's
-  `next_attempt_at`, renamed and given a per-response policy — §12.)
+- **`next_attempt_at :: utc_datetime_usec?`.** Earliest time the row may become the
+  active head again. `nil` = no wait. Purely timing. (Today's field, **kept as-is —
+  no rename**; it gains the per-response policy of §12 and its gate moves from
+  claim-time to promotion-time.)
 - **`terminal_reason :: atom?`, one_of `[:permanent, :expired]`.** The single
   terminal bit. `nil` = not terminal. Set ⇒ never promote; lane held; operator-only
   recovery.
@@ -200,14 +201,14 @@ functions* (`backoff(attempts)`, "is this classification terminal").
 - **(A1, recommended)** The **relay stamps** the derived values as pure functions of
   the result it already holds, on the `:scheduled → :failed` transition:
   - non-retryable `:response` ⇒ `terminal_reason = :permanent`;
-  - otherwise ⇒ `retry_after = now + clamp(backoff(attempts) | Retry-After)`.
+  - otherwise ⇒ `next_attempt_at = now + clamp(backoff(attempts) | Retry-After)`.
 
-  The scheduler then only *promotes* eligible failed heads. `retry_after` keeps one
+  The scheduler then only *promotes* eligible failed heads. `next_attempt_at` keeps one
   uniform meaning ("earliest eligible; `nil` = ASAP"). The relay's "policy" is two
   stateless functions on the metadata in hand — no DB round-trip, no ambiguity.
 - **(A2)** The relay records only raw classification + `last_failed_at`; the
   **scheduler** classifies terminal and computes eligibility on the fly each tick.
-  Maximally dumb relay, but a heavier promotion query and `retry_after = nil` on a
+  Maximally dumb relay, but a heavier promotion query and `next_attempt_at = nil` on a
   `:failed` row becomes context-dependent ("unclassified" vs "ASAP").
 
 A1 keeps the relay *decisions*-free while avoiding the ambiguity. **Ratified: A1.**
@@ -220,14 +221,14 @@ Under A1 the relay maps it as:
 | Trigger | `failure_class` / signal | `retryable` | Row outcome | Fields written |
 |---|---|---|---|---|
 | Success | — | — | `:delivered`, lane frees | `state=:delivered` |
-| Server error (5xx) | `:response` | true | `:failed`, retry | `retry_after = now + backoff` |
-| Rate limited (429; 503+Retry-After) | `:response` | true | `:failed`, wait server's time | `retry_after = now + clamp(server)` |
+| Server error (5xx) | `:response` | true | `:failed`, retry | `next_attempt_at = now + backoff` |
+| Rate limited (429; 503+Retry-After) | `:response` | true | `:failed`, wait server's time | `next_attempt_at = now + clamp(server)` |
 | Deterministic reject (400/401/403/404/409/422, 3xx) | `:response` | false | `:failed`, **terminal** | `terminal_reason = :permanent` |
-| Reachability (timeout, refused, DNS, TLS) | `:transport` | true | `:failed`, retry; feeds connection window | `retry_after = now + backoff` |
-| Config/transport dead (removed transport, bad credential) | `:transport` | false | `:failed`, retry; feeds connection window → suspends | `retry_after = now + backoff` |
-| Suspended-entity probe, retryable | any (logged `:probe`) | — | `:failed`, awaits probe pacing | `retry_after = now + backoff`; Log `:probe` |
+| Reachability (timeout, refused, DNS, TLS) | `:transport` | true | `:failed`, retry; feeds connection window | `next_attempt_at = now + backoff` |
+| Config/transport dead (removed transport, bad credential) | `:transport` | false | `:failed`, retry; feeds connection window → suspends | `next_attempt_at = now + backoff` |
+| Suspended-entity probe, retryable | any (logged `:probe`) | — | `:failed`, awaits probe pacing | `next_attempt_at = now + backoff`; Log `:probe` |
 | Suspended-entity probe, permanent | `:response` | false | `:failed`, **terminal** | `terminal_reason = :permanent` |
-| No-result contract bug | synthesized, no keys | (default true) | `:failed`, retry | `retry_after = now + backoff` |
+| No-result contract bug | synthesized, no keys | (default true) | `:failed`, retry | `next_attempt_at = now + backoff` |
 | Aged out (opt-in, §13) | — | — | **terminal** | `terminal_reason = :expired` |
 
 Two rules worth stating explicitly:
@@ -256,7 +257,7 @@ for each lane (connection_id, event_key) with NO active head (no :scheduled/:fai
     if H is null: continue
     if H.entity is suspended: continue            # probe handles suspended entities
     if H.state == :failed and H.terminal_reason is not null: continue   # blocked forever
-    if H.state == :failed and H.retry_after > now(): continue           # still backing off
+    if H.state == :failed and H.next_attempt_at > now(): continue           # still backing off
     if over high-water for this connection: continue                    # backpressure
     promote H:  H.state -> :scheduled             # UPDATE; the index adjudicates races
 ```
@@ -275,13 +276,13 @@ Notes:
 ## 10. The relay: claim + execute + report
 
 - **Claim** (`Dispatcher.claim`) selects `state = 'scheduled'` and lease-free, bumps
-  `attempts`, stamps `claimed_at`. It no longer checks `retry_after` or any ceiling:
+  `attempts`, stamps `claimed_at`. It no longer checks `next_attempt_at` or any ceiling:
   a `:scheduled` row is, by construction, already due (the scheduler gated that at
   promotion). Claim shrinks to "lease the ready rows."
 - **Execute** over the transport, then **report** exactly one of:
   - success ⇒ `:scheduled → :delivered` (fenced on `claimed_at`);
   - failure ⇒ `:scheduled → :failed` (fenced), recording classification, the health
-    `Log`, and — under A1 — the derived `retry_after` **or** `terminal_reason`;
+    `Log`, and — under A1 — the derived `next_attempt_at` **or** `terminal_reason`;
     release the lease.
 - **The lease-token fence is unchanged**: every result write filters on the
   `claimed_at` the claimer saw, so a stale claimer (lease expired, row re-claimed)
@@ -325,7 +326,7 @@ delta-seconds and HTTP-date). The target is usually the integrator's *own* endpo
 so an outlandish value only parks *their* lane — but a clamp is cheap insurance:
 
 ```
-retry_after = now + clamp(server_value, min_retry_after, max_retry_after)
+next_attempt_at = now + clamp(server_value, min_retry_after, max_retry_after)
 ```
 
 The same `max_retry_after`/backoff cap bounds the computed `backoff(attempts)`. Both
@@ -375,7 +376,7 @@ code that should have returned an error.
 ## 16. Decisions (ratified)
 
 1. **Sub-decision A (§7): A1** — the relay stamps the derived
-   `retry_after`/`terminal_reason` as pure functions of the transport result.
+   `next_attempt_at`/`terminal_reason` as pure functions of the transport result.
 2. **`:parked` reconciliation (§11): untouched** — `:parked` and the opt-in
    parked-suspend keep their own state/semantics; this design touches only
    `:pending`/`:scheduled`/`:failed`/`:delivered`/`:cancelled`.
@@ -392,9 +393,9 @@ Ordering correctness is the thing we cannot get wrong, so it gets an exhaustive
 matrix. Every row asserts *no later `event_id` is delivered before an earlier one is
 `:delivered` or `:cancelled`*.
 
-- **Backoff holds the lane:** `e1` fails (→ `:failed`, `retry_after` future), `e2`
+- **Backoff holds the lane:** `e1` fails (→ `:failed`, `next_attempt_at` future), `e2`
   `:pending` behind it → scheduler promotes nothing for the lane; `e2` never leaves
-  `:pending`; when `e1`'s `retry_after` elapses, `e1` (not `e2`) is re-promoted.
+  `:pending`; when `e1`'s `next_attempt_at` elapses, `e1` (not `e2`) is re-promoted.
 - **Index rejects the ordering violation directly:** force the scheduler to attempt
   promoting `e2` while `e1` is `:failed` → the write is rejected; state unchanged.
 - **Terminal holds the lane forever:** `e1` `:permanent` → `e2..en` never promote;
@@ -411,7 +412,7 @@ matrix. Every row asserts *no later `event_id` is delivered before an earlier on
 
 Plus the per-case unit tests: one per row of the §8 table (including the
 `408`/`429`-retryable and `400`/`422`/`302`-permanent cases), and the
-`retry_after` clamp bounds.
+`next_attempt_at` clamp bounds.
 
 ## 18. What this removes vs today
 
@@ -422,7 +423,9 @@ Plus the per-case unit tests: one per row of the §8 table (including the
 - The `attempts` reset on reschedule — `attempts` is now truly monotonic.
 - `ParkOnSuspend`'s active `:scheduled → :pending` drain (§11).
 - The relay's suspended-vs-healthy-vs-poison branching — the relay is dumb.
-- `next_attempt_at` → renamed `retry_after`, with the per-response policy of §12.
+- `next_attempt_at` is **reused as-is (no rename)**; it gains the per-response policy
+  of §12 (429 `Retry-After`, clamped) and its eligibility gate moves from claim-time
+  to promotion-time.
 
 ## 19. Alternatives considered
 
@@ -436,7 +439,7 @@ Plus the per-case unit tests: one per row of the §8 table (including the
   query — a new correctness burden on the one thing we won't compromise. The
   `:failed` state buys that guarantee back for the price of one state value and a
   widened index. Rejected in favor of §4.
-- **`retry_after = nil` as the terminal signal.** Collides with "eligible now" (§3).
+- **`next_attempt_at = nil` as the terminal signal.** Collides with "eligible now" (§3).
   Rejected.
 - **A crash/stall counter (`unresolved_claims` + `:stalled`).** Rejected in favor of
   "let it crash" (§14).
