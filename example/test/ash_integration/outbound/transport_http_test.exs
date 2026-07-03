@@ -234,36 +234,47 @@ defmodule Example.Outbound.TransportHttpTest do
     assert Enum.all?(classes, &(&1 == :response))
   end
 
-  test "a 4xx response is a :response failure, not retried", %{connection: dest} do
+  test "a 4xx response is a non-retryable :permanent failure, terminal at once", %{
+    connection: dest
+  } do
     stub_webhook_failure(422)
 
     s1 = create_subscription!(dest)
-    create_event!(s1)
+    d = create_event!(s1)
 
-    # A 4xx is recorded as a `:response` failure; the row stays `:scheduled` with a
-    # backoff. The derived subscription-scope recompute is what halts a
-    # persistently-rejecting subscription.
+    # A deterministic 4xx (`retryable: false`) — the target refuses this exact payload
+    # regardless of health. Taken terminal on the first attempt: `:failed` +
+    # `terminal_reason: :permanent`, holding the lane; logged `:permanent`, a non-scope
+    # class excluded from the subscription health window (one bad payload never
+    # suspends the whole subscription).
     drain_delivery!()
-    assert [:response] = failed_log_classes(:subscription_id, s1.id)
+    assert [:permanent] = failed_log_classes(:subscription_id, s1.id)
+
+    reloaded = reload(d)
+    assert reloaded.state == :failed
+    assert reloaded.terminal_reason == :permanent
   end
 
-  test "a 429 (Too Many Requests) is a RETRYABLE :response failure", %{connection: dest} do
+  test "a 429 (Too Many Requests) is a RETRYABLE :response failure (backed off, not terminal)", %{
+    connection: dest
+  } do
     stub_webhook_failure(429)
 
     s1 = create_subscription!(dest)
     d = create_event!(s1)
 
     # 429 is a transient rate-limit — the request was fine, the target is just busy.
-    # It must stay `retryable: true`: logged `:response`, backed off, still claimable
-    # (not taken terminal like a deterministic 4xx).
+    # It must stay `retryable: true`: logged `:response` (scopes the subscription
+    # window), recorded `:failed` with a backoff cursor and NO terminal verdict, so the
+    # scheduler re-promotes it once the backoff elapses.
     drain_delivery!()
 
     assert [:response] = failed_log_classes(:subscription_id, s1.id)
 
     reloaded = reload(d)
-    assert reloaded.state == :scheduled
+    assert reloaded.state == :failed
+    assert is_nil(reloaded.terminal_reason)
     refute is_nil(reloaded.next_attempt_at)
-    assert reloaded.attempts < AshIntegration.Outbound.Delivery.Supervisor.max_attempts()
   end
 
   test "a 408 (Request Timeout) is a RETRYABLE :response failure", %{connection: dest} do
@@ -320,9 +331,10 @@ defmodule Example.Outbound.TransportHttpTest do
     # …but the redirect to the metadata host was never chased.
     refute_received {:redirect_target, "169.254.169.254"}
 
-    # A 302 is a non-2xx rejection: classified `:response`, never delivered.
+    # A 302 is a non-retryable non-2xx rejection: taken terminal (`:permanent`),
+    # logged `:permanent`, never delivered.
     refute reload(event).state == :delivered
-    assert [:response] = failed_log_classes(:subscription_id, s1.id)
+    assert [:permanent] = failed_log_classes(:subscription_id, s1.id)
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────

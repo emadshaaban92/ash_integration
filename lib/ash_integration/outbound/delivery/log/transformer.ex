@@ -38,14 +38,16 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
      # `design/connection-health.md` §5. It is already computed at failure time by
      # `OnDeliveryFailure.classify/1`; this column just stops discarding it.
      #
-     # `:probe` is a non-scope class: a recovery-probe attempt that failed while the
-     # entity was suspended. It is recorded for observability but is excluded from
-     # BOTH health windows (the partial indexes below match only `transport`/
-     # `response`), so probe failures never perturb the suspend/unsuspend math.
+     # `:probe` and `:permanent` are non-scope classes, recorded for observability but
+     # excluded from BOTH health windows (the partial indexes below match only
+     # `transport`/`response`): `:probe` is a recovery-probe attempt that failed while
+     # the entity was suspended; `:permanent` is a non-retryable (`terminal_reason:
+     # :permanent`) delivery failure, so a healthy endpoint's one-off 4xx never
+     # suspends the whole subscription.
      |> add_attribute_if_not_exists(:failure_class, :atom,
        allow_nil?: true,
        public?: true,
-       constraints: [one_of: [:transport, :response, :probe]]
+       constraints: [one_of: [:transport, :response, :probe, :permanent]]
      )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_subscription_relationship_if_not_exists()

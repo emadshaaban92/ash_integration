@@ -8,8 +8,8 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
     1. reads the host's `:delivery` config slice,
     2. validates it against `opts_schema/0` (NimbleOptions) — unknown keys and bad
        types fail the boot loudly (fail-fast on config, not lazily at first use),
-    3. publishes the values read from *outside* this process tree (`:max_attempts`,
-       the backoff knobs) into `:persistent_term`, and
+    3. publishes the values read from *outside* this process tree (the backoff knobs,
+       `:max_delivery_age_ms`) into `:persistent_term`, and
     4. starts the Broadway delivery relay pipeline.
 
   The delivery relay claims `:scheduled` `EventDelivery` rows directly and executes
@@ -24,9 +24,9 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
           concurrency:    25,
           poll_interval_ms: 250,
           batch_size:     100,
-          max_attempts:   20,
           backoff_base_ms:   1_000,
-          backoff_max_ms:  300_000
+          backoff_max_ms:  300_000,
+          max_delivery_age_ms: nil
         ]
 
   Whether this runs at all is the single `AshIntegration.enabled?/0` switch; there
@@ -47,11 +47,10 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
   In-tree knobs (`concurrency`, `poll_interval_ms`, `batch_size`) are passed
   **down** to the relay and producer as start args — nothing reaches back into
   `Application.get_env`. The values read from *outside* the pipeline tree
-  (`Dispatcher.claim/1`'s poison ceiling, the backoff computation on the failure
-  path, the dashboard poison view) are read via `max_attempts/0` /
-  `backoff_base_ms/0` / `backoff_max_ms/0`, backed by `:persistent_term` for
-  lock-free O(1) reads, falling back to the schema default when the stage isn't
-  running.
+  (the backoff computation on the failure path, the age-based `:expired` sweep) are
+  read via `backoff_base_ms/0` / `backoff_max_ms/0` / `max_delivery_age_ms/0`, backed
+  by `:persistent_term` for lock-free O(1) reads, falling back to the schema default
+  when the stage isn't running.
   """
   use Supervisor
 
@@ -106,12 +105,6 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
         default: 100,
         doc: "Max `:scheduled` rows claimed per round."
       ],
-      max_attempts: [
-        type: :pos_integer,
-        default: 20,
-        doc:
-          "Claim attempts before an undelivered row becomes terminal (poison): left `:scheduled`, lane blocked, never auto-resolved. Counts CLAIMS (a crashed/lease-expired claim still increments), so a too-short lease can falsely poison a slow-but-fine target — correctness over liveness."
-      ],
       backoff_base_ms: [
         type: :pos_integer,
         default: 1_000,
@@ -121,6 +114,12 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
         type: :pos_integer,
         default: 300_000,
         doc: "Cap on the exponential backoff delay (5 minutes)."
+      ],
+      max_delivery_age_ms: [
+        type: {:or, [:pos_integer, {:in, [nil]}]},
+        default: nil,
+        doc:
+          "Opt-in give-up policy: a `:failed` delivery still retrying after this age (from `created_at`) is taken terminal (`terminal_reason: :expired`) by the health sweep, blocking its lane like any terminal head. `nil` (default) = never expire — a persistently-failing but retryable delivery retries forever, paced by backoff and bounded operationally by suspension + probe. There is deliberately no attempt ceiling."
       ]
     ]
   end
@@ -136,20 +135,21 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
   def init(_opts) do
     config = validate!(Application.get_env(:ash_integration, @config_key, []))
 
-    # Publish the knobs read from OUTSIDE this tree (the claim's poison ceiling, the
-    # backoff computation on the failure path, the dashboard poison view).
-    put_config(:max_attempts, config[:max_attempts])
+    # Publish the knobs read from OUTSIDE this tree (the backoff computation on the
+    # failure path, the age-based `:expired` sweep).
     put_config(:backoff_base_ms, config[:backoff_base_ms])
     put_config(:backoff_max_ms, config[:backoff_max_ms])
+    put_config(:max_delivery_age_ms, config[:max_delivery_age_ms])
 
     Supervisor.init([{Relay, relay_opts(config)}], strategy: :one_for_one)
   end
 
   @doc """
-  Terminal retry ceiling (poison) for delivery. Cross-tree read; falls back to the
-  schema default when the stage supervisor isn't running.
+  Opt-in max delivery age (ms) before a still-retrying `:failed` row is taken
+  terminal (`:expired`) by the health sweep; `nil` = never. Cross-tree read; falls
+  back to the schema default when the stage supervisor isn't running.
   """
-  def max_attempts, do: get_config(:max_attempts)
+  def max_delivery_age_ms, do: get_config(:max_delivery_age_ms)
 
   @doc "Base delay (ms) for the retryable-failure exponential backoff."
   def backoff_base_ms, do: get_config(:backoff_base_ms)

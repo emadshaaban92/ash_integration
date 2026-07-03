@@ -1,25 +1,32 @@
 defmodule AshIntegration.Outbound.Delivery.Scheduler do
   @moduledoc """
-  GenServer that promotes `pending` outbound events to `scheduled` (claimed and
+  GenServer that promotes ready `EventDelivery` heads to `:scheduled` (claimed and
   executed by the delivery relay — `AshIntegration.Outbound.Delivery.Relay`),
-  respecting ordering per **`(connection_id, event_key)`** — at most one in-flight
-  event per key across ALL subscriptions of the connection, oldest-first.
+  respecting ordering per **`(connection_id, event_key)`** — at most one active head
+  per key across ALL subscriptions of the connection, oldest-first. A head is either
+  fresh (`:pending`) or a waiting-to-retry `:failed` row being re-promoted; the
+  scheduler owns all of "what runs next and when" (lane-head selection, the high-water
+  gate, suspension, backoff eligibility, terminal gating).
 
   The GenServer is an optimization (adaptive: ~1s when busy, 10s idle sweep);
   correctness rests on the partial unique index
-  `(connection_id, event_key) WHERE state = 'scheduled'`, which makes
-  double-scheduling impossible regardless of how many schedulers run.
+  `(connection_id, event_key) WHERE state IN ('scheduled','failed')`, which makes a
+  second active head per lane impossible regardless of how many schedulers run — so
+  ordering can never be violated even by a mis-built query.
 
-  A lane is parked (left unscheduled) when its oldest (`pending`/`parked`) event
-  either:
+  A lane is left unscheduled when its oldest (`pending`/`parked`/`failed`) head either:
 
-    * is in the `:parked` state — a build-failure awaiting `:reprocess`; or
-    * belongs to a **suspended subscription** — the ordering guarantee forbids
-      delivering a younger event ahead of it.
+    * is `:parked` — a build-failure awaiting `:reprocess`;
+    * is a terminal `:failed` head (`terminal_reason` set) — blocked forever, or a
+      `:failed` head still inside its `next_attempt_at` backoff; or
+    * belongs to a **suspended** subscription/connection — the ordering guarantee
+      forbids delivering a younger event ahead of it (the recovery probe promotes one
+      such head at a time — see `Health.probe/0`).
 
   Connections that are suspended are skipped entirely. All of this is decided in
   a single set-based query (`find_schedulable_events/1`), so blocked lanes are
-  simply absent from each pass rather than visited-and-skipped.
+  simply absent from each pass rather than visited-and-skipped. See
+  `design/delivery-retry-model.md`.
 
   **Content suppression** is decided here too (`suppress_unchanged`): when a ready
   head's body is identical to its lane's last delivered body, it is promoted
@@ -107,13 +114,11 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
     if length(ids) >= @batch_size and progress > 0, do: sweep(), else: :ok
   end
 
-  # Promote one ready head: `:suppress` it when its content is unchanged since the
-  # lane's last delivered body, otherwise `:schedule` it. Both are guarded on the
-  # row still being `:pending` (the `Ash.Changeset.filter` pushes `WHERE … state =
-  # 'pending'` into the UPDATE) — closing the read→write race: between the query
-  # above and here, coalescing may have cancelled it or another scheduler may have
-  # grabbed it, a clean no-op either way, not a resurrect. The partial unique index
-  # is the backstop against two in-flight per lane.
+  # Promote one ready head. A fresh (`:pending`) head is `:suppress`ed when its content
+  # is unchanged since the lane's last delivered body, else `:schedule`d; a `:failed`
+  # head is a retry re-promotion, always a real `:schedule`. The write is guarded on the
+  # row still being in the state the query saw (`apply_promotion/2` pushes `WHERE …
+  # state = <that>`), closing the read→write race — a clean no-op, not a resurrect.
   #
   # Deciding suppression HERE is correct and cheap: the lane has no in-flight row
   # (the query required the slot free), so the previous head is already terminal and
@@ -122,18 +127,34 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   # bumps `attempts`, and never occupies the lane's one in-flight slot.
   defp promote(event_id) do
     case Ash.get(AshIntegration.event_delivery_resource(), event_id, authorize?: false) do
-      {:ok, delivery} ->
+      # A fresh head may be content-suppressed (unchanged body) or scheduled.
+      {:ok, %{state: :pending} = delivery} ->
         apply_promotion(delivery, if(suppress?(delivery), do: :suppress, else: :schedule))
+
+      # A `:failed` head is a retry re-promotion — always a real `:schedule` (never
+      # content-suppressed: a retry must reach the transport, and suppression only
+      # makes sense for a fresh head against its lane's last delivered body).
+      {:ok, %{state: :failed} = delivery} ->
+        apply_promotion(delivery, :schedule)
+
+      # Raced away since the query (e.g. it advanced to `:parked`): clean no-op.
+      {:ok, _delivery} ->
+        :skipped
 
       {:error, _} ->
         :skipped
     end
   end
 
+  # Guarded on the row still being in the state the query saw (`:pending` or `:failed`):
+  # the `Ash.Changeset.filter` pushes `WHERE … state = <that>` into the UPDATE, closing
+  # the read→write race (coalescing cancelled it, or another scheduler grabbed it) — a
+  # clean no-op, not a resurrect. The `{scheduled,failed}` unique index is the hard
+  # backstop against two active heads per lane.
   defp apply_promotion(delivery, action) do
     delivery
     |> Ash.Changeset.for_update(action, %{}, authorize?: false)
-    |> Ash.Changeset.filter(Ash.Expr.expr(state == :pending))
+    |> Ash.Changeset.filter(Ash.Expr.expr(state == ^delivery.state))
     |> Ash.update(authorize?: false)
     |> case do
       {:ok, _} -> promoted_result(action)
@@ -192,7 +213,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
     heads =
       scope
       |> probe_suspension(id)
-      |> schedulable_heads()
+      |> schedulable_heads(false)
       |> order_by([head: h], h.event_id)
       |> limit(1)
       |> run_heads()
@@ -233,11 +254,13 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   #
   #   * lane head — `lane_heads/0` takes `DISTINCT ON (connection_id, event_key)
   #     ORDER BY event_id` (the parent Event's occurrence-ordered UUIDv7; the
-  #     delivery's own `id` is dispatch-time, NOT an ordering key), and the outer
-  #     `head.state == :pending` drops a lane whose head is `:parked` (a parked
-  #     head — even an older one — blocks its lane);
-  #   * slot-free — `slot_taken/0`: the lane's one in-flight (`:scheduled`) slot is
-  #     not already occupied;
+  #     delivery's own `id` is dispatch-time, NOT an ordering key), and `head_eligible`
+  #     drops a lane whose head can't run: a `:parked` head (build failure), a
+  #     terminal `:failed` head (`terminal_reason` set — blocks its lane forever), or a
+  #     `:failed` head still inside its backoff (`next_attempt_at` in the future). Only
+  #     a `:pending` head or a due, non-terminal `:failed` head promotes;
+  #   * slot-free — `slot_taken/0`: the lane's in-flight (`:scheduled`) slot is not
+  #     already occupied (re-promoting a `:failed` head is fine — it isn't `:scheduled`);
   #   * high-water gate — `older_undispatched/0`: no OLDER same-key Event is
   #     still undispatched and targeting this connection (an active subscription on
   #     its type/version). Without it a newer event whose delivery already
@@ -245,9 +268,14 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   #     leaving the consumer on a stale final state. Gated on *dispatch*, so it only
   #     spans the dispatch window.
   #
-  # Blocked lanes never appear, so the sweep loop terminates and parked/suspended
-  # lanes don't generate per-pass log noise.
-  defp schedulable_heads(suspension) do
+  # `respect_backoff` gates a `:failed` head on its `next_attempt_at`: the normal sweep
+  # honors backoff (`true`); the recovery probe (`false`) ignores it and paces itself.
+  #
+  # Blocked lanes never appear, so the sweep loop terminates and parked/suspended/
+  # backing-off lanes don't generate per-pass log noise. The `{scheduled,failed}`
+  # unique index is the hard backstop: even if this query mis-selected, a second active
+  # head per lane can't be written.
+  defp schedulable_heads(suspension, respect_backoff \\ true) do
     conn_res = AshIntegration.connection_resource()
     sub_res = AshIntegration.subscription_resource()
 
@@ -259,11 +287,30 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
       join: s in ^sub_res,
       as: :subscription,
       on: s.id == head.subscription_id,
-      where: head.state == ^:pending,
+      where: ^head_eligible(respect_backoff),
       where: ^suspension,
       where: not exists(slot_taken()),
       where: not exists(older_undispatched()),
       select: fragment("?::text", head.id)
+    )
+  end
+
+  # A lane head may promote iff it is fresh (`:pending`) OR a `:failed` head that is
+  # non-terminal and — when `respect_backoff` — past its `next_attempt_at`. A `:parked`
+  # head is never eligible (it blocks its lane pending `:reprocess`).
+  defp head_eligible(true) do
+    dynamic(
+      [head: h],
+      h.state == ^:pending or
+        (h.state == ^:failed and is_nil(h.terminal_reason) and
+           (is_nil(h.next_attempt_at) or h.next_attempt_at <= fragment("now()")))
+    )
+  end
+
+  defp head_eligible(false) do
+    dynamic(
+      [head: h],
+      h.state == ^:pending or (h.state == ^:failed and is_nil(h.terminal_reason))
     )
   end
 
@@ -273,13 +320,16 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
     dynamic([connection: d, subscription: sub], d.suspended == false and sub.suspended == false)
   end
 
-  # Each lane's head = the oldest (`pending`/`parked`) row per
-  # `(connection_id, event_key)`.
+  # Each lane's head = the oldest (`pending`/`parked`/`failed`) row per
+  # `(connection_id, event_key)`. `:failed` is in the pool because a waiting-to-retry
+  # or terminal row IS its lane's held head — if it's the oldest, it (re-)promotes or
+  # blocks the lane; a younger row must never jump ahead of it. `terminal_reason` and
+  # `next_attempt_at` are selected so `schedulable_heads/2` can gate a `:failed` head.
   defp lane_heads do
     {tbl, res} = source(AshIntegration.event_delivery_resource())
 
     from(e in {tbl, res},
-      where: e.state in ^[:pending, :parked],
+      where: e.state in ^[:pending, :parked, :failed],
       distinct: [e.connection_id, e.event_key],
       order_by: [e.connection_id, e.event_key, e.event_id],
       select: %{
@@ -288,7 +338,9 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
         event_key: e.event_key,
         state: e.state,
         subscription_id: e.subscription_id,
-        event_id: e.event_id
+        event_id: e.event_id,
+        terminal_reason: e.terminal_reason,
+        next_attempt_at: e.next_attempt_at
       }
     )
   end

@@ -24,7 +24,11 @@ defmodule AshIntegration.Telemetry do
       (`failure_kind` `:transform`/`:project`); re-emitted on a reprocess re-park.
     * `[:ash_integration, :delivery, :delivered]` — the target acknowledged a send
       (`duration_ms` is the source-change → ack latency).
-    * `[:ash_integration, :delivery, :poison]` — a delivery hit the delivery ceiling.
+    * `[:ash_integration, :delivery, :terminal]` — a delivery went terminal on the
+      first occurrence (`terminal_reason: :permanent` — a non-retryable response);
+      left `:failed`, lane blocked, never auto-resolved.
+    * `[:ash_integration, :delivery, :expired]` — the opt-in age sweep took N
+      still-retrying deliveries terminal (`terminal_reason: :expired`).
     * `[:ash_integration, :dedup, :suppressed]` — a delivery suppressed (body unchanged).
     * `[:ash_integration, :connection, :suspended]` /
       `[:ash_integration, :subscription, :suspended]` — derived suspension on a
@@ -43,7 +47,8 @@ defmodule AshIntegration.Telemetry do
     [:ash_integration, :coalesce, :events_dropped],
     [:ash_integration, :delivery, :parked],
     [:ash_integration, :delivery, :delivered],
-    [:ash_integration, :delivery, :poison],
+    [:ash_integration, :delivery, :terminal],
+    [:ash_integration, :delivery, :expired],
     [:ash_integration, :dedup, :suppressed],
     [:ash_integration, :connection, :suspended],
     [:ash_integration, :subscription, :suspended],

@@ -3,30 +3,39 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   The delivery **relay**: a Broadway pipeline that claims `:scheduled`
   `EventDelivery` rows and executes each one over its transport.
 
-      Producer (claim WHERE state='scheduled' AND due, SKIP LOCKED + lease)
+      Producer (claim WHERE state='scheduled', SKIP LOCKED + lease)
         → Processors  (partition_by connection_id)
             handle_message: route to the batcher, keyed by connection
         → Batcher
             handle_batch: per-row decision → `Transport.deliver_batch/2` →
-                          `:deliver` / `:record_attempt_error` / `:reset_to_pending`
+                          `:deliver` / `:record_failure`
         → ack: notify the scheduler so freed lanes promote their next head
 
   This is the **muscle**; the `EventScheduler` is the **brain**. The scheduler
-  promotes `pending → scheduled` (owning ordering: lane-head selection, the
-  high-water gate, suspension); this relay only executes rows already chosen as
-  lane heads. The partial unique index `(connection_id, event_key) WHERE
-  state = 'scheduled'` guarantees at most one in-flight row per lane, so a claimed
-  batch is a set of DISTINCT-`event_key` heads — there is no intra-batch same-key
-  ordering hazard, and batching (deferred) is ordering-safe by construction.
+  promotes `pending`/`:failed → :scheduled` (owning ordering: lane-head selection, the
+  high-water gate, suspension, backoff eligibility, terminal gating); this relay only
+  *executes* rows already chosen and reports the outcome. The partial unique index
+  `(connection_id, event_key) WHERE state IN ('scheduled','failed')` guarantees at
+  most one active head per lane, so a claimed batch is a set of DISTINCT-`event_key`
+  heads — no intra-batch same-key ordering hazard, and batching (deferred) is
+  ordering-safe by construction.
 
-  **Outcomes (per row).** A success → `:deliver` (slot freed). A retryable failure
-  on a HEALTHY entity → `:record_attempt_error`: stamp `next_attempt_at` (durable
-  backoff), leave the row `:scheduled` so the lane stays blocked while it retries
-  (in-order-per-key). At the poison ceiling (`attempts >= max_attempts`, counted on
-  the claim) → leave `:scheduled`, surface loudly once, never auto-resolve. A failure
-  for a SUSPENDED entity → `:reset_to_pending` (one-shot): the recovery probe paces
-  re-tries and the attempt count is cleared, so a suspended delivery never poisons;
-  the scheduler re-promotes once unsuspended.
+  **Outcomes (per row) — two of them.** A success → `:deliver` (`:delivered`, lane
+  freed). Any failure → `:record_failure` (`:scheduled → :failed`, the row keeps its
+  lane via the index). `attempts` is never touched here (the claim bumped it). Under
+  A1 the relay stamps the timing/verdict it derives from the transport result:
+
+    * non-retryable `:response` (an HTTP 4xx/3xx) → `terminal_reason: :permanent`,
+      logged `:permanent`, surfaced loudly — terminal on the first occurrence, even
+      while suspended (a deterministic rejection can't recover);
+    * retryable on a SUSPENDED entity → no backoff cursor, logged `:probe` — the
+      recovery probe (not the row) paces the next try;
+    * retryable on a HEALTHY entity → `next_attempt_at` durable backoff, logged
+      transport/response — the scheduler re-promotes once the backoff elapses.
+
+  There is no attempt ceiling: a retryable failure retries indefinitely (paced by
+  backoff and bounded by suspension + the optional age sweep). See
+  `design/delivery-retry-model.md`.
 
   **The lease-token fence.** Every result-writing action is filtered on
   `claimed_at == <the value the claimer saw>` (plus the baked `state == :scheduled`
@@ -151,46 +160,95 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     end
   end
 
+  # Every failure ends the SAME way — `:scheduled → :failed` via `:record_failure`
+  # (the relay's only failure outcome) — differing only in the timing/verdict the
+  # relay derives (A1) and the class it logs. `attempts` is not touched (the claim
+  # bumped it). A `:failed` row keeps its lane via the `{scheduled,failed}` index, so
+  # ordering holds and a terminal head blocks its lane.
   defp apply_result(delivery, {:error, metadata}) do
-    if suspended?(delivery) do
-      # A failure for a suspended entity is not a delivery attempt to retry: send the
-      # row back to `:pending` (one-shot) so the recovery probe paces the next try,
-      # and never let it march toward the poison ceiling. `:record_suspended_failure`
-      # clears the lease/backoff/attempts (like `:reset_to_pending`) AND logs the
-      # failure as `failure_class: :probe` — observable, but excluded from the health
-      # windows so it never perturbs the suspend/unsuspend math.
-      finalize(delivery, :record_suspended_failure, %{
-        last_error: Map.get(metadata, :error_message, "Unknown error"),
-        delivery_metadata: metadata
-      })
+    error_message = Map.get(metadata, :error_message, "Unknown error")
 
-      :ok
-    else
-      error_message = Map.get(metadata, :error_message, "Unknown error")
-      poison? = Dispatcher.poison?(delivery)
+    cond do
+      permanent_failure?(metadata) ->
+        # A non-retryable RESPONSE rejection (an HTTP 4xx/3xx the target refuses
+        # regardless of its health). A retry can't fix it, so take it terminal at once:
+        # `terminal_reason: :permanent` holds the lane forever (never re-promoted),
+        # logged `:permanent` so it stays out of BOTH health windows. Terminal even for
+        # a suspended entity — a deterministic rejection can never recover.
+        case finalize(delivery, :record_failure, %{
+               last_error: error_message,
+               delivery_metadata: metadata,
+               terminal_reason: :permanent,
+               log_failure_class: :permanent
+             }) do
+          {:ok, _} -> record_terminal(delivery, :permanent, error_message)
+          :error -> :ok
+        end
 
-      last_error =
-        if poison?,
-          do: Dispatcher.poison_message(delivery.attempts, error_message),
-          else: error_message
+      suspended?(delivery) ->
+        # A retryable failure for a suspended entity is a recovery-probe attempt, not a
+        # row-paced retry: record it `:failed` with NO backoff cursor (`next_attempt_at`
+        # stays nil) so the PROBE — not the row's backoff — paces the next try, and log
+        # it `:probe` (out of both health windows). On unsuspend the scheduler promotes
+        # it immediately.
+        finalize(delivery, :record_failure, %{
+          last_error: error_message,
+          delivery_metadata: metadata,
+          log_failure_class: :probe
+        })
 
-      finalize(delivery, :record_attempt_error, %{
-        last_error: last_error,
-        delivery_metadata: metadata,
-        # Backoff is irrelevant for a terminal row (never re-claimed), but harmless.
-        next_attempt_at: Dispatcher.backoff_until(delivery.attempts)
-      })
+        :ok
 
-      if poison?, do: Dispatcher.record_poison(delivery, error_message)
-      :ok
+      true ->
+        # A retryable failure on a healthy entity: record it `:failed` and stamp the
+        # durable `next_attempt_at` backoff so the scheduler re-promotes it once the
+        # backoff elapses (in-order-per-key — the `:failed` head holds the lane). The
+        # Log class is classified transport-vs-response from the metadata, scoping the
+        # connection/subscription health window.
+        finalize(delivery, :record_failure, %{
+          last_error: error_message,
+          delivery_metadata: metadata,
+          next_attempt_at: Dispatcher.backoff_until(delivery.attempts)
+        })
+
+        :ok
     end
   end
 
   # `deliver_batch/2` must return a result for every id; a missing one is a transport
-  # contract bug. Treat it as a retryable failure so the lease re-emits the row,
-  # rather than silently dropping it.
+  # contract bug. Treat it as a retryable failure (no `retryable`/`failure_class`
+  # keys ⇒ retryable, classified `:response`) so the row is re-tried with backoff
+  # rather than silently dropped.
   defp apply_result(delivery, nil) do
     apply_result(delivery, {:error, %{error_message: "transport returned no result"}})
+  end
+
+  # A failure is PERMANENT (terminal, no retry) only when it is BOTH non-retryable AND
+  # a `:response`-class rejection — a deterministic HTTP 4xx/3xx the target refuses no
+  # matter how healthy it is. A non-retryable `:transport` failure (NXDOMAIN, blocked
+  # egress, a removed transport, a bad credential) is NOT permanent: it reflects
+  # endpoint health, so it keeps feeding the connection window (suspend + probe for
+  # recovery) via the ordinary retryable path.
+  defp permanent_failure?(metadata) do
+    not retryable?(metadata) and response_class?(metadata)
+  end
+
+  # A failure is retryable unless it explicitly says otherwise. A missing key ⇒
+  # retryable (a transport predating the flag, or the synthesized "no result"
+  # contract-bug error, still gets durable backoff). Handles atom (a fresh transport
+  # result) and string (a round-tripped map) keys.
+  defp retryable?(metadata) do
+    case Map.get(metadata, :retryable, Map.get(metadata, "retryable", true)) do
+      false -> false
+      _ -> true
+    end
+  end
+
+  defp response_class?(metadata) do
+    case Map.get(metadata, :failure_class, Map.get(metadata, "failure_class")) do
+      class when class in [:response, "response"] -> true
+      _ -> false
+    end
   end
 
   # Apply a state-transition action, fenced on the lease token (`claimed_at` the
@@ -241,6 +299,32 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     :ok
   end
 
+  # Surface a delivery that just went terminal loudly — operator log + `[:ash_integration,
+  # :delivery, :terminal]` telemetry, emitted only when the `:failed` write actually
+  # applied. The row is left `:failed` (lane blocked) and never auto-resolved.
+  defp record_terminal(delivery, reason, error_message) do
+    Logger.error(
+      "Outbound delivery: #{reason} delivery #{delivery.id} (#{delivery.event_type}, key " <>
+        "#{delivery.event_key}) is terminal after #{delivery.attempts} attempt(s) — left " <>
+        "`:failed`, lane blocked (no auto-resolve); last error: #{error_message}"
+    )
+
+    :telemetry.execute(
+      [:ash_integration, :delivery, :terminal],
+      %{attempts: delivery.attempts},
+      %{
+        event_delivery_id: delivery.id,
+        event_type: delivery.event_type,
+        event_key: delivery.event_key,
+        connection_id: delivery.connection_id,
+        subscription_id: delivery.subscription_id,
+        terminal_reason: reason
+      }
+    )
+
+    :ok
+  end
+
   # ── Pure decision (unit-testable) ──────────────────────────────────────────────
 
   @doc """
@@ -251,18 +335,18 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     * `:deliver` — deliver it.
 
   Suspension is intentionally NOT a gate here. A suspended entity is never given a
-  backlog to deliver (the scheduler skips it and `ParkOnSuspend` drains its
-  `:scheduled` rows to `:pending`); the only `:scheduled` row it has is the recovery
-  probe's head, which MUST hit the transport to observe recovery. A suspended
-  delivery's *failure* is what stops it — see `apply_result/2`, which one-shots it
-  back to `:pending` instead of retrying.
+  backlog to deliver (the scheduler skips it); the only `:scheduled` row it has is the
+  recovery probe's head, promoted by `Health.probe/0`, which MUST hit the transport to
+  observe recovery. A suspended delivery's *failure* is what stops it — see
+  `apply_result/2`, which records it `:failed` with no backoff (probe-paced) instead
+  of a healthy row's durable-backoff retry.
   """
   def decision(%{state: state}) when state != :scheduled, do: :noop
   def decision(_delivery), do: :deliver
 
   # The claimed row's entity is suspended (as loaded at claim time). On the failure
-  # path this diverts a suspended delivery to a one-shot `:reset_to_pending` instead
-  # of a poison-accruing retry.
+  # path this records a suspended (probe) delivery `:failed` with no backoff cursor
+  # (probe-paced) and logged `:probe`, rather than a healthy row's durable-backoff retry.
   defp suspended?(%{connection: connection, subscription: subscription}) do
     match?(%{suspended: true}, connection) or match?(%{suspended: true}, subscription)
   end

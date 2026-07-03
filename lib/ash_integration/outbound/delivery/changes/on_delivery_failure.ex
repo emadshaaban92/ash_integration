@@ -1,7 +1,7 @@
 defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
   @moduledoc false
-  # After-action hook for the `:record_attempt_error` action: write the failure to
-  # the delivery `Log`, classified transport vs response.
+  # After-action hook for the `:record_failure` action: write the failure to the
+  # delivery `Log`, classified transport vs response.
   #
   # The transport classifies each failure in `delivery_metadata["failure_class"]`:
   #
@@ -11,19 +11,22 @@ defmodule AshIntegration.Outbound.Delivery.Changes.OnDeliveryFailure do
   #     scopes the subscription's health window.
   #
   # An unclassified failure defaults to `:response` (the narrower blast radius).
-  # Suspension is no longer decided here — it is derived from this log by the
-  # periodic recompute (`AshIntegration.Outbound.Delivery.Health`).
+  # Suspension is derived from this log by the periodic recompute
+  # (`AshIntegration.Outbound.Delivery.Health`), never decided here.
   #
-  # A caller may force the class with `failure_class:` (e.g. `:probe` for the
-  # `:record_suspended_failure` action). A forced class that is NOT a recompute scope
-  # (`:transport`/`:response`) — like `:probe` — is logged for observability but is
-  # invisible to the health windows, so recovery-probe failures are visible without
-  # perturbing the suspend/unsuspend math.
+  # The class can be forced per call via the `log_failure_class` argument: the relay
+  # passes `:probe` for a suspended-entity (recovery-probe) attempt and `:permanent`
+  # for a non-retryable terminal failure. A forced class outside the recompute scopes
+  # (`:transport`/`:response`) — `:probe`, `:permanent` — is recorded for observability
+  # but invisible to BOTH health windows, so neither a probe attempt nor a healthy
+  # endpoint's one-off 4xx perturbs the suspend/unsuspend math. A compile-time
+  # `failure_class:` opt is still honored (argument wins) for any non-relay caller.
   use Ash.Resource.Change
 
   @impl true
   def change(changeset, opts, _context) do
-    forced_class = opts[:failure_class]
+    forced_class =
+      Ash.Changeset.get_argument(changeset, :log_failure_class) || opts[:failure_class]
 
     Ash.Changeset.after_action(changeset, fn _changeset, event ->
       create_delivery_log(event, forced_class)
