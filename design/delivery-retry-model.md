@@ -1,7 +1,7 @@
 # Delivery Retry, Backoff & Terminal Model (Design Doc)
 
-**Status:** Proposed · **Scope:** the per-`EventDelivery` lifecycle — retry
-timing, backoff, terminal (give-up) semantics, and where that logic lives.
+**Status:** Accepted (implemented) · **Scope:** the per-`EventDelivery` lifecycle —
+retry timing, backoff, terminal (give-up) semantics, and where that logic lives.
 Pre-1.0; no backward-compatibility constraints, so this replaces the current
 model outright rather than layering on it.
 

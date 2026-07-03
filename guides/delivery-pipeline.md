@@ -203,23 +203,29 @@ For each claimed row:
    `batch_size` is 1 today, real transport batching lands with #36). **On
    success**: marks `delivered` (slot freed), writes a success log, and resets
    `consecutive_failures` on **both** the connection and the subscription — all in
-   one transaction. **On failure**: records the error, writes a failure log, stamps
-   `next_attempt_at` (exponential backoff with jitter, base→cap = `backoff_base_ms`
-   → `backoff_max_ms`), and bumps the appropriate counter (see
-   [Suspension](#suspension--failure-isolation)). The row stays `:scheduled`, so the
-   lane stays blocked while it retries (in-order-per-key).
+   one transaction. **On failure** the relay's single failure outcome
+   (`:record_failure`) moves the row `:scheduled → :failed` and writes a failure log;
+   for a retryable failure it stamps `next_attempt_at` (exponential backoff with
+   jitter, base→cap = `backoff_base_ms` → `backoff_max_ms`), and for a non-retryable
+   response it stamps `terminal_reason: :permanent`. The `:failed` row keeps its lane
+   (see the invariant below), so the lane stays blocked while it waits (in-order-per-key).
+   See [`design/delivery-retry-model.md`](../design/delivery-retry-model.md).
 
 Every result-writing action is guarded on `state == :scheduled` **and** fenced on
 the `claimed_at` lease token, so a stale claimer (its lease expired and another
-pass re-claimed the row) can never resurrect or double-finalize it.
+pass re-claimed the row) can never resurrect or double-finalize it. Ordering is a
+hard DB invariant: a partial unique index on `(connection_id, event_key) WHERE state
+IN ('scheduled','failed')` allows at most one **active head** per lane, so a younger
+row can never be promoted ahead of an earlier one that is still in-flight or waiting.
 
-After `delivery: [max_attempts: …]` claims (default 20) a delivery that still
-hasn't succeeded becomes **terminal (poison)**: the relay records a poison
-`last_error`, emits `[:ash_integration, :delivery, :poison]` telemetry once, and
-the claim excludes it forever — leaving the delivery `:scheduled` so its lane stays
-blocked. This mirrors the dispatch side's poison policy; recovery is operator/host
-opt-in (`reprocess`/`reset_to_pending`). Find them with `state = 'scheduled' AND
-attempts >= N`.
+There is **no attempt ceiling**: a retryable failure retries indefinitely, paced by
+`next_attempt_at` backoff and bounded operationally by suspension + the recovery
+probe. A delivery goes **terminal** only via a `terminal_reason`: `:permanent` (a
+non-retryable response — set on the first occurrence, `[:ash_integration, :delivery,
+:terminal]` telemetry) or `:expired` (the opt-in `max_delivery_age_ms` age sweep). A
+terminal row is left `:failed`, holding its lane; recovery is operator opt-in
+(`reprocess`/`reset_to_pending`). Find them with `state = 'failed' AND terminal_reason
+IS NOT NULL`.
 
 ### No guardian needed
 

@@ -45,7 +45,8 @@ coalescing collapsed superseded pending deliveries for a lane.
 | --- | --- | --- |
 | `[:ash_integration, :delivery, :parked]` | `count` | `event_id, event_type, event_key, subscription_id, connection_id, reason, failure_kind` |
 | `[:ash_integration, :delivery, :delivered]` | `count, attempts, duration_ms` | `event_delivery_id, event_type, event_key, subscription_id, connection_id, transport` |
-| `[:ash_integration, :delivery, :poison]` | `attempts` | `event_delivery_id, event_type, event_key, subscription_id, connection_id` |
+| `[:ash_integration, :delivery, :terminal]` | `attempts` | `event_delivery_id, event_type, event_key, subscription_id, connection_id, terminal_reason` |
+| `[:ash_integration, :delivery, :expired]` | `count` | `max_delivery_age_ms` |
 | `[:ash_integration, :dedup, :suppressed]` | `count` | `subscription_id, event_type, event_key` |
 
 - `:parked` — a build failure (never a transport failure; no counter bumped).
@@ -56,8 +57,11 @@ coalescing collapsed superseded pending deliveries for a lane.
 - `:delivered` — the target acknowledged the send. `duration_ms` is the
   source-change → ack latency (`created_at` to `delivered_at`); `transport` is
   `:http` or `:kafka`.
-- `:delivery :poison` — a delivery hit the delivery attempt ceiling; left
-  `:scheduled` with its lane blocked, never auto-resolved.
+- `:delivery :terminal` — a delivery went terminal on the first occurrence
+  (`terminal_reason: :permanent`, a non-retryable response); left `:failed` with
+  its lane blocked, never auto-resolved. There is no attempt ceiling.
+- `:delivery :expired` — the opt-in `max_delivery_age_ms` sweep took `count`
+  still-retrying deliveries terminal (`terminal_reason: :expired`).
 - `:dedup :suppressed` — a content-addressed delivery was suppressed (body
   unchanged); no transport touched.
 

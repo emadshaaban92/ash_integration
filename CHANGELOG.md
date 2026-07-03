@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: reworked the delivery retry / backoff / terminal model** (see
+  [`design/delivery-retry-model.md`](design/delivery-retry-model.md)). Timing, attempt
+  count, and terminal-ness are now three independent facts, and a new `:failed` state
+  holds a lane while a delivery waits or is terminal:
+  - `EventDelivery` gains a `:failed` state and a `terminal_reason` column
+    (`:permanent` | `:expired`); the lane uniqueness index widens to
+    `WHERE state IN ('scheduled','failed')`, so ordering stays a hard DB invariant.
+    `:scheduled` now means strictly "in flight now".
+  - `attempts` is an honest, **monotonic** count — never forced or reset, and **no
+    longer an attempt ceiling**. A retryable failure retries indefinitely, paced by
+    `next_attempt_at` backoff and bounded by suspension + the recovery probe. The
+    per-row **poison ceiling is removed** (`delivery: [max_attempts: …]` is gone);
+    this also eliminates false-poisoning of a slow-but-fine target by lease expiry.
+  - The relay is now a dumb executor with two outcomes — deliver, or `:record_failure`
+    (`:scheduled → :failed`, stamping `next_attempt_at` **or** `terminal_reason`). All
+    retry/terminal/ordering decisions move to the scheduler's promotion.
+  - `HTTP 408`/`429` are classified `retryable: true` (transient), so a rate-limit or
+    timeout is retried rather than taken terminal. A non-retryable response (a
+    deterministic 4xx/3xx) is terminal on the first occurrence (`:permanent`), logged
+    with a non-scope `failure_class: :permanent` so one bad payload never suspends a
+    healthy subscription.
+  - **Config:** `delivery: [max_attempts: …]` is removed; `delivery:
+    [max_delivery_age_ms: nil]` is added (opt-in age-based give-up, `nil` = never).
+  - **Telemetry:** `[:ash_integration, :delivery, :poison]` is replaced by
+    `[:ash_integration, :delivery, :terminal]` (with `terminal_reason`) and
+    `[:ash_integration, :delivery, :expired]`.
+  - Automatic park-on-suspend is removed: a suspended entity's waiting deliveries
+    already sit in `:failed`, and the scheduler simply stops promoting it.
+
 - **BREAKING: configurable request signing.** The implicit "secret present ⇒ sign"
   switch and the single hardcoded Stripe-style signer are replaced by an explicit
   `signing` **union** on the transport config (`HttpConfig` and `KafkaConfig`

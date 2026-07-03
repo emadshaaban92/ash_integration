@@ -243,6 +243,13 @@ size.
 
 ## 6. Park on the suspend transition
 
+> **Superseded** by [`delivery-retry-model.md`](delivery-retry-model.md). Automatic
+> park-on-suspend was **removed**: in the `:failed`-state model a suspended entity's
+> waiting deliveries already sit in `:failed` (held-waiting), and the scheduler simply
+> stops promoting a suspended entity — so there is no `:scheduled` backlog to drain.
+> The recovery probe (§7) still promotes one waiting head at a time. The section below
+> describes the retired mechanism for historical context.
+
 When the recompute flips a connection to `suspended`, immediately stop the relay
 from spending the scarce 25 slots on it. The relay claims any `:scheduled` row
 regardless of `suspended` (§2), so we **revert the connection's un-leased
