@@ -37,6 +37,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `[:ash_integration, :delivery, :expired]`.
   - Automatic park-on-suspend is removed: a suspended entity's waiting deliveries
     already sit in `:failed`, and the scheduler simply stops promoting it.
+  - A retryable rejection's `Retry-After` header (integer-seconds form) is honored:
+    the server's own pacing overrides the exponential backoff, clamped to
+    `backoff_max_ms` so a hostile/buggy header can't park a lane indefinitely.
+  - **UPGRADE WARNING — pre-existing `:scheduled` rows are NOT migrated.** The old
+    claim gated on `attempts < max_attempts` and `next_attempt_at <= now()`; the new
+    claim has neither gate (a `:scheduled` row is by construction in flight now —
+    but only for rows produced under the new model). On deploy, any **old poisoned
+    rows** (left `:scheduled` at/over the removed ceiling) become instantly
+    claimable and WILL be retried — a one-time burst against every
+    historically-poisoned target (deterministic 4xx go `terminal_reason:
+    :permanent` after one attempt; retryable ones re-enter backoff) — and any old
+    **in-backoff `:scheduled` rows** get one immediate early attempt before their
+    cursor is re-stamped. If that burst is unacceptable (e.g. a large poisoned
+    backlog against rate-limited or long-dead targets), triage those rows **before
+    deploying**: `cancel` the ones you want skipped, or move them out of
+    `:scheduled` yourself — the library deliberately does not guess for you.
 
 - **BREAKING: configurable request signing.** The implicit "secret present ⇒ sign"
   switch and the single hardcoded Stripe-style signer are replaced by an explicit

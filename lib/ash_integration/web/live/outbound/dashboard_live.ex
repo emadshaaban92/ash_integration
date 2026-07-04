@@ -36,7 +36,15 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
         # Parked is a STANDING backlog, not a 24h window: a build failure (broken
         # transform/producer) parks deliveries that sit until reprocess. Counts the
         # current `:parked` rows — the blind spot this view used to miss entirely.
-        parked: count(Ash.Query.filter(delivery, state == :parked), actor)
+        parked: count(Ash.Query.filter(delivery, state == :parked), actor),
+        # Terminal is the delivery-side standing backlog: `:failed` rows with a
+        # terminal verdict (`:permanent`/`:expired`) — never retried, each blocking
+        # its lane until an operator retries or cancels it.
+        terminal:
+          count(
+            Ash.Query.filter(delivery, state == :failed and not is_nil(terminal_reason)),
+            actor
+          )
       }
     )
   end
@@ -106,6 +114,14 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
             {stat(@stats.parked)}
           </div>
           <div class="stat-desc">build failures awaiting reprocess (broken transform)</div>
+        </div>
+
+        <div class="stat">
+          <div class="stat-title">Terminal</div>
+          <div class={["stat-value", pos?(@stats.terminal) && "text-error"]}>
+            {stat(@stats.terminal)}
+          </div>
+          <div class="stat-desc">given-up deliveries blocking their lanes (retry or cancel)</div>
         </div>
 
         <div class="stat">

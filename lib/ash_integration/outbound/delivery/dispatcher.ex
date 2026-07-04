@@ -101,8 +101,21 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   post-claim value, so the first failure (attempts = 1) waits ~`base`. Honored by the
   scheduler's promotion gate (`next_attempt_at IS NULL OR next_attempt_at <= now()`),
   so the `:failed` head holds its lane but is idle until the backoff elapses.
+
+  When the server stated its own pacing (`retry_after_ms`, parsed from a retryable
+  response's `Retry-After` header by the transport), that wins over the exponential
+  delay — exact (no jitter: it is the target's explicit ask), but **clamped** to
+  `backoff_max_ms` so a hostile or buggy header can't park a lane indefinitely.
   """
-  def backoff_until(attempts) when is_integer(attempts) and attempts >= 1 do
+  def backoff_until(attempts, retry_after_ms \\ nil)
+
+  def backoff_until(_attempts, retry_after_ms)
+      when is_integer(retry_after_ms) and retry_after_ms >= 0 do
+    delay = min(retry_after_ms, Stage.backoff_max_ms())
+    DateTime.add(DateTime.utc_now(), delay, :millisecond)
+  end
+
+  def backoff_until(attempts, _retry_after_ms) when is_integer(attempts) and attempts >= 1 do
     base = Stage.backoff_base_ms()
     cap = Stage.backoff_max_ms()
 

@@ -57,6 +57,15 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
     {:noreply, run_action(socket, :reset_to_pending, %{}, "Delivery reset to pending")}
   end
 
+  # Operator "retry now" for a `:failed` (waiting-to-retry or terminal) delivery: the
+  # cached descriptor is intact, so no rebuild — the plain `:reprocess` action moves it
+  # back to `:pending` and clears the lease/backoff/terminal verdict; the scheduler
+  # re-promotes it as its lane's head. Distinct from "reprocess" (parked rows), which
+  # re-runs project→transform via the Reprocessor.
+  def handle_event("retry", _params, socket) do
+    {:noreply, run_action(socket, :reprocess, %{}, "Delivery re-queued for retry")}
+  end
+
   def handle_event("cancel", _params, socket) do
     {:noreply,
      run_action(socket, :cancel, %{last_error: "Cancelled by operator"}, "Delivery cancelled")}
@@ -119,6 +128,14 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
             <.icon name="hero-arrow-path-mini" /> Reprocess
           </button>
           <button
+            :if={@delivery.state == :failed and @perms.reprocess}
+            class="btn btn-warning btn-sm"
+            phx-click="retry"
+            data-confirm="Re-queue this delivery for another attempt? Its lane retries it next."
+          >
+            <.icon name="hero-arrow-path-mini" /> Retry now
+          </button>
+          <button
             :if={@delivery.state in [:scheduled, :cancelled] and @perms.reset}
             class="btn btn-ghost btn-sm"
             phx-click="reset"
@@ -127,10 +144,10 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
             Reset to pending
           </button>
           <button
-            :if={@delivery.state in [:pending, :scheduled] and @perms.cancel}
+            :if={@delivery.state in [:pending, :scheduled, :failed] and @perms.cancel}
             class="btn btn-ghost btn-sm text-error"
             phx-click="cancel"
-            data-confirm="Cancel this delivery?"
+            data-confirm="Cancel this delivery? Skipping it frees its lane for younger events."
           >
             Cancel
           </button>
@@ -141,6 +158,13 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
           <.field label="Event Key" mono>{@delivery.event_key}</.field>
           <.field label="Attempts">{@delivery.attempts}</.field>
+          <.field
+            :if={@delivery.state == :failed and is_nil(@delivery.terminal_reason)}
+            label="Next attempt"
+          >
+            {(@delivery.next_attempt_at && Helpers.format_datetime(@delivery.next_attempt_at, :long)) ||
+              "probe-paced (suspended)"}
+          </.field>
           <.field label="Created">{Helpers.format_datetime(@delivery.created_at, :long)}</.field>
           <.field label="Connection">
             <.link
@@ -173,6 +197,19 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
             {String.slice(@delivery.body_hash, 0, 16)}…
           </.field>
         </div>
+      </div>
+
+      <div :if={@delivery.terminal_reason} class="alert alert-error mb-4">
+        <.icon name="hero-exclamation-triangle" />
+        <span class="text-sm">
+          <strong>Terminal ({@delivery.terminal_reason})</strong>
+          — this delivery is never retried automatically and it blocks its
+          <code>(connection, event key)</code>
+          lane: younger events for the key wait behind it. <strong>Retry now</strong>
+          re-queues it (a <code>permanent</code>
+          rejection will usually fail again unless the target changed); <strong>Cancel</strong>
+          skips it and frees the lane.
+        </span>
       </div>
 
       <div :if={@delivery.state == :suppressed} class="alert alert-info mb-4">

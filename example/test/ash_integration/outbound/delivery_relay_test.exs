@@ -430,6 +430,38 @@ defmodule Example.Outbound.DeliveryRelayTest do
       assert reload(e2).state == :scheduled
     end
 
+    test "operator retry (:reprocess) clears the terminal verdict — a later retryable failure backs off instead of silently re-terminaling",
+         %{connection: conn} do
+      s = create_subscription!(conn)
+      e1 = scheduled_delivery!(s, "k")
+      set_fields!(e1, state: :failed, claimed_at: nil, terminal_reason: :permanent)
+
+      # Operator "retry now": back to `:pending`, with the stale terminal verdict
+      # cleared — otherwise the row's next retryable failure would land it back in
+      # `:failed` still carrying `terminal_reason`, silently terminal again with no
+      # `:terminal` telemetry.
+      resurrected =
+        reload(e1)
+        |> Ash.Changeset.for_update(:reprocess, %{}, authorize?: false)
+        |> Ash.update!(authorize?: false)
+
+      assert resurrected.state == :pending
+      assert is_nil(resurrected.terminal_reason)
+
+      # It re-promotes as its lane's head, fails retryably (503), and must be a
+      # backing-off retry — NOT terminal.
+      stub_webhook_failure(503)
+      Scheduler.sweep()
+      assert reload(e1).state == :scheduled
+
+      drain_delivery!()
+
+      failed = reload(e1)
+      assert failed.state == :failed
+      assert is_nil(failed.terminal_reason)
+      refute is_nil(failed.next_attempt_at)
+    end
+
     test "the unique index physically rejects a second active head on a lane", %{connection: conn} do
       s = create_subscription!(conn)
       _e1 = scheduled_delivery!(s, "k")

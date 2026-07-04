@@ -277,6 +277,71 @@ defmodule Example.Outbound.TransportHttpTest do
     refute is_nil(reloaded.next_attempt_at)
   end
 
+  test "a 429 with Retry-After honors the server's pacing over exponential backoff", %{
+    connection: dest
+  } do
+    # The server names its own pacing: 120s. The exponential backoff for a first
+    # failure would be ~backoff_base_ms (1s); the stamped cursor must instead sit
+    # ~120s out — the target's explicit ask wins.
+    Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "120")
+      |> Plug.Conn.send_resp(429, "slow down")
+    end)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    drain_delivery!()
+
+    reloaded = reload(d)
+    assert reloaded.state == :failed
+    assert is_nil(reloaded.terminal_reason)
+
+    wait_s = DateTime.diff(reloaded.next_attempt_at, DateTime.utc_now(), :second)
+    assert wait_s in 110..125
+  end
+
+  test "a hostile Retry-After is clamped to backoff_max_ms", %{connection: dest} do
+    # A buggy/hostile header (1 year) must not park the lane: the dispatcher clamps
+    # the server's ask to `backoff_max_ms`.
+    Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "31536000")
+      |> Plug.Conn.send_resp(429, "slow down")
+    end)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    drain_delivery!()
+
+    reloaded = reload(d)
+    max_s = div(AshIntegration.Outbound.Delivery.Supervisor.backoff_max_ms(), 1000)
+    assert DateTime.diff(reloaded.next_attempt_at, DateTime.utc_now(), :second) <= max_s + 5
+  end
+
+  test "an unparsable Retry-After falls back to exponential backoff", %{connection: dest} do
+    # Only the integer-seconds form is honored; an HTTP-date (or garbage) is ignored
+    # and the ordinary ~backoff_base_ms exponential cursor paces the retry.
+    Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")
+      |> Plug.Conn.send_resp(429, "slow down")
+    end)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    drain_delivery!()
+
+    reloaded = reload(d)
+    assert reloaded.state == :failed
+    refute is_nil(reloaded.next_attempt_at)
+    # Exponential first-failure backoff is ~1s (±jitter), nowhere near 110s+.
+    assert DateTime.diff(reloaded.next_attempt_at, DateTime.utc_now(), :second) < 60
+  end
+
   test "a 408 (Request Timeout) is a RETRYABLE :response failure", %{connection: dest} do
     stub_webhook_failure(408)
 

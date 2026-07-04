@@ -111,6 +111,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
      |> add_record_failure_action_if_not_exists()
      |> add_cancel_action_if_not_exists()
      |> add_reprocess_action_if_not_exists()
+     |> add_expire_action_if_not_exists()
      |> add_park_action_if_not_exists()
      |> add_reset_to_pending_action_if_not_exists()
      |> add_code_interface_if_not_exists()
@@ -592,12 +593,43 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     if Info.action(dsl_state, :reprocess) do
       dsl_state
     else
+      # Resurrection back to `:pending` — a reprocessed `:parked` (rebuilt) or
+      # `:failed` (operator "retry now", incl. a terminal head) row re-enters the
+      # deliverable lifecycle, so `clear_claim()` wipes the lease/backoff bookkeeping
+      # AND `terminal_reason`: a stale terminal verdict left on the row would silently
+      # re-terminal it on its first retryable failure.
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :update,
           name: :reprocess,
           accept: [:delivery, :body_hash, :last_error],
           require_atomic?: false,
-          changes: [set_state(:pending)]
+          changes: [set_state(:pending), clear_claim()]
+        )
+
+      Transformer.add_entity(dsl_state, [:actions], action, type: :append)
+    end
+  end
+
+  defp add_expire_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :expire) do
+      dsl_state
+    else
+      # The opt-in age-based give-up (`Health.sweep_expired/0`): stamp
+      # `terminal_reason: :expired` on a still-retrying `:failed` row, taking it
+      # terminal (never promoted again; lane blocked like any terminal head). The
+      # caller pushes the `state == :failed and is_nil(terminal_reason)` precondition
+      # into the query (as the scheduler does for `:schedule`/`:suppress`), keeping
+      # the action atomic-executable so the sweep is one bulk UPDATE — through Ash,
+      # so `updated_at` bumps and host notifiers fire (unlike raw SQL).
+      {:ok, action} =
+        Transformer.build_entity(Dsl, [:actions], :update,
+          name: :expire,
+          accept: [],
+          changes: [
+            Transformer.build_entity!(Dsl, [:actions, :update], :change,
+              change: {Change.SetAttribute, [attribute: :terminal_reason, value: :expired]}
+            )
+          ]
         )
 
       Transformer.add_entity(dsl_state, [:actions], action, type: :append)
@@ -661,8 +693,9 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     )
   end
 
-  # Clear the relay's lease + backoff bookkeeping (used when a row (re-)enters a
-  # claimable lifecycle) so it doesn't inherit a stale `claimed_at`/`next_attempt_at`.
+  # Clear the relay's lease + backoff bookkeeping AND the terminal verdict (used
+  # when a row (re-)enters the deliverable lifecycle) so it doesn't inherit a stale
+  # `claimed_at`/`next_attempt_at`/`terminal_reason`.
   defp clear_claim do
     Transformer.build_entity!(Dsl, [:actions, :update], :change,
       change: AshIntegration.Outbound.Delivery.Changes.ClearClaim

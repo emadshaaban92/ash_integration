@@ -1,8 +1,8 @@
 defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
   @moduledoc false
   # The EventDelivery browser: the per-subscription delivery state machine
-  # (pending/parked/scheduled/delivered/cancelled), across all connections, with
-  # filtering by connection, event type, and state. This is the middle layer of
+  # (pending/parked/scheduled/failed/delivered/suppressed/cancelled), across all
+  # connections, with filtering by connection, event type, and state. This is the middle layer of
   # the model — one row per (event, subscription). The immutable fact lives under
   # /events; the per-attempt transport log under /logs.
   #
@@ -17,7 +17,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
   alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
   alias AshIntegration.Web.Outbound.Helpers
 
-  @states ~w(pending parked scheduled delivered suppressed cancelled)
+  @states ~w(pending parked scheduled failed delivered suppressed cancelled)
 
   @impl true
   def mount(_params, _session, socket) do
