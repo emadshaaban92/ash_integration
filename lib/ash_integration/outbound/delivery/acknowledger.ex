@@ -2,10 +2,10 @@ defmodule AshIntegration.Outbound.Delivery.Acknowledger do
   @moduledoc false
   # Broadway acknowledger for the delivery relay.
   #
-  # All durable writes (the `:deliver` / `:record_attempt_error` / `:reset_to_pending`
-  # actions, with their suspension + backoff + poison bookkeeping) happen INLINE in
-  # the relay's `handle_batch`, where the per-row `deliver_batch/2` results and the
-  # lease token are in hand. So the ack's only job is to notify the scheduler, so a
+  # All durable writes (the `:deliver` / `:record_failure` actions, with their
+  # backoff + terminal + health-log bookkeeping) happen INLINE in the relay's
+  # `handle_batch`, where the per-row `deliver_batch/2` results and the lease token are
+  # in hand. So the ack's only job is to notify the scheduler, so a
   # lane whose slot was just freed (a delivered/cancelled/reset row) gets its next
   # head promoted promptly instead of waiting for the idle sweep.
   @behaviour Broadway.Acknowledger

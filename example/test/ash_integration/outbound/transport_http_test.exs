@@ -234,16 +234,122 @@ defmodule Example.Outbound.TransportHttpTest do
     assert Enum.all?(classes, &(&1 == :response))
   end
 
-  test "a 4xx response is a :response failure, not retried", %{connection: dest} do
+  test "a 4xx response is a non-retryable :permanent failure, terminal at once", %{
+    connection: dest
+  } do
     stub_webhook_failure(422)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    # A deterministic 4xx (`retryable: false`) — the target refuses this exact payload
+    # regardless of health. Taken terminal on the first attempt: `:failed` +
+    # `terminal_reason: :permanent`, holding the lane; logged `:permanent`, a non-scope
+    # class excluded from the subscription health window (one bad payload never
+    # suspends the whole subscription).
+    drain_delivery!()
+    assert [:permanent] = failed_log_classes(:subscription_id, s1.id)
+
+    reloaded = reload(d)
+    assert reloaded.state == :failed
+    assert reloaded.terminal_reason == :permanent
+  end
+
+  test "a 429 (Too Many Requests) is a RETRYABLE :response failure (backed off, not terminal)", %{
+    connection: dest
+  } do
+    stub_webhook_failure(429)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    # 429 is a transient rate-limit — the request was fine, the target is just busy.
+    # It must stay `retryable: true`: logged `:response` (scopes the subscription
+    # window), recorded `:failed` with a backoff cursor and NO terminal verdict, so the
+    # scheduler re-promotes it once the backoff elapses.
+    drain_delivery!()
+
+    assert [:response] = failed_log_classes(:subscription_id, s1.id)
+
+    reloaded = reload(d)
+    assert reloaded.state == :failed
+    assert is_nil(reloaded.terminal_reason)
+    refute is_nil(reloaded.next_attempt_at)
+  end
+
+  test "a 429 with Retry-After honors the server's pacing over exponential backoff", %{
+    connection: dest
+  } do
+    # The server names its own pacing: 120s. The exponential backoff for a first
+    # failure would be ~backoff_base_ms (1s); the stamped cursor must instead sit
+    # ~120s out — the target's explicit ask wins.
+    Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "120")
+      |> Plug.Conn.send_resp(429, "slow down")
+    end)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    drain_delivery!()
+
+    reloaded = reload(d)
+    assert reloaded.state == :failed
+    assert is_nil(reloaded.terminal_reason)
+
+    wait_s = DateTime.diff(reloaded.next_attempt_at, DateTime.utc_now(), :second)
+    assert wait_s in 110..125
+  end
+
+  test "a hostile Retry-After is clamped to backoff_max_ms", %{connection: dest} do
+    # A buggy/hostile header (1 year) must not park the lane: the dispatcher clamps
+    # the server's ask to `backoff_max_ms`.
+    Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "31536000")
+      |> Plug.Conn.send_resp(429, "slow down")
+    end)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    drain_delivery!()
+
+    reloaded = reload(d)
+    max_s = div(AshIntegration.Outbound.Delivery.Supervisor.backoff_max_ms(), 1000)
+    assert DateTime.diff(reloaded.next_attempt_at, DateTime.utc_now(), :second) <= max_s + 5
+  end
+
+  test "an unparsable Retry-After falls back to exponential backoff", %{connection: dest} do
+    # Only the integer-seconds form is honored; an HTTP-date (or garbage) is ignored
+    # and the ordinary ~backoff_base_ms exponential cursor paces the retry.
+    Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")
+      |> Plug.Conn.send_resp(429, "slow down")
+    end)
+
+    s1 = create_subscription!(dest)
+    d = create_event!(s1)
+
+    drain_delivery!()
+
+    reloaded = reload(d)
+    assert reloaded.state == :failed
+    refute is_nil(reloaded.next_attempt_at)
+    # Exponential first-failure backoff is ~1s (±jitter), nowhere near 110s+.
+    assert DateTime.diff(reloaded.next_attempt_at, DateTime.utc_now(), :second) < 60
+  end
+
+  test "a 408 (Request Timeout) is a RETRYABLE :response failure", %{connection: dest} do
+    stub_webhook_failure(408)
 
     s1 = create_subscription!(dest)
     create_event!(s1)
 
-    # A 4xx is recorded as a `:response` failure; the row stays `:scheduled` with a
-    # backoff. The derived subscription-scope recompute is what halts a
-    # persistently-rejecting subscription.
     drain_delivery!()
+
     assert [:response] = failed_log_classes(:subscription_id, s1.id)
   end
 
@@ -290,9 +396,10 @@ defmodule Example.Outbound.TransportHttpTest do
     # …but the redirect to the metadata host was never chased.
     refute_received {:redirect_target, "169.254.169.254"}
 
-    # A 302 is a non-2xx rejection: classified `:response`, never delivered.
+    # A 302 is a non-retryable non-2xx rejection: taken terminal (`:permanent`),
+    # logged `:permanent`, never delivered.
     refute reload(event).state == :delivered
-    assert [:response] = failed_log_classes(:subscription_id, s1.id)
+    assert [:permanent] = failed_log_classes(:subscription_id, s1.id)
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────

@@ -18,17 +18,20 @@ defmodule AshIntegration.Outbound.Delivery.Health do
       `Scheduler.promote_probe/2` — the probe is held to the exact ordering gates of
       a normal promotion, never a re-derived subset.
 
-  Park (freeing delivery slots the moment a connection is suspended) rides the
-  `:suspend` transition itself — see
-  `AshIntegration.Outbound.Delivery.Changes.ParkOnSuspend`.
+  There is no separate "park on suspend" step: a suspended entity's waiting deliveries
+  already sit in `:failed` (held-waiting), and the scheduler simply stops promoting a
+  suspended entity, so nothing needs to be drained. The recompute tick also runs
+  `sweep_expired/0` — the opt-in age-based give-up (`terminal_reason: :expired`), a
+  no-op unless `Supervisor.max_delivery_age_ms/0` is configured.
 
   Like the retention sweeper this GenServer validates its `:health` config slice
-  at boot and exposes `recompute/0` / `probe/0` for direct calls (tests, manual
-  runs).
+  at boot and exposes `recompute/0` / `probe/0` / `sweep_expired/0` for direct calls
+  (tests, manual runs).
   """
   use GenServer
 
   require Ash.Expr
+  require Ash.Query
   require Logger
 
   alias AshIntegration.Outbound.Delivery.Scheduler
@@ -92,6 +95,7 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   @impl true
   def handle_info(:recompute, state) do
     run(&recompute/0, "recompute")
+    run(&sweep_expired/0, "sweep_expired")
     schedule(:recompute, state.recompute_interval)
     {:noreply, state}
   end
@@ -206,9 +210,12 @@ defmodule AshIntegration.Outbound.Delivery.Health do
 
   # The probe's policy: pick `m` suspended entities, **oldest-probed-first** — ordered
   # by each one's most recent transport/response `Log` row (for a suspended entity
-  # that row IS its last probe, since park left it no other traffic) — skipping any
-  # that still hold a live (non-poison) `:scheduled` delivery so a probe is never
-  # stacked. Promotion itself is the scheduler's job (`promote_probe/2`).
+  # that row IS its last probe, since the scheduler promotes no other traffic while
+  # suspended) — skipping any that still hold an in-flight `:scheduled` delivery so a
+  # probe is never stacked. (A suspended entity's other heads sit in `:failed`,
+  # promoted only by the probe; a terminal `:failed` head is not `:scheduled`, so it
+  # never blocks probing here.) Promotion itself is the scheduler's job
+  # (`promote_probe/2`).
   #
   # The `JOIN LATERAL … LIMIT 1` is an inner join, so an entity with NO transport/
   # response `Log` row is excluded — a manual `suspend` on a quiet entity is inert
@@ -230,14 +237,73 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     WHERE e.suspended = true
       AND NOT EXISTS (
         SELECT 1 FROM #{ed_table()} s
-        WHERE s.#{scope.id_column} = e.id AND s.state = 'scheduled' AND s.attempts < $2
+        WHERE s.#{scope.id_column} = e.id AND s.state = 'scheduled'
       )
     ORDER BY ll.last_log_id ASC
     LIMIT $1
     """
 
-    %{rows: rows} = query!(sql, [m, Stage.max_attempts()])
+    %{rows: rows} = query!(sql, [m])
     Enum.map(rows, fn [id] -> id end)
+  end
+
+  # ── Age-based give-up (opt-in `:expired`) ────────────────────────────────────
+
+  @doc """
+  Opt-in give-up policy: take any still-retrying `:failed` delivery whose age (from
+  `created_at`) exceeds `Supervisor.max_delivery_age_ms/0` terminal — set
+  `terminal_reason: :expired`, so it stops retrying and its lane is blocked like any
+  terminal head. No-op unless the age is configured (`nil` = never expire, the safe
+  default). Idempotent (matches only `terminal_reason IS NULL`) and safe on every node.
+  """
+  def sweep_expired do
+    case Stage.max_delivery_age_ms() do
+      nil -> :ok
+      age_ms when is_integer(age_ms) and age_ms > 0 -> expire_older_than(age_ms)
+    end
+  end
+
+  # One bulk `:expire` through Ash (not raw SQL) so `updated_at` bumps and host
+  # notifiers see the transition. The query-side guard (`state == :failed`,
+  # `terminal_reason IS NULL`) is the action's precondition, pushed here the same
+  # way the scheduler pushes its promotion guards; `SetAttribute` is
+  # atomic-capable, so `:atomic` runs this as a single UPDATE.
+  defp expire_older_than(age_ms) do
+    cutoff = DateTime.add(DateTime.utc_now(), -age_ms, :millisecond)
+
+    result =
+      AshIntegration.event_delivery_resource()
+      |> Ash.Query.filter(state == :failed and is_nil(terminal_reason) and created_at < ^cutoff)
+      |> Ash.bulk_update(:expire, %{},
+        strategy: [:atomic, :stream],
+        authorize?: false,
+        return_records?: true,
+        return_errors?: true,
+        notify?: true
+      )
+
+    n =
+      case result do
+        %Ash.BulkResult{records: records} when is_list(records) ->
+          length(records)
+
+        %Ash.BulkResult{errors: errors} ->
+          Logger.error("Outbound delivery: expiry sweep failed: #{inspect(errors)}")
+          0
+      end
+
+    if n > 0 do
+      Logger.warning(
+        "Outbound delivery: expired #{n} delivery(ies) still retrying after " <>
+          "#{age_ms}ms — terminal (`:expired`), lanes blocked (no auto-resolve)."
+      )
+
+      :telemetry.execute([:ash_integration, :delivery, :expired], %{count: n}, %{
+        max_delivery_age_ms: age_ms
+      })
+    end
+
+    :ok
   end
 
   # ── Scopes / config / repo ──────────────────────────────────────────────────

@@ -25,6 +25,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
   alias AshIntegration.Outbound.Delivery.Dispatcher
   alias AshIntegration.Outbound.Delivery.Health
   alias AshIntegration.Outbound.Delivery.Relay
+  alias AshIntegration.Outbound.Delivery.Scheduler
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
   alias Example.Outbound.{Connection, Event, EventDelivery, Log, Subscription}
 
@@ -56,28 +57,36 @@ defmodule Example.Outbound.DeliveryRelayTest do
       assert [] = Dispatcher.claim(10)
     end
 
-    test "does not claim a row whose next_attempt_at backoff has not elapsed", %{connection: conn} do
+    test "claim ignores next_attempt_at — backoff is now a promotion-time gate", %{
+      connection: conn
+    } do
+      # In this model the scheduler only promotes a row to `:scheduled` once it is due
+      # (past its backoff), so a `:scheduled` row is by construction claimable. `claim/1`
+      # therefore does NOT re-check `next_attempt_at` — a `:scheduled` row with a future
+      # cursor (which shouldn't normally happen, but proves the gate moved) is still
+      # leased. The backing-off gate is exercised in the scheduler describe below.
       d = scheduled_delivery!(create_subscription!(conn))
 
-      # Simulate a recorded retryable failure: lease released, backoff in the future.
       set_fields!(d,
         claimed_at: nil,
         next_attempt_at: DateTime.add(DateTime.utc_now(), 60, :second)
       )
 
-      assert [] = Dispatcher.claim(10)
-
-      # Once the backoff is in the past, it becomes claimable again.
-      set_fields!(d, next_attempt_at: DateTime.add(DateTime.utc_now(), -1, :second))
-      assert [_claimed] = Dispatcher.claim(10)
+      assert [claimed] = Dispatcher.claim(10)
+      assert claimed.id == d.id
     end
 
-    test "never claims a terminal (poison) row at/over the attempt ceiling", %{connection: conn} do
+    test "never claims a non-:scheduled row (a :failed head is the scheduler's)", %{
+      connection: conn
+    } do
+      # There is no attempt ceiling. A waiting/terminal row is `:failed`, not
+      # `:scheduled`, so `claim/1` never leases it — re-promotion (`:failed → :scheduled`)
+      # is the scheduler's job.
       d = scheduled_delivery!(create_subscription!(conn))
-      set_fields!(d, attempts: Stage.max_attempts())
+      set_fields!(d, state: :failed, attempts: 99)
 
       assert [] = Dispatcher.claim(10)
-      assert reload(d).state == :scheduled
+      assert reload(d).state == :failed
     end
 
     test "re-claims a row whose lease has expired (the deleted guardian's job)", %{
@@ -108,7 +117,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
       refute is_nil(delivered.delivered_at)
     end
 
-    test "a retryable failure records the error, stamps backoff, and stays :scheduled", %{
+    test "a retryable failure records the error, stamps backoff, and moves to :failed", %{
       connection: conn
     } do
       stub_webhook_failure(503)
@@ -118,8 +127,10 @@ defmodule Example.Outbound.DeliveryRelayTest do
       drain_delivery!()
 
       reloaded = reload(d)
-      # Lane stays blocked (still scheduled) while it retries — in-order-per-key.
-      assert reloaded.state == :scheduled
+      # Leaves the in-flight slot but keeps the lane as a `:failed` head (held via the
+      # `{scheduled,failed}` index) while it waits out its backoff — in-order-per-key.
+      assert reloaded.state == :failed
+      assert is_nil(reloaded.terminal_reason)
       assert reloaded.attempts == 1
       refute is_nil(reloaded.next_attempt_at)
       # Lease released so the backoff, not the lease, governs the retry.
@@ -146,53 +157,34 @@ defmodule Example.Outbound.DeliveryRelayTest do
       assert reload(d).state == :delivered
     end
 
-    test "a suspended entity's FAILED delivery is one-shot to :pending with attempts cleared", %{
+    test "a suspended entity's retryable failure is :failed with NO backoff (probe-paced)", %{
       connection: conn
     } do
       suspend!(conn)
       stub_webhook_failure(503)
       d = scheduled_delivery!(create_subscription!(conn))
-      # Pretend it had already accrued attempts before suspension; the reset must
-      # clear them so a suspended delivery can never march to the poison ceiling.
+      # It carries some prior attempts — `attempts` is monotonic and never reset now, so
+      # the count keeps climbing honestly (there is no ceiling to protect against).
       set_fields!(d, attempts: 5)
 
       drain_delivery!()
 
       reloaded = reload(d)
-      # Not retried in place (that would accrue toward poison) — sent back to pending
-      # for the probe to pace the next attempt, with a clean lease/backoff/attempt.
-      assert reloaded.state == :pending
-      assert reloaded.attempts == 0
-      assert is_nil(reloaded.claimed_at)
+      # Recorded `:failed` like any failure, but with NO backoff cursor: the recovery
+      # probe (not the row's backoff) paces the next try, and on unsuspend the scheduler
+      # promotes it immediately. `attempts` is untouched by the failure record.
+      assert reloaded.state == :failed
+      assert is_nil(reloaded.terminal_reason)
       assert is_nil(reloaded.next_attempt_at)
+      assert is_nil(reloaded.claimed_at)
+      assert reloaded.attempts == 6
 
-      # The failure is still observable: a Log row is written, classed `:probe` so it
-      # stays out of the transport/response health windows.
+      # The failure is still observable: a Log row classed `:probe` so it stays out of
+      # the transport/response health windows.
       assert [log] = Ash.read!(Log, authorize?: false)
       assert log.status == :failed
       assert log.failure_class == :probe
       assert log.event_delivery_id == d.id
-    end
-
-    test "a suspended entity's delivery never poisons, even at the ceiling", %{connection: conn} do
-      # The exact "reset → re-scheduled → stuck on max_attempts" trap: a row one claim
-      # below the ceiling. For a HEALTHY entity the next claim→fail would poison it
-      # (left `:scheduled`, lane blocked). Suspended, it must one-shot to `:pending`
-      # with a fresh budget instead — never poison, never stuck.
-      suspend!(conn)
-      stub_webhook_failure(503)
-      d = scheduled_delivery!(create_subscription!(conn))
-      set_fields!(d, attempts: Stage.max_attempts() - 1)
-
-      ref =
-        :telemetry_test.attach_event_handlers(self(), [[:ash_integration, :delivery, :poison]])
-
-      drain_delivery!()
-
-      refute_received {[:ash_integration, :delivery, :poison], ^ref, _, _}
-      reloaded = reload(d)
-      assert reloaded.state == :pending
-      assert reloaded.attempts == 0
     end
 
     test "an unresolvable endpoint (base_url NXDOMAIN) is a :transport failure (connection scope)",
@@ -230,45 +222,68 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
-  describe "terminal (poison) — never auto-resolved" do
-    test "a row that crosses the ceiling is left :scheduled, surfaced once, never re-claimed", %{
-      connection: conn
-    } do
-      stub_webhook_failure(503)
+  describe "terminal (:permanent) — non-retryable, terminal on the first attempt" do
+    test "an HTTP 4xx is terminal at once (`:failed` + terminal_reason), surfaced, never re-claimed",
+         %{connection: conn} do
+      stub_webhook_failure(400)
       d = scheduled_delivery!(create_subscription!(conn))
-      # One claim away from the ceiling: the next (claim → fail) crosses it.
-      set_fields!(d, attempts: Stage.max_attempts() - 1)
 
       ref =
-        :telemetry_test.attach_event_handlers(self(), [[:ash_integration, :delivery, :poison]])
+        :telemetry_test.attach_event_handlers(self(), [[:ash_integration, :delivery, :terminal]])
 
       drain_delivery!()
 
-      assert_received {[:ash_integration, :delivery, :poison], ^ref, %{attempts: _}, %{}}
+      assert_received {[:ash_integration, :delivery, :terminal], ^ref, %{attempts: 1},
+                       %{terminal_reason: :permanent}}
+
       reloaded = reload(d)
-      assert reloaded.state == :scheduled
-      assert reloaded.attempts == Stage.max_attempts()
-      assert reloaded.last_error =~ "poison"
-      # Terminal: never claimed again, stays stuck with its lane blocked.
+      # Terminal: `:failed` + an explicit verdict (NOT an inflated attempt count — the
+      # count stays the truthful 1), holding its lane, no backoff cursor, never claimed.
+      assert reloaded.state == :failed
+      assert reloaded.terminal_reason == :permanent
+      assert reloaded.attempts == 1
+      assert is_nil(reloaded.next_attempt_at)
+      assert is_nil(reloaded.claimed_at)
       assert [] = Dispatcher.claim(10)
     end
 
-    test "the terminal (poison) attempt is logged but one failure does not suspend", %{
+    test "a permanent failure is logged :permanent and never suspends the subscription", %{
       connection: conn
     } do
-      stub_webhook_failure(503)
+      stub_webhook_failure(400)
       s = create_subscription!(conn)
       d = scheduled_delivery!(s)
-      # The next (claim → fail) crosses the ceiling, making this a poison attempt.
-      set_fields!(d, attempts: Stage.max_attempts() - 1)
+
+      # Window of 1: a single :response failure would trip the subscription next
+      # recompute. A `:permanent` failure is excluded from the window, so it does not.
+      with_window(1, fn ->
+        drain_delivery!()
+        Health.recompute()
+      end)
+
+      assert [log] = Ash.read!(Log, authorize?: false)
+      assert log.status == :failed
+      assert log.failure_class == :permanent
+      assert log.event_delivery_id == d.id
+      refute reload(s).suspended
+    end
+
+    test "a non-retryable failure while suspended is ALSO terminal, not probe-looped", %{
+      connection: conn
+    } do
+      # A suspended entity's probe delivery that fails NON-retryably must not loop back
+      # as a probe forever — a deterministic rejection can never recover, so it goes
+      # terminal like any other permanent failure.
+      suspend!(conn)
+      stub_webhook_failure(400)
+      d = scheduled_delivery!(create_subscription!(conn))
 
       drain_delivery!()
 
-      assert reload(d).attempts == Stage.max_attempts()
-      # The failure is logged, but a single response failure is far below the window,
-      # so a recompute does not suspend the subscription on it alone.
-      Health.recompute()
-      refute reload(s).suspended
+      reloaded = reload(d)
+      assert reloaded.state == :failed
+      assert reloaded.terminal_reason == :permanent
+      assert [] = Dispatcher.claim(10)
     end
   end
 
@@ -359,6 +374,118 @@ defmodule Example.Outbound.DeliveryRelayTest do
       start_supervised!({Relay, name: :"delivery_relay_#{System.unique_integer([:positive])}"})
 
       assert eventually(fn -> reload(d).state == :delivered end)
+    end
+  end
+
+  # The crown-jewel invariant: for a lane `(connection_id, event_key)`, a later event is
+  # never promoted ahead of an earlier one that is still an active head (`:scheduled`/
+  # `:failed`). Enforced by the `{scheduled,failed}` unique index AND the scheduler's
+  # lane-min selection. See design/delivery-retry-model.md §5, §17.
+  describe "per-key ordering — the {scheduled,failed} lane invariant" do
+    test "a backing-off :failed head holds its lane — a younger :pending row can't jump it",
+         %{connection: conn} do
+      s = create_subscription!(conn)
+      e1 = scheduled_delivery!(s, "k")
+      e2 = pending_delivery!(s, "k")
+      # e1 failed and is waiting out a future backoff.
+      set_fields!(e1,
+        state: :failed,
+        claimed_at: nil,
+        next_attempt_at: DateTime.add(DateTime.utc_now(), 300, :second)
+      )
+
+      Scheduler.sweep()
+
+      # The lane is held by e1 (backing off) — e2 stays put, e1 is not re-promoted yet.
+      assert reload(e1).state == :failed
+      assert reload(e2).state == :pending
+
+      # Once e1's backoff elapses, e1 (the lane-min) — not e2 — is re-promoted.
+      set_fields!(e1, next_attempt_at: DateTime.add(DateTime.utc_now(), -1, :second))
+      Scheduler.sweep()
+
+      assert reload(e1).state == :scheduled
+      assert reload(e2).state == :pending
+    end
+
+    test "a terminal :failed head blocks its lane forever; skip (cancel) frees it", %{
+      connection: conn
+    } do
+      s = create_subscription!(conn)
+      e1 = scheduled_delivery!(s, "k")
+      e2 = pending_delivery!(s, "k")
+      set_fields!(e1, state: :failed, claimed_at: nil, terminal_reason: :permanent)
+
+      Scheduler.sweep()
+      # Blocked: the terminal head is never promoted and e2 never jumps it.
+      assert reload(e1).state == :failed
+      assert reload(e2).state == :pending
+
+      # Operator skip: cancelling the terminal head frees the lane so e2 promotes.
+      reload(e1)
+      |> Ash.Changeset.for_update(:cancel, %{}, authorize?: false)
+      |> Ash.update!(authorize?: false)
+
+      Scheduler.sweep()
+      assert reload(e2).state == :scheduled
+    end
+
+    test "operator retry (:reprocess) clears the terminal verdict — a later retryable failure backs off instead of silently re-terminaling",
+         %{connection: conn} do
+      s = create_subscription!(conn)
+      e1 = scheduled_delivery!(s, "k")
+      set_fields!(e1, state: :failed, claimed_at: nil, terminal_reason: :permanent)
+
+      # Operator "retry now": back to `:pending`, with the stale terminal verdict
+      # cleared — otherwise the row's next retryable failure would land it back in
+      # `:failed` still carrying `terminal_reason`, silently terminal again with no
+      # `:terminal` telemetry.
+      resurrected =
+        reload(e1)
+        |> Ash.Changeset.for_update(:reprocess, %{}, authorize?: false)
+        |> Ash.update!(authorize?: false)
+
+      assert resurrected.state == :pending
+      assert is_nil(resurrected.terminal_reason)
+
+      # It re-promotes as its lane's head, fails retryably (503), and must be a
+      # backing-off retry — NOT terminal.
+      stub_webhook_failure(503)
+      Scheduler.sweep()
+      assert reload(e1).state == :scheduled
+
+      drain_delivery!()
+
+      failed = reload(e1)
+      assert failed.state == :failed
+      assert is_nil(failed.terminal_reason)
+      refute is_nil(failed.next_attempt_at)
+    end
+
+    test "the unique index physically rejects a second active head on a lane", %{connection: conn} do
+      s = create_subscription!(conn)
+      _e1 = scheduled_delivery!(s, "k")
+      e2 = pending_delivery!(s, "k")
+
+      # Forcing e2 to a second active head (`:failed`) while e1 holds `:scheduled` must
+      # be rejected by `idx_one_scheduled_per_connection_event_key` — ordering is a hard
+      # DB guarantee, not merely query discipline.
+      assert_raise Postgrex.Error, fn ->
+        set_fields!(e2, state: :failed)
+      end
+    end
+
+    test "delivering the head advances the lane to the next row", %{connection: conn} do
+      stub_webhook_success()
+      s = create_subscription!(conn)
+      e1 = scheduled_delivery!(s, "k")
+      e2 = pending_delivery!(s, "k")
+
+      drain_delivery!()
+      assert reload(e1).state == :delivered
+
+      Scheduler.sweep()
+      assert reload(e2).state == :scheduled
     end
   end
 
@@ -472,7 +599,15 @@ defmodule Example.Outbound.DeliveryRelayTest do
 
   # A `:scheduled` EventDelivery whose `delivery` descriptor is resolved through the
   # real Resolver (so the transport has a valid wire payload to replay).
-  defp scheduled_delivery!(subscription, event_key \\ "p1") do
+  defp scheduled_delivery!(subscription, event_key \\ "p1"),
+    do: build_delivery!(subscription, event_key, :scheduled)
+
+  # A `:pending` backlog row on a lane (a younger head can wait behind an active head).
+  # Created directly `:pending` so it never occupies the `{scheduled,failed}` slot.
+  defp pending_delivery!(subscription, event_key),
+    do: build_delivery!(subscription, event_key, :pending)
+
+  defp build_delivery!(subscription, event_key, state) do
     subscription = Ash.load!(subscription, [:connection], authorize?: false)
     data = %{"hello" => "world"}
 
@@ -522,7 +657,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
         version: subscription.version,
         event_key: event_key,
         delivery: delivery,
-        state: :scheduled,
+        state: state,
         subscription_id: subscription.id,
         connection_id: subscription.connection_id
       },

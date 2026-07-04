@@ -49,15 +49,36 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Helpers do
   defp health_label(:parked), do: "Parked"
   defp health_label(:degraded), do: "Degraded"
 
+  @doc "A terminal `:failed` delivery: never retried, blocking its lane (operator-only)."
+  def terminal?(%{state: :failed, terminal_reason: reason}) when not is_nil(reason), do: true
+  def terminal?(_), do: false
+
   attr :delivery, :map, required: true
 
-  @doc "Delivery-state badge; a parked delivery is called out separately from a healthy one."
+  @doc """
+  Delivery-state badge. Parked (build-failed) and terminal (`terminal_reason` set —
+  lane blocked forever, operator-only recovery) deliveries are called out with their
+  own error badges; a non-terminal `:failed` row is shown as `Retrying` (it is
+  held-waiting on its backoff or probe, not dead).
+  """
   def state_badge(assigns) do
     ~H"""
     <span :if={parked?(@delivery)} class="badge badge-sm badge-error gap-1">
       <.icon name="hero-exclamation-triangle-mini" class="size-3" /> Parked
     </span>
-    <span :if={!parked?(@delivery)} class={["badge badge-sm", state_class(@delivery.state)]}>
+    <span
+      :if={terminal?(@delivery)}
+      class="badge badge-sm badge-error gap-1"
+      title="Terminal — never retried; blocks its lane until an operator retries or cancels it."
+    >
+      <.icon name="hero-exclamation-triangle-mini" class="size-3" />
+      Terminal ({@delivery.terminal_reason})
+    </span>
+    <span
+      :if={!parked?(@delivery) and !terminal?(@delivery)}
+      class={["badge badge-sm", state_class(@delivery.state)]}
+      title={@delivery.state == :failed && "Failed — held on its lane, retried on backoff/probe."}
+    >
       {state_label(@delivery.state)}
     </span>
     """
@@ -66,6 +87,9 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Helpers do
   defp state_class(:delivered), do: "badge-success"
   defp state_class(:scheduled), do: "badge-info"
   defp state_class(:pending), do: "badge-warning"
+  # A non-terminal `:failed` row is waiting-to-retry (backoff or probe-paced) — a
+  # warning, not a dead end; the terminal case gets its own badge in state_badge/1.
+  defp state_class(:failed), do: "badge-warning"
   # `:suppressed` is a deliberate, healthy no-send (content unchanged) — distinct
   # from `:delivered` (bytes sent) so it never reads as a real send, and distinct
   # from `:cancelled` (dropped/superseded). Neutral accent.
@@ -75,5 +99,6 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Helpers do
   defp state_class(:cancelled), do: "badge-ghost"
   defp state_class(_), do: "badge-ghost"
 
+  defp state_label(:failed), do: "Retrying"
   defp state_label(state), do: state |> to_string() |> String.capitalize()
 end

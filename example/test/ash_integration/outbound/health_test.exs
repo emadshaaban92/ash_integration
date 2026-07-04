@@ -1,15 +1,16 @@
 defmodule Example.Outbound.HealthTest do
   @moduledoc """
   DB-backed coverage for derived suspension (`design/connection-health.md`): the
-  recompute trip signal (§5), park-on-suspend (§6), and the bounded recovery probe
-  (§7). Suspension is recomputed from the delivery `Log` ("no success among the last
-  N transport/response outcomes"); the probe delegates promotion to the scheduler so
-  it inherits every ordering gate.
+  recompute trip signal (§5), the "no park drain" behavior on suspend, and the bounded
+  recovery probe (§7). Suspension is recomputed from the delivery `Log` ("no success
+  among the last N transport/response outcomes"); the probe delegates promotion to the
+  scheduler so it inherits every ordering gate (including the `{scheduled,failed}` lane
+  invariant of `design/delivery-retry-model.md`).
   """
   use Example.DataCase, async: false
 
   alias AshIntegration.Outbound.Delivery.Health
-  alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
+  alias AshIntegration.Outbound.Delivery.Scheduler
   alias Example.Outbound.{Connection, Log, Subscription}
 
   setup do
@@ -26,6 +27,9 @@ defmodule Example.Outbound.HealthTest do
         Health.recompute()
         refute reload(dest).suspended, "1 failure < N=2 must not trip"
 
+        # A failed row is `:failed`; the scheduler re-promotes it to `:scheduled` before
+        # the next attempt, so mirror that (schedule → fail) to log the 2nd failure.
+        schedule!(reload(ev))
         record_failure!(reload(ev), "transport")
         Health.recompute()
         assert reload(dest).suspended, "2 failures >= N=2 trips"
@@ -87,14 +91,14 @@ defmodule Example.Outbound.HealthTest do
         ev = create_event!(s1, state: :scheduled)
 
         # The suspended-failure path: writes a Log row forced to `failure_class: :probe`
-        # and one-shots the delivery back to `:pending`. The underlying error is a
-        # transport one, but the forced class wins.
+        # and records the delivery `:failed` (no backoff — probe-paced). The underlying
+        # error is a transport one, but the forced `:probe` class wins.
         record_suspended_failure!(ev)
 
         assert [log] = logs()
         assert log.status == :failed
         assert log.failure_class == :probe
-        assert reload(ev).state == :pending
+        assert reload(ev).state == :failed
 
         # window = 1, yet a `:probe` failure is outside both health windows, so it does
         # NOT trip suspension (a `:transport` failure on its own would).
@@ -105,51 +109,49 @@ defmodule Example.Outbound.HealthTest do
     end
   end
 
-  describe "park on the suspend transition" do
-    test "un-leased :scheduled rows revert to pending; a live-leased row drains",
+  describe "suspension leaves waiting heads for the probe (no park drain)" do
+    test "on suspend the scheduler stops promoting — a waiting head is NOT drained to :pending",
          %{connection: dest} do
+      # Park is retired: nothing rewrites a suspended entity's rows. A failed (waiting)
+      # head stays `:failed`, and the normal sweep simply skips a suspended entity — so
+      # neither the failed head nor a fresh backlog row is promoted while suspended.
       with_window(1, fn ->
         s1 = create_subscription!(dest, "widget.updated")
-        unleased = create_event!(s1, event_key: "a", state: :scheduled)
-        leased = create_event!(s1, event_key: "b", state: :scheduled)
-        stamp_claimed!(leased, DateTime.utc_now())
+        failed = create_event!(s1, event_key: "a", state: :scheduled)
+        record_failure!(failed, "transport")
+        pending = create_event!(s1, event_key: "b", state: :pending)
 
-        record_failure!(unleased, "transport")
         Health.recompute()
-
         assert reload(dest).suspended
-        assert reload(unleased).state == :pending, "un-leased row parked back to pending"
-        assert reload(leased).state == :scheduled, "live-leased row left to drain"
+
+        Scheduler.sweep()
+        assert reload(failed).state == :failed, "waiting head left `:failed` (no park drain)"
+        assert reload(pending).state == :pending, "scheduler promotes nothing while suspended"
       end)
     end
 
-    test "a poison lane stays terminal on suspend; the probe recovers via a healthy lane",
+    test "a terminal (:permanent) head is never probed; the probe recovers via a healthy lane",
          %{connection: dest} do
-      # Regression guard: forgiving a poison row on suspend (resetting it to :pending)
-      # turns a known-dead head into the oldest schedulable lane head, which the probe
-      # promotes first, fails, resets, and re-promotes forever — starving the healthy
-      # lane and never recovering. The poison row must stay :scheduled (terminal) so it
-      # is never a lane head, leaving the probe to recover via the healthy lane.
+      # Regression guard: a terminal head must never become a probe target — that would
+      # loop a known-dead head forever and starve the healthy lane. A terminal `:failed`
+      # head blocks its lane (never schedulable), so the probe recovers via a healthy one.
       with_window(1, fn ->
         s1 = create_subscription!(dest, "widget.updated")
 
-        # Poison lane (created first → oldest event_id) and a separate healthy lane.
-        poison = create_event!(s1, event_key: "poison", state: :scheduled)
-        stamp_attempts!(poison, Stage.max_attempts())
+        # Terminal lane (created first → oldest event_id) and a separate healthy lane.
+        terminal = create_event!(s1, event_key: "terminal", state: :scheduled)
+        record_failure!(terminal, "transport")
+        stamp_terminal!(terminal, :permanent)
         healthy = create_event!(s1, event_key: "healthy", state: :pending)
 
-        # Trip the connection's suspension off the poison lane's failure.
-        record_failure!(poison, "transport")
         Health.recompute()
         assert reload(dest).suspended
+        assert reload(terminal).state == :failed, "terminal head stays `:failed`, lane blocked"
 
-        # Park leaves the poison row terminal (NOT forgiven to :pending).
-        assert reload(poison).state == :scheduled, "poison row left terminal, lane blocked"
-
-        # The probe skips the slot-blocked poison lane and promotes the healthy head.
+        # The probe skips the terminal lane and promotes the healthy head.
         Health.probe()
         assert reload(healthy).state == :scheduled, "probe recovers via the healthy lane"
-        assert reload(poison).state == :scheduled, "poison lane untouched by the probe"
+        assert reload(terminal).terminal_reason == :permanent, "terminal head untouched"
 
         # A success on the probed (healthy) head clears the suspension.
         deliver!(reload(healthy))
@@ -169,10 +171,10 @@ defmodule Example.Outbound.HealthTest do
         record_failure!(ev, "transport")
         Health.recompute()
         assert reload(dest).suspended
-        assert reload(ev).state == :pending, "parked on suspend"
+        assert reload(ev).state == :failed, "waiting head is `:failed` (no park drain)"
 
         Health.probe()
-        assert reload(ev).state == :scheduled, "probe promoted one head"
+        assert reload(ev).state == :scheduled, "probe promoted the waiting head"
 
         deliver!(reload(ev))
         Health.recompute()
@@ -340,7 +342,7 @@ defmodule Example.Outbound.HealthTest do
     Ash.update!(
       Ash.Changeset.for_update(
         event,
-        :record_attempt_error,
+        :record_failure,
         %{last_error: "boom", delivery_metadata: metadata},
         authorize?: false
       ),
@@ -358,11 +360,22 @@ defmodule Example.Outbound.HealthTest do
     Ash.update!(
       Ash.Changeset.for_update(
         event,
-        :record_suspended_failure,
-        %{last_error: "boom", delivery_metadata: %{"failure_class" => "transport"}},
+        :record_failure,
+        %{
+          last_error: "boom",
+          delivery_metadata: %{"failure_class" => "transport"},
+          log_failure_class: :probe
+        },
         authorize?: false
       ),
       authorize?: false
+    )
+  end
+
+  defp stamp_terminal!(delivery, reason) do
+    Example.Repo.update_all(
+      from(d in "outbound_event_deliveries", where: d.id == type(^delivery.id, Ecto.UUID)),
+      set: [terminal_reason: to_string(reason)]
     )
   end
 
@@ -370,20 +383,6 @@ defmodule Example.Outbound.HealthTest do
     Ash.update!(
       Ash.Changeset.for_update(event, :deliver, %{delivery_metadata: %{}}, authorize?: false),
       authorize?: false
-    )
-  end
-
-  defp stamp_claimed!(delivery, at) do
-    Example.Repo.update_all(
-      from(d in "outbound_event_deliveries", where: d.id == type(^delivery.id, Ecto.UUID)),
-      set: [claimed_at: at]
-    )
-  end
-
-  defp stamp_attempts!(delivery, n) do
-    Example.Repo.update_all(
-      from(d in "outbound_event_deliveries", where: d.id == type(^delivery.id, Ecto.UUID)),
-      set: [attempts: n]
     )
   end
 

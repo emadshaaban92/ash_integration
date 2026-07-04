@@ -193,33 +193,42 @@ scheduler's **brain**: the scheduler chooses lane heads and promotes them to
 Its producer claims DUE `:scheduled` rows (`FOR UPDATE SKIP LOCKED` + a soft
 `claimed_at` lease, oldest `event_id` first), partitioned by `connection_id`. The
 claim **bumps `attempts`** (so a relay that crashes mid-send still increments and
-can't loop forever — `attempts` counts claims) and honors the durable
-`next_attempt_at` backoff (`next_attempt_at IS NULL OR next_attempt_at <= now()`).
-For each claimed row:
-
-1. If the connection **or** subscription is now suspended, it resets the row to
-   `pending` (the scheduler re-promotes once unsuspended).
-2. Otherwise it calls the transport (`Transport.deliver_batch/2` — per-row results;
-   `batch_size` is 1 today, real transport batching lands with #36). **On
-   success**: marks `delivered` (slot freed), writes a success log, and resets
-   `consecutive_failures` on **both** the connection and the subscription — all in
-   one transaction. **On failure**: records the error, writes a failure log, stamps
-   `next_attempt_at` (exponential backoff with jitter, base→cap = `backoff_base_ms`
-   → `backoff_max_ms`), and bumps the appropriate counter (see
-   [Suspension](#suspension--failure-isolation)). The row stays `:scheduled`, so the
-   lane stays blocked while it retries (in-order-per-key).
+can't loop forever — `attempts` counts claims). It needs no backoff gate: the
+scheduler only promotes a row once its `next_attempt_at` has elapsed, so a
+`:scheduled` row is by construction due. For each claimed row the relay calls the
+transport (`Transport.deliver_batch/2` — per-row results; `batch_size` is 1 today,
+real transport batching lands with #36); suspension is *not* a gate here — the only
+`:scheduled` row a suspended entity ever has is its recovery probe, which must
+reach the transport to observe recovery. **On success**: marks `delivered` (slot
+freed) and writes a success log — all in one transaction. **On failure** the
+relay's single failure outcome (`:record_failure`) moves the row
+`:scheduled → :failed` and writes a failure log; for a retryable failure it stamps
+`next_attempt_at` (the server's clamped `Retry-After` when it sent one, else
+exponential backoff with jitter, base→cap = `backoff_base_ms` → `backoff_max_ms` —
+or no cursor at all for a suspended entity's probe, which is probe-paced), and for
+a non-retryable response it stamps `terminal_reason: :permanent`. The `:failed` row
+keeps its lane (see the invariant below), so the lane stays blocked while it waits
+(in-order-per-key). See
+[`design/delivery-retry-model.md`](../design/delivery-retry-model.md).
 
 Every result-writing action is guarded on `state == :scheduled` **and** fenced on
 the `claimed_at` lease token, so a stale claimer (its lease expired and another
-pass re-claimed the row) can never resurrect or double-finalize it.
+pass re-claimed the row) can never resurrect or double-finalize it. Ordering is a
+hard DB invariant: a partial unique index on `(connection_id, event_key) WHERE state
+IN ('scheduled','failed')` allows at most one **active head** per lane, so a younger
+row can never be promoted ahead of an earlier one that is still in-flight or waiting.
 
-After `delivery: [max_attempts: …]` claims (default 20) a delivery that still
-hasn't succeeded becomes **terminal (poison)**: the relay records a poison
-`last_error`, emits `[:ash_integration, :delivery, :poison]` telemetry once, and
-the claim excludes it forever — leaving the delivery `:scheduled` so its lane stays
-blocked. This mirrors the dispatch side's poison policy; recovery is operator/host
-opt-in (`reprocess`/`reset_to_pending`). Find them with `state = 'scheduled' AND
-attempts >= N`.
+There is **no attempt ceiling**: a retryable failure retries indefinitely, paced by
+`next_attempt_at` backoff and bounded operationally by suspension + the recovery
+probe. A delivery goes **terminal** only via a `terminal_reason`: `:permanent` (a
+non-retryable response — set on the first occurrence, `[:ash_integration, :delivery,
+:terminal]` telemetry) or `:expired` (the opt-in `max_delivery_age_ms` age sweep). A
+terminal row is left `:failed`, holding its lane; recovery is operator opt-in:
+**retry** (`reprocess` — back to `:pending` with the lease/backoff bookkeeping and
+the terminal verdict cleared) or **skip** (`cancel` — frees the lane for younger
+events). Both are offered on the delivery's dashboard page; the dashboard home also
+counts standing terminal rows. Find them with `state = 'failed' AND terminal_reason
+IS NOT NULL`.
 
 ### No guardian needed
 

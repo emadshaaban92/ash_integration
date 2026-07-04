@@ -285,10 +285,6 @@ defmodule AshIntegration.Connection.Transformer do
             ),
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
               change: AshIntegration.Outbound.Delivery.Changes.SetSuspensionDetails
-            ),
-            Transformer.build_entity!(Dsl, [:actions, :update], :change,
-              change:
-                {AshIntegration.Outbound.Delivery.Changes.ParkOnSuspend, column: :connection_id}
             )
           ]
         )

@@ -1,7 +1,7 @@
 defmodule AshIntegration.Outbound.Delivery.Changes.GuardScheduled do
   @moduledoc false
   # Precondition guard for the relay-raced write actions (`:deliver`,
-  # `:record_attempt_error`, `:reset_to_pending`): pushes `… AND state = 'scheduled'`
+  # `:record_failure`, `:reset_to_pending`): pushes `… AND state = 'scheduled'`
   # onto the UPDATE so a row that is no longer `:scheduled` matches nothing and the
   # write is a clean no-op.
   #
