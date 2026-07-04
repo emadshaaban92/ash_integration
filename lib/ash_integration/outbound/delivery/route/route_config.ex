@@ -19,6 +19,11 @@ defmodule AshIntegration.Outbound.Delivery.Route.RouteConfig do
           type: AshIntegration.Outbound.Delivery.Route.KafkaRoute,
           tag: :type,
           tag_value: :kafka
+        ],
+        email: [
+          type: AshIntegration.Outbound.Delivery.Route.EmailRoute,
+          tag: :type,
+          tag_value: :email
         ]
       ],
       storage: :map_with_tag

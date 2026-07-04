@@ -12,6 +12,11 @@ defmodule AshIntegration.Transport.TransportConfig do
           type: AshIntegration.Transport.KafkaConfig,
           tag: :type,
           tag_value: :kafka
+        ],
+        email: [
+          type: AshIntegration.Transport.EmailConfig,
+          tag: :type,
+          tag_value: :email
         ]
       ],
       storage: :map_with_tag

@@ -159,6 +159,22 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     })
   end
 
+  defp preseed(:email, config, subscription, envelope, _created_at) do
+    route = email_route(subscription.route_config)
+
+    # No body/subject default: email is human-facing, so the transform renders the
+    # subject and text/html body (and usually the recipients) from the event. The
+    # route's static recipients/subject are the fallbacks it starts from. Wire
+    # metadata renders as `x-`-prefixed mail headers, mirroring the HTTP transport.
+    drop_nils(%{
+      "from" => config.from,
+      "to" => route.to,
+      "cc" => route.cc,
+      "subject" => route.subject,
+      "headers" => preseed_headers(config, envelope, &"x-#{&1}")
+    })
+  end
+
   # The full header set the library sends EXCEPT the secret-derived signature
   # (added post-transform). Wire metadata + content-type win the case-insensitive
   # de-dup over a colliding connection-static header, so a static header can't
@@ -203,6 +219,28 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
          "headers" => headers,
          "value" => normalize_body(Map.get(result, "value"))
        }}
+    end
+  end
+
+  defp finalize(:email, config, result, _created_at) do
+    with {:ok, headers} <- normalize_headers(result["headers"]),
+         {:ok, from} <- normalize_address(result["from"] || config.from, "from"),
+         {:ok, to} <- normalize_recipients(result["to"], "to", required: true),
+         {:ok, cc} <- normalize_recipients(result["cc"], "cc", required: false),
+         {:ok, bcc} <- normalize_recipients(result["bcc"], "bcc", required: false),
+         {:ok, subject} <- normalize_subject(result["subject"]),
+         {:ok, html, text} <- normalize_bodies(result["html"], result["text"]) do
+      {:ok,
+       drop_nils(%{
+         "from" => from,
+         "to" => to,
+         "cc" => cc,
+         "bcc" => bcc,
+         "subject" => subject,
+         "html" => html,
+         "text" => text,
+         "headers" => headers
+       })}
     end
   end
 
@@ -303,6 +341,123 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     {:error, "the transform's timestamp must be an integer (epoch ms), got #{inspect(other)}"}
   end
 
+  # ── Email normalization (recipients/subject/body, header-injection safe) ─────
+
+  # An address (`from`) or a recipient carries a real risk the other transports
+  # don't: a raw CR/LF injects arbitrary SMTP headers. Reject control chars on
+  # every address, recipient, and the subject at this boundary so a transform
+  # built from untrusted event data can't smuggle headers.
+  defp normalize_address(value, field) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" -> {:error, "email delivery requires a #{field} address"}
+      control_char?(trimmed) -> {:error, "the transform's #{field} contains a control character"}
+      true -> {:ok, trimmed}
+    end
+  end
+
+  defp normalize_address(nil, field),
+    do:
+      {:error,
+       "email delivery requires a #{field} address (set it on the connection or transform)"}
+
+  defp normalize_address(other, field),
+    do: {:error, "the transform's #{field} must be a string, got #{inspect(other)}"}
+
+  defp normalize_recipients(value, field, opts) do
+    case recipient_list(value) do
+      {:ok, []} ->
+        if opts[:required],
+          do: {:error, "email delivery requires at least one #{field} recipient"},
+          else: {:ok, nil}
+
+      {:ok, list} ->
+        {:ok, list}
+
+      {:error, bad} ->
+        {:error, "the transform's #{field}[#{inspect(bad)}] must be a non-empty address string"}
+
+      :error ->
+        {:error, "the transform's #{field} must be a string or a list of strings"}
+    end
+  end
+
+  # A single string is one recipient; a Lua array decodes to a list. Each entry
+  # must be a non-empty, control-char-free string.
+  defp recipient_list(nil), do: {:ok, []}
+  defp recipient_list(value) when is_binary(value), do: recipient_list([value])
+
+  defp recipient_list(values) when is_list(values) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
+      case classify_recipient(value) do
+        :skip -> {:cont, {:ok, acc}}
+        {:ok, address} -> {:cont, {:ok, [address | acc]}}
+        :error -> {:halt, {:error, value}}
+      end
+    end)
+    |> case do
+      {:ok, list} -> {:ok, Enum.reverse(list)}
+      error -> error
+    end
+  end
+
+  defp recipient_list(_other), do: :error
+
+  defp classify_recipient(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" -> :skip
+      control_char?(trimmed) -> :error
+      true -> {:ok, trimmed}
+    end
+  end
+
+  defp classify_recipient(_other), do: :error
+
+  defp normalize_subject(value) when is_binary(value) do
+    cond do
+      String.trim(value) == "" ->
+        {:error, "email delivery requires a subject (set result.subject)"}
+
+      control_char_no_tab?(value) ->
+        {:error, "the transform's subject contains a control character"}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
+  defp normalize_subject(nil),
+    do: {:error, "email delivery requires a subject (set result.subject)"}
+
+  defp normalize_subject(other),
+    do: {:error, "the transform's subject must be a string, got #{inspect(other)}"}
+
+  # At least one of html/text must be present. Each, when set, must be a string.
+  defp normalize_bodies(html, text) do
+    with {:ok, html} <- normalize_body_part(html, "html"),
+         {:ok, text} <- normalize_body_part(text, "text") do
+      if is_nil(html) and is_nil(text) do
+        {:error, "email delivery requires an html or text body"}
+      else
+        {:ok, html, text}
+      end
+    end
+  end
+
+  defp normalize_body_part(nil, _field), do: {:ok, nil}
+  defp normalize_body_part("", _field), do: {:ok, nil}
+  defp normalize_body_part(value, _field) when is_binary(value), do: {:ok, value}
+
+  defp normalize_body_part(other, field),
+    do: {:error, "the transform's #{field} body must be a string, got #{inspect(other)}"}
+
+  defp control_char?(string), do: String.match?(string, ~r/[\x00-\x1f\x7f]/)
+  # Subjects may legitimately contain a tab; still reject CR/LF and other controls.
+  defp control_char_no_tab?(string), do: String.match?(string, ~r/[\x00-\x08\x0a-\x1f\x7f]/)
+
   # Store the body/value as the decoded TERM (encoding happens once at delivery).
   # An empty or unset body (nil, or an empty map/list — which Lua can't tell
   # apart) is normalized to `nil` so the stored descriptor reads cleanly
@@ -317,6 +472,9 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
 
   defp kafka_topic(%Ash.Union{type: :kafka, value: route}), do: route.topic
   defp kafka_topic(_), do: nil
+
+  defp email_route(%Ash.Union{type: :email, value: route}), do: route
+  defp email_route(_), do: %{to: nil, cc: nil, subject: nil}
 
   defp drop_nils(map), do: :maps.filter(fn _key, value -> not is_nil(value) end, map)
 end

@@ -55,4 +55,36 @@ defmodule Example.Outbound.ConnectionSecretParamsTest do
     refute Map.has_key?(tc["signing"], "secret")
     refute Map.has_key?(tc["auth"], "token")
   end
+
+  test "a blank Email SMTP password is dropped so it doesn't overwrite the stored one" do
+    params = %{
+      "transport_config" => %{
+        "_union_type" => "email",
+        "from" => "bot@acme.com",
+        "adapter" => %{"_union_type" => "smtp", "relay" => "smtp.acme.com", "password" => ""}
+      }
+    }
+
+    tc = Helpers.strip_blank_secrets(params)["transport_config"]
+
+    refute Map.has_key?(tc["adapter"], "password")
+    assert tc["adapter"]["relay"] == "smtp.acme.com"
+  end
+
+  test "a present Email SMTP password is kept" do
+    params = %{
+      "transport_config" => %{
+        "_union_type" => "email",
+        "adapter" => %{
+          "_union_type" => "smtp",
+          "relay" => "smtp.acme.com",
+          "password" => "hunter2"
+        }
+      }
+    }
+
+    tc = Helpers.strip_blank_secrets(params)["transport_config"]
+
+    assert tc["adapter"]["password"] == "hunter2"
+  end
 end

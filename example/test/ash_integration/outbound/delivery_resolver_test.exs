@@ -378,6 +378,120 @@ defmodule Example.Outbound.DeliveryResolverTest do
     end
   end
 
+  describe "Email" do
+    test "the transform renders recipients, subject, and both bodies", %{owner: owner} do
+      dest = email_connection!(owner)
+
+      script = """
+      function transform(event, defaults)
+        defaults.to = {"ops@acme.com", "sre@acme.com"}
+        defaults.cc = {"lead@acme.com"}
+        defaults.subject = "Stock changed"
+        defaults.html = "<b>changed</b>"
+        defaults.text = "changed"
+        return defaults
+      end
+      """
+
+      sub = subscription!(dest, "stock.changed", script)
+      {:ok, d} = resolve(dest, sub, %{"q" => 1})
+
+      assert d["from"] == "notifications@acme.com"
+      assert d["to"] == ["ops@acme.com", "sre@acme.com"]
+      assert d["cc"] == ["lead@acme.com"]
+      assert d["subject"] == "Stock changed"
+      assert d["html"] == "<b>changed</b>"
+      assert d["text"] == "changed"
+      # Wire metadata renders as x-prefixed mail headers, like HTTP.
+      assert d["headers"]["x-event-type"] == "stock.changed"
+    end
+
+    test "the route's static recipients/subject seed the defaults", %{owner: owner} do
+      dest = email_connection!(owner)
+
+      route = %{type: :email, to: ["ops@acme.com"], subject: "Default subject"}
+
+      sub =
+        email_subscription!(
+          dest,
+          "stock.changed",
+          "function transform(event, defaults) defaults.text = 'hi' return defaults end",
+          route
+        )
+
+      {:ok, d} = resolve(dest, sub, %{})
+
+      assert d["to"] == ["ops@acme.com"]
+      assert d["subject"] == "Default subject"
+      assert d["text"] == "hi"
+    end
+
+    test "a no-op transform parks: recipients must come from the route or transform",
+         %{owner: owner} do
+      dest = email_connection!(owner)
+      sub = subscription!(dest, "stock.changed", "-- noop")
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "at least one to recipient"
+    end
+
+    test "a missing subject parks the delivery", %{owner: owner} do
+      dest = email_connection!(owner)
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          "function transform(event, defaults) defaults.to = {'a@x.com'} defaults.text = 'hi' return defaults end"
+        )
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "requires a subject"
+    end
+
+    test "a missing body (no html and no text) parks the delivery", %{owner: owner} do
+      dest = email_connection!(owner)
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          "function transform(event, defaults) defaults.to = {'a@x.com'} defaults.subject = 'Hi' return defaults end"
+        )
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "requires an html or text body"
+    end
+
+    test "a CR/LF in the subject parks (SMTP header injection guard)", %{owner: owner} do
+      dest = email_connection!(owner)
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          ~s|function transform(event, defaults) defaults.to = {"a@x.com"} defaults.text = "hi" defaults.subject = "Hi\\r\\nBcc: evil@x.com" return defaults end|
+        )
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "control character"
+    end
+
+    test "a CR/LF in a recipient parks (SMTP header injection guard)", %{owner: owner} do
+      dest = email_connection!(owner)
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          ~s|function transform(event, defaults) defaults.to = {"a@x.com\\r\\nBcc: evil@x.com"} defaults.subject = "Hi" defaults.text = "hi" return defaults end|
+        )
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "address string"
+    end
+  end
+
   # The transform script is validated at SAVE time (not just at dispatch) by
   # delegating to the runtime through the Transformer seam, so a malformed script
   # is a clean field error on the form rather than a parked delivery later.
@@ -578,6 +692,32 @@ defmodule Example.Outbound.DeliveryResolverTest do
       |> maybe_put(:signing, stripe_signing(opts[:signing_secret], "signature"))
 
     connection!(owner, config)
+  end
+
+  defp email_connection!(owner, opts \\ []) do
+    config = %{
+      type: :email,
+      from: Keyword.get(opts, :from, "notifications@acme.com"),
+      adapter: %{type: "smtp", relay: "smtp.acme.com", port: 587}
+    }
+
+    connection!(owner, config)
+  end
+
+  defp email_subscription!(dest, event_type, transform_source, route_config) do
+    Subscription
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        connection_id: dest.id,
+        event_type: event_type,
+        version: 1,
+        transform_source: transform_source,
+        route_config: route_config
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
   end
 
   defp connection!(owner, transport_config) do
