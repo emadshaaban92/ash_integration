@@ -31,6 +31,7 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   use GenServer
 
   require Ash.Expr
+  require Ash.Query
   require Logger
 
   alias AshIntegration.Outbound.Delivery.Scheduler
@@ -262,17 +263,34 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     end
   end
 
-  # sobelow_skip ["SQL.Query"]
+  # One bulk `:expire` through Ash (not raw SQL) so `updated_at` bumps and host
+  # notifiers see the transition. The query-side guard (`state == :failed`,
+  # `terminal_reason IS NULL`) is the action's precondition, pushed here the same
+  # way the scheduler pushes its promotion guards; `SetAttribute` is
+  # atomic-capable, so `:atomic` runs this as a single UPDATE.
   defp expire_older_than(age_ms) do
-    sql = """
-    UPDATE #{ed_table()}
-    SET terminal_reason = 'expired'
-    WHERE state = 'failed'
-      AND terminal_reason IS NULL
-      AND created_at < now() - make_interval(secs => $1)
-    """
+    cutoff = DateTime.add(DateTime.utc_now(), -age_ms, :millisecond)
 
-    %{num_rows: n} = query!(sql, [age_ms / 1000])
+    result =
+      AshIntegration.event_delivery_resource()
+      |> Ash.Query.filter(state == :failed and is_nil(terminal_reason) and created_at < ^cutoff)
+      |> Ash.bulk_update(:expire, %{},
+        strategy: [:atomic, :stream],
+        authorize?: false,
+        return_records?: true,
+        return_errors?: true,
+        notify?: true
+      )
+
+    n =
+      case result do
+        %Ash.BulkResult{records: records} when is_list(records) ->
+          length(records)
+
+        %Ash.BulkResult{errors: errors} ->
+          Logger.error("Outbound delivery: expiry sweep failed: #{inspect(errors)}")
+          0
+      end
 
     if n > 0 do
       Logger.warning(

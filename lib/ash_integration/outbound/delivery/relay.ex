@@ -30,7 +30,8 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
       while suspended (a deterministic rejection can't recover);
     * retryable on a SUSPENDED entity → no backoff cursor, logged `:probe` — the
       recovery probe (not the row) paces the next try;
-    * retryable on a HEALTHY entity → `next_attempt_at` durable backoff, logged
+    * retryable on a HEALTHY entity → `next_attempt_at` durable backoff (the
+      server's clamped `Retry-After` when it sent one, else exponential), logged
       transport/response — the scheduler re-promotes once the backoff elapses.
 
   There is no attempt ceiling: a retryable failure retries indefinitely (paced by
@@ -201,14 +202,16 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
 
       true ->
         # A retryable failure on a healthy entity: record it `:failed` and stamp the
-        # durable `next_attempt_at` backoff so the scheduler re-promotes it once the
-        # backoff elapses (in-order-per-key — the `:failed` head holds the lane). The
-        # Log class is classified transport-vs-response from the metadata, scoping the
-        # connection/subscription health window.
+        # durable `next_attempt_at` backoff — the server's own `Retry-After` pacing
+        # when it sent one (clamped by the dispatcher), else exponential — so the
+        # scheduler re-promotes it once the backoff elapses (in-order-per-key — the
+        # `:failed` head holds the lane). The Log class is classified
+        # transport-vs-response from the metadata, scoping the connection/subscription
+        # health window.
         finalize(delivery, :record_failure, %{
           last_error: error_message,
           delivery_metadata: metadata,
-          next_attempt_at: Dispatcher.backoff_until(delivery.attempts)
+          next_attempt_at: Dispatcher.backoff_until(delivery.attempts, retry_after_ms(metadata))
         })
 
         :ok
@@ -248,6 +251,16 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
     case Map.get(metadata, :failure_class, Map.get(metadata, "failure_class")) do
       class when class in [:response, "response"] -> true
       _ -> false
+    end
+  end
+
+  # The server's own pacing for a retryable rejection (`Retry-After`, parsed to ms
+  # by the transport), handed to `Dispatcher.backoff_until/2` which clamps it.
+  # Missing/invalid ⇒ nil ⇒ ordinary exponential backoff.
+  defp retry_after_ms(metadata) do
+    case Map.get(metadata, :retry_after_ms, Map.get(metadata, "retry_after_ms")) do
+      ms when is_integer(ms) and ms >= 0 -> ms
+      _ -> nil
     end
   end
 

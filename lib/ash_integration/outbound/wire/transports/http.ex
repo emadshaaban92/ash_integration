@@ -110,15 +110,18 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
       {:ok, %Req.Response{status: status, body: resp}} when status in 200..299 ->
         {:ok, %{response_status: status, response_body: Utils.body_to_string(resp)}}
 
-      {:ok, %Req.Response{status: status, body: resp}} ->
+      {:ok, %Req.Response{status: status, body: body} = resp} ->
+        retryable = retryable_status?(status)
+
         {:error,
          %{
            failure_class: :response,
            error_message: "HTTP #{status}",
-           retryable: retryable_status?(status),
+           retryable: retryable,
            response_status: status,
-           response_body: Utils.body_to_string(resp)
-         }}
+           response_body: Utils.body_to_string(body)
+         }
+         |> put_retry_after(retryable, resp)}
 
       {:error, %Req.TransportError{reason: reason}} ->
         transport_error(reason)
@@ -135,6 +138,24 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
        error_message: "Network error: #{Utils.scrub_reason(reason)}",
        retryable: true
      }}
+  end
+
+  # On a RETRYABLE rejection (429/503/…), surface the server's own pacing —
+  # `Retry-After: <delay-seconds>` — as `retry_after_ms`, which the relay hands to
+  # `Dispatcher.backoff_until/2` to override the exponential backoff (clamped there
+  # to `backoff_max_ms`, so a hostile/buggy header can't park a lane indefinitely).
+  # Only the integer-seconds form is parsed; the rare HTTP-date form (and any
+  # unparsable value) is ignored and the ordinary exponential backoff paces the
+  # retry. A non-retryable rejection never carries it — there is no next attempt.
+  defp put_retry_after(metadata, false, _resp), do: metadata
+
+  defp put_retry_after(metadata, true, resp) do
+    with [value | _] <- Req.Response.get_header(resp, "retry-after"),
+         {seconds, ""} when seconds >= 0 <- Integer.parse(String.trim(value)) do
+      Map.put(metadata, :retry_after_ms, seconds * 1000)
+    else
+      _ -> metadata
+    end
   end
 
   # Which non-2xx statuses are worth retrying. A 5xx is a server-side hiccup; 408

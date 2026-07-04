@@ -39,6 +39,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
 
   require Logger
   require Ash.Expr
+  require Ash.Query
   import Ecto.Query
 
   alias AshIntegration.Outbound.Delivery.Dedup
@@ -97,7 +98,10 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   `(connection_id, event_key)` lane. Public so tests can drive it directly.
 
   `find_schedulable_events/1` already excludes blocked lanes (parked or
-  suspended head, in-flight slot taken), so every id it returns is promotable.
+  suspended head, in-flight slot taken), so every head it returns is promotable.
+  `:failed` heads (retry re-promotions — always a real `:schedule`, never
+  content-suppressed) are promoted in ONE guarded bulk update; `:pending` heads
+  go one-by-one because each needs the per-row content-suppression decision.
   We loop only while a full batch came back **and** we made progress, so a
   persistent failure can't spin.
 
@@ -108,17 +112,53 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   delivered one, so the next head promotes on the following pass.
   """
   def sweep do
-    ids = find_schedulable_events(@batch_size)
-    progress = Enum.count(ids, &(promote(&1) in [:scheduled, :suppressed]))
+    heads = find_schedulable_events(@batch_size)
+    {failed, pending} = Enum.split_with(heads, &(&1.state == :failed))
 
-    if length(ids) >= @batch_size and progress > 0, do: sweep(), else: :ok
+    progress =
+      bulk_schedule_failed(failed) +
+        Enum.count(pending, &(promote(&1.id) in [:scheduled, :suppressed]))
+
+    if length(heads) >= @batch_size and progress > 0, do: sweep(), else: :ok
   end
 
-  # Promote one ready head. A fresh (`:pending`) head is `:suppress`ed when its content
-  # is unchanged since the lane's last delivered body, else `:schedule`d; a `:failed`
-  # head is a retry re-promotion, always a real `:schedule`. The write is guarded on the
-  # row still being in the state the query saw (`apply_promotion/2` pushes `WHERE …
-  # state = <that>`), closing the read→write race — a clean no-op, not a resurrect.
+  # Re-promote the batch's `:failed` heads (retry re-promotions — always a real
+  # `:schedule`, never content-suppressed) in ONE guarded bulk UPDATE instead of a
+  # get+update round-trip per head. The query-side guard replays the eligibility the
+  # sweep saw — still `:failed` AND still non-terminal — so a row that raced away
+  # (finalized by another scheduler, or taken `:expired` by the age sweep between
+  # read and write) matches nothing: a clean no-op, not a resurrect. `:schedule`'s
+  # changes (`SetAttribute` + `ClearClaim`) are all atomic-capable, so `:atomic`
+  # runs this as a single UPDATE; notifications still fire for host subscribers.
+  defp bulk_schedule_failed([]), do: 0
+
+  defp bulk_schedule_failed(heads) do
+    ids = Enum.map(heads, & &1.id)
+
+    AshIntegration.event_delivery_resource()
+    |> Ash.Query.filter(id in ^ids and state == :failed and is_nil(terminal_reason))
+    |> Ash.bulk_update(:schedule, %{},
+      strategy: [:atomic, :stream],
+      authorize?: false,
+      return_records?: true,
+      return_errors?: true,
+      notify?: true
+    )
+    |> case do
+      %Ash.BulkResult{records: records} when is_list(records) ->
+        length(records)
+
+      %Ash.BulkResult{errors: errors} ->
+        Logger.error("Scheduler: bulk :failed-head promotion failed: #{inspect(errors)}")
+        0
+    end
+  end
+
+  # Promote one ready `:pending` head: `:suppress`ed when its content is unchanged
+  # since the lane's last delivered body, else `:schedule`d. The write is guarded on
+  # the row still being in the state the query saw (`apply_promotion/2` pushes
+  # `WHERE … state = <that>`), closing the read→write race — a clean no-op, not a
+  # resurrect.
   #
   # Deciding suppression HERE is correct and cheap: the lane has no in-flight row
   # (the query required the slot free), so the previous head is already terminal and
@@ -131,9 +171,8 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
       {:ok, %{state: :pending} = delivery} ->
         apply_promotion(delivery, if(suppress?(delivery), do: :suppress, else: :schedule))
 
-      # A `:failed` head is a retry re-promotion — always a real `:schedule` (never
-      # content-suppressed: a retry must reach the transport, and suppression only
-      # makes sense for a fresh head against its lane's last delivered body).
+      # A `:failed` head raced in behind a stale id (normally bulk-promoted above) —
+      # a retry re-promotion, always a real `:schedule`.
       {:ok, %{state: :failed} = delivery} ->
         apply_promotion(delivery, :schedule)
 
@@ -146,15 +185,17 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
     end
   end
 
-  # Guarded on the row still being in the state the query saw (`:pending` or `:failed`):
-  # the `Ash.Changeset.filter` pushes `WHERE … state = <that>` into the UPDATE, closing
-  # the read→write race (coalescing cancelled it, or another scheduler grabbed it) — a
-  # clean no-op, not a resurrect. The `{scheduled,failed}` unique index is the hard
-  # backstop against two active heads per lane.
+  # Guarded on the row still being in the state the query saw (`:pending` or `:failed`)
+  # AND still non-terminal: the `Ash.Changeset.filter` pushes `WHERE … state = <that>
+  # AND terminal_reason IS NULL` into the UPDATE, closing the read→write race
+  # (coalescing cancelled it, another scheduler grabbed it, or the age sweep took it
+  # `:expired` after the query saw it eligible) — a clean no-op, not a resurrect. The
+  # `{scheduled,failed}` unique index is the hard backstop against two active heads
+  # per lane.
   defp apply_promotion(delivery, action) do
     delivery
     |> Ash.Changeset.for_update(action, %{}, authorize?: false)
-    |> Ash.Changeset.filter(Ash.Expr.expr(state == ^delivery.state))
+    |> Ash.Changeset.filter(Ash.Expr.expr(state == ^delivery.state and is_nil(terminal_reason)))
     |> Ash.update(authorize?: false)
     |> case do
       {:ok, _} -> promoted_result(action)
@@ -219,7 +260,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
       |> run_heads()
 
     case heads do
-      [head_id] -> force_schedule(head_id)
+      [head] -> force_schedule(head.id)
       [] -> :none
     end
   end
@@ -236,7 +277,8 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   end
 
   # Promote a probe head as a real delivery (bypassing content suppression — a probe
-  # must hit the transport to be observed). Still guarded on `state == :pending`.
+  # must hit the transport to be observed). Still guarded on the state the read saw
+  # (`:pending` or a non-terminal `:failed`) via `apply_promotion/2`.
   defp force_schedule(head_id) do
     case Ash.get(AshIntegration.event_delivery_resource(), head_id, authorize?: false) do
       {:ok, delivery} ->
@@ -291,7 +333,9 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
       where: ^suspension,
       where: not exists(slot_taken()),
       where: not exists(older_undispatched()),
-      select: fragment("?::text", head.id)
+      # `state` rides along so the sweep can split `:failed` heads (bulk-promoted)
+      # from `:pending` ones (per-row suppression decision) without a re-read.
+      select: %{id: fragment("?::text", head.id), state: head.state}
     )
   end
 
