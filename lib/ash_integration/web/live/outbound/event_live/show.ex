@@ -29,7 +29,12 @@ defmodule AshIntegration.Web.Outbound.EventLive.Show do
         assign(socket,
           event: event,
           page_title: event.event_type,
-          can_redispatch: Helpers.can?({event, :mark_dispatched}, actor)
+          # Redispatch resets the outbox bookkeeping under system authority, so this
+          # is the only real authz gate — strict (fail-closed on an indeterminate
+          # policy). The gate checks `:mark_dispatched` (the host-facing "operator
+          # may un-stick this event" permission), while the write itself is the
+          # library-internal `:reset_dispatch`.
+          can_redispatch: Helpers.can_strict?({event, :mark_dispatched}, actor)
         )
 
       _ ->
@@ -43,7 +48,7 @@ defmodule AshIntegration.Web.Outbound.EventLive.Show do
   def handle_event("redispatch", _params, socket) do
     event = socket.assigns.event
 
-    if Helpers.can?({event, :mark_dispatched}, socket.assigns.current_user) do
+    if Helpers.can_strict?({event, :mark_dispatched}, socket.assigns.current_user) do
       do_redispatch(socket, event)
     else
       throw_unauthorized(socket)

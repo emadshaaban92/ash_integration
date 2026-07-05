@@ -23,5 +23,8 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery do
   """
 
   use Spark.Dsl.Extension,
-    transformers: [AshIntegration.Outbound.Delivery.EventDelivery.Transformer]
+    transformers: [
+      AshIntegration.Outbound.Delivery.EventDelivery.Transformer,
+      AshIntegration.Outbound.Delivery.EventDelivery.PolicyTransformer
+    ]
 end

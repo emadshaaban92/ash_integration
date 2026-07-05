@@ -135,6 +135,55 @@ defmodule AshIntegration.Test.FilteredByOwner do
   end
 end
 
+defmodule AshIntegration.Test.Checks.Indeterminate do
+  @moduledoc false
+  # A policy check that can never be decided strictly (a record-scoped / runtime
+  # check): `strict_check` returns `:unknown`, so `Ash.can?` resolves the policy to
+  # `:maybe`. This is the shape of "only deliveries of connections you own" — the
+  # indeterminate case the strict operator gate must treat as a denial.
+  use Ash.Policy.Check
+
+  @impl true
+  def describe(_opts), do: "indeterminate (always :maybe)"
+
+  @impl true
+  def strict_check(_actor, _context, _opts), do: {:ok, :unknown}
+end
+
+defmodule AshIntegration.Test.RecordScopedUpdate do
+  @moduledoc false
+  # A `:touch` action guarded by a record-scoped (`:maybe`) policy. A resource-level
+  # `Ash.can?({__MODULE__, :touch}, actor)` cannot be decided without the row, so it
+  # resolves to `:maybe`: the permissive default grants it, the strict gate denies.
+  use Ash.Resource,
+    domain: AshIntegration.Test.Domain,
+    data_layer: Ash.DataLayer.Simple,
+    authorizers: [Ash.Policy.Authorizer]
+
+  attributes do
+    uuid_v7_primary_key :id
+    attribute :owner_id, :string, public?: true, allow_nil?: true
+  end
+
+  actions do
+    defaults [:read]
+
+    update :touch do
+      accept []
+    end
+  end
+
+  policies do
+    policy action(:touch) do
+      authorize_if AshIntegration.Test.Checks.Indeterminate
+    end
+
+    policy action_type(:read) do
+      authorize_if always()
+    end
+  end
+end
+
 defmodule AshIntegration.Test.AccessingFromOnly do
   @moduledoc false
   # This resource is ONLY accessible through a relationship.

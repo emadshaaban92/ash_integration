@@ -7,6 +7,7 @@ defmodule AshIntegration.Test.Domain do
     resource AshIntegration.Test.RestrictedChild
     resource AshIntegration.Test.NestedPublic
     resource AshIntegration.Test.FilteredByOwner
+    resource AshIntegration.Test.RecordScopedUpdate
     resource AshIntegration.Test.AccessingFromOnly
     resource AshIntegration.Test.NoAuthorizerChild
   end
