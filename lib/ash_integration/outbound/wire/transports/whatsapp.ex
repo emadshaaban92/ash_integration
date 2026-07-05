@@ -55,13 +55,15 @@ defmodule AshIntegration.Outbound.Wire.Transports.WhatsApp do
 
   defp send_message(url, token, payload) do
     # Pin the graph host to a validated IP right before the send (the SSRF gate,
-    # shared with the HTTP transport); an unresolvable host fails as `:transport`.
+    # shared with the HTTP transport). A `:blocked` target is terminal; an
+    # `:unresolvable` host is a transient DNS condition and stays retryable (see
+    # `HttpWire.egress_error/2`).
     case Egress.pin(url) do
       {:ok, pinned_url, connect_options} ->
         do_send(pinned_url, token, payload, connect_options)
 
-      {:error, _category, reason} ->
-        HttpWire.egress_error(reason)
+      {:error, category, reason} ->
+        HttpWire.egress_error(category, reason)
     end
   end
 
@@ -137,6 +139,10 @@ defmodule AshIntegration.Outbound.Wire.Transports.WhatsApp do
   # Map a Meta Cloud API error response onto the two-level suspension contract,
   # keyed on `error.code` (verify against Meta's docs — the codes evolve):
   #
+  #   * 4 / 17 / 32 — Meta's GENERIC Graph throttling codes (application / user /
+  #     page request-limit reached). These arrive on an HTTP 400, so without an
+  #     explicit clause they'd defer to the 400 status and classify non-retryable;
+  #     they are throttling, not payload rejections, so treat them as retryable.
   #   * 429 / 130429 / 80007 / 131056 — rate / pair-rate limit → `:transport`,
   #     retryable (honor `Retry-After`): Meta is throttling, back off and retry.
   #   * 190 — access token expired/invalid → `:transport`, non-retryable: the
@@ -170,8 +176,9 @@ defmodule AshIntegration.Outbound.Wire.Transports.WhatsApp do
 
   # A recognized code fixes the outcome regardless of the HTTP status.
 
-  # Rate / pair-rate limits — Meta is throttling, retry (Retry-After honored).
-  defp classify(code, message, _status) when code in [429, 130_429, 80_007, 131_056],
+  # Rate / pair-rate limits + Meta's generic Graph throttling codes (4/17/32) —
+  # Meta is throttling, retry (Retry-After honored).
+  defp classify(code, message, _status) when code in [4, 17, 32, 429, 130_429, 80_007, 131_056],
     do: transport_error(message, code, true)
 
   # Access token expired/invalid — the connection credential is broken.

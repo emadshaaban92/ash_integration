@@ -63,7 +63,13 @@ defmodule AshIntegration.Transport.Signing do
            %{
              failure_class: :transport,
              error_message: "signing failed: #{message}",
-             retryable: true
+             # A signing-script failure (a bad return shape, an unencodable body, a
+             # raising callback) is DETERMINISTIC — it fails identically on every
+             # attempt, so retrying only burns the delivery's retry budget without
+             # any chance of succeeding. Mark it non-retryable, consistent with the
+             # config-error taxonomy elsewhere (`Utils.load_secret`, OAuth2, the
+             # TLS-options builders all classify equivalent errors as non-retryable).
+             retryable: false
            }}
       end
     end

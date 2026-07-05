@@ -11,6 +11,7 @@ defmodule Example.Outbound.TransportHttpTest do
 
   require Ash.Query
 
+  alias AshIntegration.Transport.Signing
   alias Example.Outbound.{Connection, Event, EventDelivery, Subscription}
 
   import Example.IntegrationHelpers, only: [stub_webhook_capture: 1, stub_webhook_failure: 1]
@@ -187,6 +188,31 @@ defmodule Example.Outbound.TransportHttpTest do
 
     assert headers["x-signature"] == expected
     assert headers["x-signed-by"] == "custom"
+  end
+
+  test "a deterministic custom-signing failure is a NON-retryable transport error" do
+    # A script whose `string_to_sign` returns a non-string fails identically on
+    # every attempt — it is a config/authoring error, not a transient one. It must
+    # classify NON-retryable so it doesn't burn the delivery's whole retry budget
+    # (mirroring how secret/TLS config errors are classified elsewhere).
+    dest =
+      create_connection!(create_user!(),
+        signing: %{
+          type: "custom",
+          secret: "topsecret",
+          source: "function string_to_sign(ctx) return 123 end",
+          algorithm: "sha256",
+          encoding: "hex"
+        }
+      )
+
+    %Ash.Union{type: :http, value: config} = dest.transport_config
+    ctx = %{body: "{}", data: %{}, now: Signing.now_context()}
+
+    assert {:error, %{failure_class: :transport, retryable: false, error_message: msg}} =
+             Signing.run(config.signing, ctx)
+
+    assert msg =~ "signing failed"
   end
 
   test "auth is injected live at delivery from the encrypted connection (never in the descriptor)" do

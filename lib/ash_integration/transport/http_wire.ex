@@ -91,11 +91,22 @@ defmodule AshIntegration.Transport.HttpWire do
   end
 
   @doc """
-  A blocked egress target won't fix itself on retry — surface it as a
-  non-retryable `:transport` failure rather than looping.
+  Classify an egress `pin`/`classify` rejection onto the transport contract,
+  honoring the category `Egress` deliberately distinguishes:
+
+    * `:unresolvable` — a transient DNS/connectivity condition (nxdomain, no
+      addresses). Retryable `:transport`: the SAME failure is retryable when
+      egress blocking is off (it surfaces as an ordinary Req transport error), so
+      turning blocking ON must not make a DNS blip permanently fail the delivery.
+    * `:blocked` / `:invalid` — a deterministic egress-policy rejection or an
+      unparseable URL. Non-retryable `:transport`: it won't fix itself on retry.
   """
-  @spec egress_error(String.t()) :: {:error, map()}
-  def egress_error(reason) do
+  @spec egress_error(:unresolvable | :blocked | :invalid, String.t()) :: {:error, map()}
+  def egress_error(:unresolvable, reason) do
+    {:error, %{failure_class: :transport, error_message: reason, retryable: true}}
+  end
+
+  def egress_error(_category, reason) do
     {:error, %{failure_class: :transport, error_message: reason, retryable: false}}
   end
 end

@@ -22,6 +22,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   require Logger
 
   alias AshIntegration.Transport.Egress
+  alias AshIntegration.Transport.HttpWire
   alias AshIntegration.Transport.TlsOptions
   alias AshIntegration.Transport.Utils
 
@@ -304,20 +305,43 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   end
 
   @doc false
-  # Map a Swoosh/gen_smtp failure onto the two-level suspension contract. gen_smtp
-  # nests its reason inside `:retries_exceeded`/`:network_failure`, so unwrap first.
+  # Map a Swoosh/gen_smtp/MsGraph failure onto the two-level suspension contract.
+  # gen_smtp nests its reason inside `:retries_exceeded`/`:network_failure`/
+  # `:no_more_hosts`/`:send`, so unwrap those first.
   #
-  #   * `:permanent_failure` (5xx SMTP — bad recipient, rejected content) →
-  #     `:response`, non-retryable: the target rejected THIS payload, suspend the
-  #     subscription.
+  #   * `:permanent_failure` (5xx SMTP — bad recipient, rejected content, an
+  #     `:auth_failed` rejection) → `:response`, non-retryable: the target rejected
+  #     THIS payload/credential, suspend the subscription.
   #   * `:temporary_failure` (4xx SMTP — greylisting, rate limit) → `:response`,
   #     retryable: fine to try again later.
-  #   * everything connectivity-shaped (refused, timeout, DNS, no hosts) →
-  #     `:transport`, retryable: couldn't reach the relay, suspend the connection.
+  #   * everything connectivity-shaped (refused, timeout, DNS, a `:no_more_hosts`/
+  #     `:send` with a non-permanent inner reason) → `:transport`, retryable:
+  #     couldn't reach the relay, suspend the connection.
+  #   * a Microsoft Graph `{status, body}` rejection → classified on the HTTP
+  #     status (see `graph_error/2`).
   #   * unknown reasons default to `:transport`/retryable, mirroring the HTTP
   #     transport's treatment of an unrecognized network error.
+  #
+  # gen_smtp reports permanent/temporary failures under two tags, from two phases,
+  # and BOTH carry the actual failure as their inner reason:
+  #
+  #   * `:no_more_hosts` — a CONNECTION-setup failure (greeting/EHLO/STARTTLS/AUTH),
+  #     e.g. `{:error, :no_more_hosts, {:permanent_failure, host, msg}}`.
+  #   * `:send` — a MESSAGE-phase failure (MAIL FROM / RCPT TO / DATA), e.g.
+  #     `{:error, :send, {:permanent_failure, host, "550 no such user"}}`. This is
+  #     where the common rejections live — a bad recipient or rejected content is a
+  #     RCPT TO/DATA 5xx, so it arrives under `:send`, not `:no_more_hosts`.
+  #
+  # Swoosh re-wraps the gen_smtp 3-tuple into a 2-tuple (`{:error, type, message} ->
+  # {:error, {type, message}}`), so `classify_error/1` sees `{:no_more_hosts, inner}`
+  # / `{:send, inner}`. Unwrap both (like `:retries_exceeded`) so a permanent
+  # rejection reaches `:response`/non-retryable rather than the retryable-transport
+  # catch-all, which would retry it forever and suspend the connection instead of
+  # the subscription.
   def classify_error({:retries_exceeded, inner}), do: classify_error(inner)
   def classify_error({:network_failure, _host, inner}), do: classify_error(inner)
+  def classify_error({:no_more_hosts, inner}), do: classify_error(inner)
+  def classify_error({:send, inner}), do: classify_error(inner)
   def classify_error({:error, reason}), do: classify_error(reason)
 
   def classify_error({:permanent_failure, _host, message}),
@@ -326,11 +350,13 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   def classify_error({:temporary_failure, _host, message}),
     do: response_error(message, true)
 
-  def classify_error({:no_more_hosts, _reason} = reason),
-    do: transport_error(reason, true)
-
   def classify_error(reason) when reason in [:no_credentials, :auth_failed],
     do: transport_error(reason, false)
+
+  # Microsoft Graph (`Swoosh.Adapters.MsGraph`) surfaces an API rejection as
+  # `{:error, {status, body}}` — a 2-tuple with an integer status, unlike the
+  # gen_smtp shapes above. Classify it on the status.
+  def classify_error({status, body}) when is_integer(status), do: graph_error(status, body)
 
   def classify_error(reason), do: transport_error(reason, true)
 
@@ -349,4 +375,55 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
       retryable: retryable
     }
   end
+
+  # Classify a Microsoft Graph `{status, body}` rejection on the HTTP status,
+  # mirroring the HTTP transport's `retryable_status?/1` semantics:
+  #
+  #   * 401 / 403 → `:transport`, non-retryable: a revoked/insufficient credential
+  #     is broken at the CONNECTION level (won't fix on retry), suspend the
+  #     connection — the same call as WhatsApp's token-failure code 190.
+  #   * 5xx / 408 / 429 → `:transport`, retryable: a transient server-side or
+  #     throttling condition, back off and retry.
+  #   * every other 4xx (400 bad recipient, 404, 413, …) → `:response`,
+  #     non-retryable: the target rejected THIS payload, suspend the subscription.
+  #
+  # NB: Swoosh's MsGraph adapter discards the response headers, so a server
+  # `Retry-After` is not available on this path and cannot be honored (unlike the
+  # HTTP/WhatsApp transports, which see the full `Req.Response`).
+  defp graph_error(status, body) when status in [401, 403],
+    do: graph_transport_error(status, body, false)
+
+  defp graph_error(status, body) do
+    if HttpWire.retryable_status?(status),
+      do: graph_transport_error(status, body, true),
+      else: graph_response_error(status, body)
+  end
+
+  defp graph_transport_error(status, body, retryable) do
+    %{
+      failure_class: :transport,
+      error_message: "Microsoft Graph error (HTTP #{status})#{graph_detail(body)}",
+      retryable: retryable
+    }
+  end
+
+  defp graph_response_error(status, body) do
+    %{
+      failure_class: :response,
+      error_message: "Microsoft Graph rejected (HTTP #{status})#{graph_detail(body)}",
+      retryable: false
+    }
+  end
+
+  # Pull a human-readable detail from a Graph error body — the `error.message`
+  # from the standard `{"error" => …}` envelope, or a bare string body (e.g. the
+  # documented "Invalid base64 string for MIME content." on a 400) — scrubbed
+  # before it lands in a queryable column. Anything else contributes no detail.
+  defp graph_detail(%{"error" => %{"message" => message}}) when is_binary(message),
+    do: ": #{Utils.scrub_reason(message)}"
+
+  defp graph_detail(body) when is_binary(body) and body != "",
+    do: ": #{Utils.scrub_reason(body)}"
+
+  defp graph_detail(_body), do: ""
 end

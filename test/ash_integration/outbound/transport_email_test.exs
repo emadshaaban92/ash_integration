@@ -224,10 +224,75 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
                Email.classify_error({:network_failure, "mx", {:error, :econnrefused}})
     end
 
+    test "a :no_more_hosts wrapping a permanent_failure is a non-retryable response, not retryable transport" do
+      # gen_smtp returns a hard 5xx rejection as
+      # `{:error, :no_more_hosts, {:permanent_failure, host, msg}}`; Swoosh's SMTP
+      # adapter re-wraps it as `{:error, {:no_more_hosts, {:permanent_failure, …}}}`.
+      # The `:no_more_hosts` reason must be unwrapped to reach the permanent-failure
+      # classification (response, non-retryable) rather than being blanket-treated as
+      # a retryable connection error — otherwise a 550 is retried forever and
+      # suspends the connection instead of the subscription.
+      assert %{failure_class: :response, retryable: false, error_message: msg} =
+               Email.classify_error(
+                 {:no_more_hosts, {:permanent_failure, "mx.acme.com", "550 no such user"}}
+               )
+
+      assert msg =~ "550 no such user"
+    end
+
+    test "a :no_more_hosts wrapping an auth failure is a non-retryable response" do
+      # Auth rejection arrives as `{:permanent_failure, host, :auth_failed}` nested
+      # under `:no_more_hosts` (see gen_smtp_client.erl) — a broken credential the
+      # relay rejected, non-retryable.
+      assert %{failure_class: :response, retryable: false, error_message: msg} =
+               Email.classify_error(
+                 {:no_more_hosts, {:permanent_failure, "mx.acme.com", :auth_failed}}
+               )
+
+      assert msg =~ "auth_failed"
+    end
+
+    test "a :no_more_hosts wrapping a temporary_failure is a retryable response" do
+      assert %{failure_class: :response, retryable: true} =
+               Email.classify_error(
+                 {:no_more_hosts, {:temporary_failure, "mx.acme.com", "451 greylisted"}}
+               )
+    end
+
+    test "a :send wrapping a permanent_failure is a non-retryable response (the common RCPT/DATA 5xx path)" do
+      # A bad recipient / rejected content fails during MAIL FROM / RCPT TO / DATA,
+      # so gen_smtp returns it as `{:error, :send, {:permanent_failure, host, msg}}`
+      # (Swoosh re-wraps → `{:send, {:permanent_failure, …}}`) — the `:send` tag, NOT
+      # `:no_more_hosts` (which is connection-setup only). It must be unwrapped too,
+      # or the most common permanent rejection stays retryable transport.
+      assert %{failure_class: :response, retryable: false, error_message: msg} =
+               Email.classify_error(
+                 {:send, {:permanent_failure, "mx.acme.com", "550 no such user"}}
+               )
+
+      assert msg =~ "550 no such user"
+    end
+
+    test "a :send wrapping a temporary_failure is a retryable response" do
+      assert %{failure_class: :response, retryable: true} =
+               Email.classify_error(
+                 {:send, {:temporary_failure, "mx.acme.com", "451 greylisted"}}
+               )
+    end
+
+    test "a :send wrapping a non-failure inner reason still classifies as retryable transport" do
+      # Guards the fall-through direction: an unrecognized inner reason under `:send`
+      # unwraps and lands on the retryable-transport catch-all, not a response error.
+      assert %{failure_class: :transport, retryable: true} =
+               Email.classify_error({:send, :timeout})
+    end
+
     test "a connection-level failure suspends the connection (transport, retryable)" do
       assert %{failure_class: :transport, retryable: true} =
                Email.classify_error(:timeout)
 
+      # A genuine no-hosts condition (DNS/MX resolution failed, no permanent-failure
+      # inner reason) still classifies as retryable transport after unwrapping.
       assert %{failure_class: :transport, retryable: true} =
                Email.classify_error({:no_more_hosts, :nxdomain})
     end
@@ -235,6 +300,44 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
     test "an auth/credential failure is a non-retryable transport error" do
       assert %{failure_class: :transport, retryable: false} =
                Email.classify_error(:no_credentials)
+    end
+  end
+
+  # Microsoft Graph (Swoosh.Adapters.MsGraph) surfaces an API rejection as
+  # `{:error, {status, body}}`, a shape none of the gen_smtp clauses match — so
+  # before this every Graph error hit the catch-all and became a retryable
+  # `:transport` error (a 400 bad recipient or a revoked 401 credential retried
+  # forever). Classify on the HTTP status instead.
+  describe "classify_error/1 → Microsoft Graph {status, body}" do
+    test "a 401/403 is a non-retryable transport error (broken credential, suspend connection)" do
+      for status <- [401, 403] do
+        assert %{failure_class: :transport, retryable: false} =
+                 Email.classify_error({status, %{"error" => %{"message" => "revoked"}}})
+      end
+    end
+
+    test "a 400 bad-recipient is a non-retryable response (suspend subscription)" do
+      assert %{failure_class: :response, retryable: false, error_message: msg} =
+               Email.classify_error({400, "Invalid base64 string for MIME content."})
+
+      assert msg =~ "Microsoft Graph rejected (HTTP 400)"
+      assert msg =~ "Invalid base64 string"
+    end
+
+    test "a structured error body surfaces the error.message detail" do
+      assert %{failure_class: :response, error_message: msg} =
+               Email.classify_error(
+                 {400, %{"error" => %{"code" => "ErrorInvalidRecipients", "message" => "bad to"}}}
+               )
+
+      assert msg =~ "bad to"
+    end
+
+    test "a 429 / 5xx is a retryable transport error" do
+      for status <- [429, 500, 503] do
+        assert %{failure_class: :transport, retryable: true} =
+                 Email.classify_error({status, %{}})
+      end
     end
   end
 

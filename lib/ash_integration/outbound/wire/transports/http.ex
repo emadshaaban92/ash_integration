@@ -81,13 +81,14 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
 
     # Pin the (possibly signing-rewritten) URL to a validated IP right before the
     # send — the live SSRF gate against DNS rebinding (the checked address is the
-    # connected address). An unresolvable URL fails here as a `:transport` error.
+    # connected address). A `:blocked` target is terminal; an `:unresolvable` host
+    # is a transient DNS condition and stays retryable (see `egress_error/2`).
     case AshIntegration.Transport.Egress.pin(url) do
       {:ok, url, connect_options} ->
         do_send(event, config, final_body, applied.headers, auth, url, connect_options)
 
-      {:error, _category, reason} ->
-        HttpWire.egress_error(reason)
+      {:error, category, reason} ->
+        HttpWire.egress_error(category, reason)
     end
   end
 

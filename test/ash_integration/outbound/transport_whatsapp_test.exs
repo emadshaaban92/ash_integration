@@ -85,6 +85,16 @@ defmodule AshIntegration.Outbound.Wire.Transports.WhatsAppTest do
       end
     end
 
+    test "generic Graph throttling codes (4/17/32) on a 400 are retryable, not terminal" do
+      # Meta's application/user/page request-limit codes arrive with HTTP 400. They
+      # are throttling, not payload rejections, so they must classify retryable
+      # rather than deferring to the deterministic-400 status baseline.
+      for code <- [4, 17, 32] do
+        assert %{failure_class: :transport, retryable: true} =
+                 WhatsApp.classify_error(error(code), 400)
+      end
+    end
+
     test "an expired/invalid access token is a non-retryable transport error (suspend connection)" do
       assert %{failure_class: :transport, retryable: false, error_message: msg} =
                WhatsApp.classify_error(error(190), 401)
