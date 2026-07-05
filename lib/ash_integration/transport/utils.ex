@@ -50,6 +50,14 @@ defmodule AshIntegration.Transport.Utils do
   @max_error_len 300
   @max_response_body_len 4_096
 
+  # The stored/displayed copy of a reflected response body (persisted in
+  # `EventDelivery.delivery_metadata`, rendered on the dashboard) is the
+  # full-detail view, so it keeps a much more generous ceiling than the 4 KB
+  # audit Log. This bounds only pathological multi-MB / gzip-bomb bodies (Req
+  # auto-decompresses); normal responses pass through whole. Configurable via
+  # `config :ash_integration, max_stored_response_body_len: <bytes>`.
+  @default_max_stored_response_body_len 64 * 1_024
+
   @doc """
   Whether a header name carries a secret value (matched case-insensitively).
   """
@@ -81,10 +89,14 @@ defmodule AshIntegration.Transport.Utils do
   def redact_descriptor(descriptor), do: descriptor
 
   @doc """
-  Truncate a reflected response body for storage and mask anything that looks like
-  a reflected secret header (`authorization: …`, `x-signature: …`). A hostile or
-  buggy target can echo the request's auth/signature headers back in its body; we
-  store at most #{@max_response_body_len} bytes with those values masked.
+  Truncate a reflected response body for the **audit Log** copy and mask anything
+  that looks like a reflected secret header. A hostile or buggy target can echo the
+  request's auth/signature headers back in its body; the Log stores at most
+  #{@max_response_body_len} bytes with those values masked.
+
+  This is the small, queryable audit copy. The fuller stored/displayed copy in
+  `delivery_metadata` uses `mask_and_cap_response_body/1` (same masking, a far more
+  generous cap) — masking is idempotent, so re-masking that copy here is a no-op.
   """
   @spec redact_response_body(String.t() | nil) :: String.t() | nil
   def redact_response_body(nil), do: nil
@@ -92,10 +104,43 @@ defmodule AshIntegration.Transport.Utils do
   def redact_response_body(body) when is_binary(body) do
     body
     |> truncate(@max_response_body_len)
-    |> mask_reflected_secrets()
+    |> mask_response_body()
   end
 
-  defp mask_reflected_secrets(body) do
+  @doc """
+  Mask + cap a reflected response body for the **stored/displayed** copy persisted
+  in `EventDelivery.delivery_metadata` and rendered on the dashboard.
+
+  Same reflected-secret masking as `redact_response_body/1`, but with a much more
+  generous, configurable ceiling (`@default_max_stored_response_body_len`,
+  overridable via `config :ash_integration, max_stored_response_body_len:`) and NO
+  4 KB truncation — the dashboard is the full-detail view, so a normal response
+  passes through whole and only pathological multi-MB bodies are capped.
+  """
+  @spec mask_and_cap_response_body(String.t() | nil) :: String.t() | nil
+  def mask_and_cap_response_body(nil), do: nil
+
+  def mask_and_cap_response_body(body) when is_binary(body) do
+    body
+    |> truncate(max_stored_response_body_len())
+    |> mask_response_body()
+  end
+
+  @doc """
+  Mask anything in a response `body` that looks like a reflected secret header
+  (`authorization: …`, `x-signature: …`, `cookie: …`, `x-api-key: …`). A hostile or
+  buggy target can echo the request's auth/signature headers back in its body; those
+  reflected values are OUR OWN outbound credential and must never be persisted.
+
+  Idempotent: masking an already-masked body is a no-op (`[REDACTED]` is itself a
+  valid value that masks to `[REDACTED]`), so this can run more than once on the
+  same body — e.g. the stored copy is masked once here, then re-masked when the
+  audit Log copy is derived from it.
+  """
+  @spec mask_response_body(String.t() | nil) :: String.t() | nil
+  def mask_response_body(nil), do: nil
+
+  def mask_response_body(body) when is_binary(body) do
     # Value class `(?:\\.|[^"\r\n])+` consumes escaped quotes (`\"`) so a JSON
     # value containing one (`"token":"ab\"cd"`) is masked in full, not just up to
     # the escaped quote.
@@ -103,6 +148,16 @@ defmodule AshIntegration.Transport.Utils do
       ~r/("?(?:authorization|proxy-authorization|x-signature|signature|x-api-key|api-key|cookie|set-cookie|x-auth-token)"?\s*[:=]\s*"?)((?:\\.|[^"\r\n])+)/i,
       body,
       "\\1[REDACTED]"
+    )
+  end
+
+  # The generous ceiling for the stored/displayed response-body copy, read live so
+  # a host can tune it via `config :ash_integration, max_stored_response_body_len:`.
+  defp max_stored_response_body_len do
+    Application.get_env(
+      :ash_integration,
+      :max_stored_response_body_len,
+      @default_max_stored_response_body_len
     )
   end
 
