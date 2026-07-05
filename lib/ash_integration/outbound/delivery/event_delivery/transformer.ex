@@ -290,20 +290,9 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   defp add_defaults_if_not_set(dsl_state) do
     existing_defaults = Transformer.get_option(dsl_state, [:actions], :defaults) || []
 
-    # Guard on BOTH the `defaults` list and any explicitly-defined action of that
-    # name: `SetPrimaryActions` expands each `defaults` entry into an un-deduped
-    # `prepend_action`, so injecting `:read`/`:destroy` when the host already wrote
-    # `read :read`/`destroy :destroy` yields a duplicate-action DSL error. See the
-    # matching note in `AshIntegration.Outbound.Capture.Event.Transformer`.
-    has_read? =
-      Enum.any?(existing_defaults, &(match?(:read, &1) or match?({:read, _}, &1))) or
-        not is_nil(Info.action(dsl_state, :read))
-
-    has_destroy? =
-      Enum.any?(existing_defaults, &(match?(:destroy, &1) or match?({:destroy, _}, &1))) or
-        not is_nil(Info.action(dsl_state, :destroy))
-
-    additions = if(has_read?, do: [], else: [:read]) ++ if(has_destroy?, do: [], else: [:destroy])
+    # Only add a default the host lacks — see `default_present?/3`.
+    additions =
+      Enum.reject([:read, :destroy], &default_present?(dsl_state, existing_defaults, &1))
 
     case additions do
       [] ->
@@ -312,6 +301,19 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
       _ ->
         Transformer.set_option(dsl_state, [:actions], :defaults, existing_defaults ++ additions)
     end
+  end
+
+  # A default is "present" if it's already in the `defaults` list OR the host defined
+  # an action of that name explicitly. `SetPrimaryActions` expands each `defaults`
+  # entry into an un-deduped `prepend_action`, so injecting a default the host already
+  # defined yields a duplicate-action DSL error. See the matching note in
+  # `AshIntegration.Outbound.Capture.Event.Transformer`.
+  defp default_present?(dsl_state, existing_defaults, type) do
+    Enum.any?(existing_defaults, fn
+      ^type -> true
+      {^type, _} -> true
+      _ -> false
+    end) or not is_nil(Info.action(dsl_state, type))
   end
 
   # ── Create ──────────────────────────────────────────────────────────────

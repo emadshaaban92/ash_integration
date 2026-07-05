@@ -165,22 +165,9 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
   defp add_defaults_if_not_set(dsl_state) do
     existing_defaults = Transformer.get_option(dsl_state, [:actions], :defaults) || []
 
-    # Check BOTH the `defaults` list AND any explicitly-defined action of that name.
-    # `Ash.Resource.Transformers.SetPrimaryActions` turns each entry in `defaults`
-    # into a `prepend_action(:read)`/`prepend_action(:destroy)` WITHOUT deduping
-    # against a hand-written `read :read`/`destroy :destroy`, so injecting `:read`
-    # here when the host already defined one produces two actions with the same name
-    # → a "Got duplicate action: read" DSL error pointing at library code the host
-    # never wrote. Guard on `Info.action/2` so we only add a default the host lacks.
-    has_read? =
-      Enum.any?(existing_defaults, &(match?(:read, &1) or match?({:read, _}, &1))) or
-        not is_nil(Info.action(dsl_state, :read))
-
-    has_destroy? =
-      Enum.any?(existing_defaults, &(match?(:destroy, &1) or match?({:destroy, _}, &1))) or
-        not is_nil(Info.action(dsl_state, :destroy))
-
-    additions = if(has_read?, do: [], else: [:read]) ++ if(has_destroy?, do: [], else: [:destroy])
+    # Only add a default the host lacks — see `default_present?/3`.
+    additions =
+      Enum.reject([:read, :destroy], &default_present?(dsl_state, existing_defaults, &1))
 
     case additions do
       [] ->
@@ -189,6 +176,20 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
       _ ->
         Transformer.set_option(dsl_state, [:actions], :defaults, existing_defaults ++ additions)
     end
+  end
+
+  # A default is "present" if it's already in the `defaults` list OR the host defined
+  # an action of that name explicitly. `Ash.Resource.Transformers.SetPrimaryActions`
+  # turns each `defaults` entry into a `prepend_action(type)` WITHOUT deduping against
+  # a hand-written `read :read`/`destroy :destroy`, so injecting a default the host
+  # already defined produces two actions with the same name → a "Got duplicate action"
+  # DSL error pointing at library code the host never wrote.
+  defp default_present?(dsl_state, existing_defaults, type) do
+    Enum.any?(existing_defaults, fn
+      ^type -> true
+      {^type, _} -> true
+      _ -> false
+    end) or not is_nil(Info.action(dsl_state, type))
   end
 
   # ── Create (write-once; no update actions) ───────────────────────────────
