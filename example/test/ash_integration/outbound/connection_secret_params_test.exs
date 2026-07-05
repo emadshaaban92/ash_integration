@@ -87,4 +87,60 @@ defmodule Example.Outbound.ConnectionSecretParamsTest do
 
     assert tc["adapter"]["password"] == "hunter2"
   end
+
+  test "a blank HTTP OAuth2 client_secret is dropped; a present one is kept" do
+    blank = %{
+      "transport_config" => %{
+        "_union_type" => "http",
+        "base_url" => "https://api.example.com",
+        "auth" => %{"_union_type" => "oauth2_client_credentials", "client_secret" => ""}
+      }
+    }
+
+    refute Map.has_key?(
+             Helpers.strip_blank_secrets(blank)["transport_config"]["auth"],
+             "client_secret"
+           )
+
+    present = put_in(blank, ["transport_config", "auth", "client_secret"], "shh")
+    tc = Helpers.strip_blank_secrets(present)["transport_config"]
+    assert tc["auth"]["client_secret"] == "shh"
+  end
+
+  test "a blank MsGraph OAuth2 client_secret (nested under adapter) is dropped" do
+    params = %{
+      "transport_config" => %{
+        "_union_type" => "email",
+        "from" => "bot@acme.com",
+        "adapter" => %{
+          "_union_type" => "ms_graph",
+          "oauth2" => %{
+            "token_url" => "https://login.test/token",
+            "client_id" => "cid",
+            "client_secret" => ""
+          }
+        }
+      }
+    }
+
+    oauth2 = Helpers.strip_blank_secrets(params)["transport_config"]["adapter"]["oauth2"]
+
+    refute Map.has_key?(oauth2, "client_secret")
+    assert oauth2["client_id"] == "cid"
+  end
+
+  test "a present MsGraph OAuth2 client_secret is kept" do
+    params = %{
+      "transport_config" => %{
+        "_union_type" => "email",
+        "adapter" => %{
+          "_union_type" => "ms_graph",
+          "oauth2" => %{"client_secret" => "graphsecret"}
+        }
+      }
+    }
+
+    tc = Helpers.strip_blank_secrets(params)["transport_config"]
+    assert tc["adapter"]["oauth2"]["client_secret"] == "graphsecret"
+  end
 end

@@ -35,6 +35,11 @@ config :ash_integration, enabled?: false
 config :ash_integration,
   req_options: [plug: {Req.Test, AshIntegration.Outbound.Wire.Transports.Http}]
 
+# The OAuth2 client-credentials token provider issues its own HTTP requests; route
+# them through Req.Test too, owned by the provider module.
+config :ash_integration,
+  oauth2_req_options: [plug: {Req.Test, AshIntegration.Transport.OAuth2}]
+
 # The SSRF egress guard resolves + checks delivery URLs. The suite delivers to
 # loopback (`localhost:9999`, mocked by Req.Test), which the guard blocks by
 # default — so turn it off here and exercise it explicitly in egress-specific

@@ -71,9 +71,106 @@ defmodule Example.Outbound.ConnectionFormLiveTest do
     refute html =~ ~s(name="form[transport_config][signing][_union_type]")
   end
 
+  test "mounts the edit form for an HTTP OAuth2 connection with its client-credentials fields",
+       %{conn: conn, user: user} do
+    http = create_http_oauth2_connection!(user)
+
+    {:ok, _view, html} = live(conn, edit_path(http.id))
+
+    assert html =~ ~s(name="form[transport_config][auth][_union_type]")
+    # The OAuth2 client-credentials fields render for the stored variant.
+    assert html =~ ~s(name="form[transport_config][auth][token_url]")
+    assert html =~ ~s(name="form[transport_config][auth][client_id]")
+    assert html =~ ~s(name="form[transport_config][auth][client_secret]")
+  end
+
+  test "mounts the edit form for an Email MsGraph connection with its nested OAuth2 subform",
+       %{conn: conn, user: user} do
+    email = create_ms_graph_connection!(user)
+
+    {:ok, _view, html} = live(conn, edit_path(email.id))
+
+    assert html =~ ~s(name="form[transport_config][adapter][_union_type]")
+    # The shared OAuth2 resource renders nested under the MsGraph adapter.
+    assert html =~ ~s(name="form[transport_config][adapter][oauth2][token_url]")
+    assert html =~ ~s(name="form[transport_config][adapter][oauth2][client_secret]")
+  end
+
+  test "switching the email adapter to MsGraph reveals the nested OAuth2 subform", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/integrations/connections/new")
+
+    # Select the Email transport, then the MsGraph adapter — the second switch is
+    # the path that adds the nested OAuth2 subform to a fresh (data-less) form.
+    view
+    |> element("select[name=transport_selector]")
+    |> render_change(%{"transport_selector" => "email"})
+
+    html =
+      view
+      |> element("select[name='form[transport_config][adapter][_union_type]']")
+      |> render_change(%{
+        "_target" => ["form", "transport_config", "adapter", "_union_type"],
+        "form" => %{"transport_config" => %{"adapter" => %{"_union_type" => "ms_graph"}}}
+      })
+
+    assert html =~ ~s(name="form[transport_config][adapter][oauth2][token_url]")
+    assert html =~ ~s(name="form[transport_config][adapter][oauth2][client_secret]")
+  end
+
   # ── helpers ───────────────────────────────────────────────────────────────
 
   defp edit_path(id), do: "/integrations/connections/edit/#{id}"
+
+  defp create_http_oauth2_connection!(owner) do
+    Connection
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        name: "HTTP-OAuth2-#{System.unique_integer([:positive])}",
+        owner_id: owner.id,
+        transport_config: %{
+          type: :http,
+          base_url: "https://api.example.com",
+          auth: %{
+            type: "oauth2_client_credentials",
+            token_url: "https://login.test/oauth2/token",
+            client_id: "cid",
+            client_secret: "shh",
+            scopes: "api.read"
+          },
+          timeout_ms: 5000
+        }
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
+  end
+
+  defp create_ms_graph_connection!(owner) do
+    Connection
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        name: "Email-Graph-#{System.unique_integer([:positive])}",
+        owner_id: owner.id,
+        transport_config: %{
+          type: :email,
+          from: "notifications@acme.com",
+          adapter: %{
+            type: "ms_graph",
+            oauth2: %{
+              token_url: "https://login.microsoftonline.com/t/oauth2/v2.0/token",
+              client_id: "cid",
+              client_secret: "shh",
+              scopes: "https://graph.microsoft.com/.default"
+            }
+          }
+        }
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
+  end
 
   defp create_user! do
     Example.Accounts.User

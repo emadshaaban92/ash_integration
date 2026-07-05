@@ -43,7 +43,7 @@ So `product.created` can `POST /products` while `inventory.adjusted` does `PUT /
 
 ## Authentication
 
-The `auth` field (inside `transport_config`) supports four strategies:
+The `auth` field (inside `transport_config`) supports five strategies:
 
 ### None (default)
 
@@ -74,6 +74,45 @@ Adds an `Authorization: Basic <base64>` header.
 ```elixir
 auth: %{type: "basic_auth", username: "user", password: "secret"}
 ```
+
+### OAuth2 (client-credentials)
+
+Fetches an access token from an OAuth2 **token endpoint** using the two-legged,
+machine-to-machine **client-credentials** grant, and sends it as
+`Authorization: Bearer <token>`. Only the app-only client-credentials grant is
+supported — there is **no** authorization-code/consent flow, no refresh tokens,
+and no per-user delegation.
+
+```elixir
+auth: %{
+  type: "oauth2_client_credentials",
+  token_url: "https://login.example.com/oauth2/token",
+  client_id: "my-client-id",
+  client_secret: "my-client-secret",   # encrypted at rest, required
+  scopes: "https://api.example.com/.default",  # space-delimited, optional
+  audience: "https://api.example.com",         # optional
+  auth_style: :post                            # :post (default) or :basic
+}
+```
+
+* `auth_style: :post` sends `client_id`/`client_secret` in the request body
+  (`client_secret_post`); `:basic` sends them as an HTTP Basic `Authorization`
+  header on the token request (`client_secret_basic`).
+* The token is fetched **live at delivery** and **cached** until a refresh skew
+  (default 60s) before its `expires_in` expiry. Many concurrent deliveries for
+  the same connection coalesce to a **single** token fetch (single-flight), so a
+  busy connection does not hammer the token endpoint. A rotated `client_secret`
+  invalidates the cached token automatically.
+* Token-endpoint failures are classified onto the delivery contract: a network
+  error or a transient `5xx`/`429` is retryable; a `400`/`401`
+  (bad/rotated/misconfigured credentials) is non-retryable and drives
+  suspension. The token and the client secret are never logged and never written
+  into the stored delivery descriptor.
+* The `token_url` is run through the same SSRF egress guard as delivery URLs — at
+  save (rejecting a private/loopback/metadata host) and again, pinned, at fetch.
+* **Refresh-on-401** against the target (invalidate the cached token and retry
+  once when the *target* returns 401) is a planned follow-up — today a token is
+  refreshed purely on the expiry clock.
 
 All auth credentials are encrypted at rest via AshCloak.
 
@@ -259,4 +298,16 @@ You can inject custom options into all HTTP requests (useful for testing):
 
 ```elixir
 config :ash_integration, :req_options, [plug: {Req.Test, MyApp.WebhookStub}]
+```
+
+## OAuth2 token cache tuning
+
+The OAuth2 client-credentials token cache is configured with these
+compile-time keys (set them before compiling `ash_integration`):
+
+```elixir
+config :ash_integration,
+  oauth2_refresh_skew_ms: 60_000,   # refresh a token this long before its expiry
+  oauth2_idle_timeout_ms: 300_000,  # sweep expired/idle cache entries on this interval
+  oauth2_req_options: [plug: {Req.Test, MyApp.OAuth2Stub}]  # extra Req options for token requests (testing)
 ```

@@ -97,11 +97,16 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
 
   defp put_headers(email, _headers), do: email
 
+  @doc false
+  # Resolve the Swoosh adapter + config for the connection's adapter union, folding
+  # in the live secret carve-out (SMTP password / OAuth2 access token). Exposed for
+  # testing the adapter wiring without a live SMTP/Graph endpoint.
+  #
   # The SMTP credential is the live carve-out: decrypted per send via `load_secret`
   # (a rotated password auto-applies, a decrypt failure classifies as a
   # non-retryable `:transport` error instead of crashing the batcher) and folded
   # into the gen_smtp config, never into the stored descriptor.
-  defp adapter_config(%Ash.Union{type: :smtp, value: smtp}) do
+  def adapter_config(%Ash.Union{type: :smtp, value: smtp}) do
     with {:ok, loaded} <- Utils.load_secret(smtp, [:password], "SMTP password") do
       config =
         [
@@ -119,6 +124,29 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
       {:ok, Swoosh.Adapters.SMTP, config}
     end
   end
+
+  # Microsoft Graph app-only send. The client-credentials access token is the live
+  # carve-out: decrypt the client secret, fetch (or reuse a cached) token from the
+  # shared provider, and hand it to Swoosh's MsGraph adapter via its `auth` fn seam.
+  # A token-fetch failure is already classified onto the transport contract, so it
+  # short-circuits here before any send is attempted. An optional `user_id` pins the
+  # sending mailbox via the adapter's `:url` override.
+  def adapter_config(%Ash.Union{type: :ms_graph, value: ms_graph}) do
+    with {:ok, loaded} <-
+           Utils.load_secret(ms_graph.oauth2, [:client_secret], "OAuth2 client secret"),
+         {:ok, token} <- AshIntegration.Transport.OAuth2.get_token(loaded) do
+      config = [auth: fn -> token end] ++ ms_graph_url(ms_graph.user_id)
+      {:ok, Swoosh.Adapters.MsGraph, config}
+    end
+  end
+
+  defp ms_graph_url(nil), do: []
+
+  defp ms_graph_url(user_id) when is_binary(user_id) and user_id != "" do
+    [url: "https://graph.microsoft.com/v1.0/users/#{URI.encode(user_id)}/sendMail"]
+  end
+
+  defp ms_graph_url(_user_id), do: []
 
   defp send_email(adapter, email, adapter_config) do
     case adapter.deliver(email, adapter_config) do

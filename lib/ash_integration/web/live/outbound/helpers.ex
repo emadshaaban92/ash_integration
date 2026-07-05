@@ -174,6 +174,23 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     end
   end
 
+  # The MsGraph adapter nests the shared OAuth2 client-credentials resource under
+  # `adapter[:oauth2]`. Auto-forms create that inner subform from stored data on
+  # edit, but switching a fresh SMTP adapter to MsGraph has no data yet — so add it
+  # explicitly, and only then. Safe to call repeatedly (no-op once present).
+  def ensure_ms_graph_oauth2_subform(form) do
+    tc = form.forms[:transport_config]
+    adapter = tc && tc.forms[:adapter]
+
+    if adapter && is_nil(adapter.forms[:oauth2]) do
+      AshPhoenix.Form.add_form(form, "form[transport_config][adapter][oauth2]",
+        params: %{"auth_style" => "post"}
+      )
+    else
+      form
+    end
+  end
+
   # Signing applies to the HTTP and Kafka transports, so this is ensured for both.
   # Email carries no payload-signing scheme (nothing on the receiving end verifies
   # it), so the connection form skips it for email.
@@ -194,7 +211,7 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     end
   end
 
-  @encrypted_auth_fields ["token", "value", "password"]
+  @encrypted_auth_fields ["token", "value", "password", "client_secret"]
 
   def strip_blank_secrets(params) do
     case get_in(params, ["transport_config"]) do
@@ -218,17 +235,23 @@ defmodule AshIntegration.Web.Outbound.Helpers do
             |> maybe_drop_blank("client_cert_pem")
             |> maybe_drop_blank("client_key_pem")
           end)
-          # `adapter` is Email-only (the SMTP credential); update_if_present leaves
-          # http/kafka params untouched since they carry no `adapter` key.
-          |> update_if_present("adapter", fn adapter when is_map(adapter) ->
-            maybe_drop_blank(adapter, "password")
-          end)
+          # `adapter` is Email-only; update_if_present leaves http/kafka params
+          # untouched since they carry no `adapter` key.
+          |> update_if_present("adapter", &strip_adapter_secrets/1)
 
         put_in(params, ["transport_config"], tc)
 
       _ ->
         params
     end
+  end
+
+  # Drop the blank SMTP password (smtp variant) and the blank MsGraph OAuth2 client
+  # secret, which is nested one level deeper under `adapter[oauth2]`.
+  defp strip_adapter_secrets(adapter) when is_map(adapter) do
+    adapter
+    |> maybe_drop_blank("password")
+    |> update_if_present("oauth2", &maybe_drop_blank(&1, "client_secret"))
   end
 
   defp maybe_drop_blank(map, key) do
@@ -259,7 +282,11 @@ defmodule AshIntegration.Web.Outbound.Helpers do
         }
 
       %Ash.Union{type: :email, value: tc} ->
-        %{smtp_password: email_smtp_password?(tc.adapter), auth: false}
+        %{
+          smtp_password: email_smtp_password?(tc.adapter),
+          oauth2: email_ms_graph_secret?(tc.adapter),
+          auth: false
+        }
 
       _ ->
         %{signing: false, auth: false}
@@ -274,6 +301,10 @@ defmodule AshIntegration.Web.Outbound.Helpers do
   defp http_auth_secret?(%{type: :bearer_token, value: v}), do: v.encrypted_token != nil
   defp http_auth_secret?(%{type: :api_key, value: v}), do: v.encrypted_value != nil
   defp http_auth_secret?(%{type: :basic_auth, value: v}), do: v.encrypted_password != nil
+
+  defp http_auth_secret?(%{type: :oauth2_client_credentials, value: v}),
+    do: v.encrypted_client_secret != nil
+
   defp http_auth_secret?(_), do: false
 
   defp kafka_sasl_password?(%Ash.Union{type: type, value: sec}) when type in [:sasl, :sasl_tls],
@@ -285,6 +316,11 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     do: smtp.encrypted_password != nil
 
   defp email_smtp_password?(_), do: false
+
+  defp email_ms_graph_secret?(%Ash.Union{type: :ms_graph, value: mg}),
+    do: mg.oauth2 != nil and mg.oauth2.encrypted_client_secret != nil
+
+  defp email_ms_graph_secret?(_), do: false
 
   def inject_headers_map(params) do
     params

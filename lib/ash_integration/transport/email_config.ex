@@ -24,6 +24,11 @@ defmodule AshIntegration.Transport.EmailConfig do
                       type: AshIntegration.Transport.EmailAdapter.Smtp,
                       tag: :type,
                       tag_value: "smtp"
+                    ],
+                    ms_graph: [
+                      type: AshIntegration.Transport.EmailAdapter.MsGraph,
+                      tag: :type,
+                      tag_value: "ms_graph"
                     ]
                   ],
                   storage: :map_with_tag

@@ -89,7 +89,8 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             {"No Auth", "none"},
             {"Bearer Token", "bearer_token"},
             {"API Key", "api_key"},
-            {"Basic Auth", "basic_auth"}
+            {"Basic Auth", "basic_auth"},
+            {"OAuth2 (Client Credentials)", "oauth2_client_credentials"}
           ]}
         />
         <%= case auth.params["_union_type"] do %>
@@ -141,6 +142,58 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
               force_errors={@submitted?}
               placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
               phx-debounce="blur"
+            />
+          <% "oauth2_client_credentials" -> %>
+            <p class="text-sm text-base-content/60 mb-2">
+              Two-legged (machine-to-machine) client-credentials grant only — no
+              user consent flow. A token is fetched from the token endpoint and
+              sent as <code>Authorization: Bearer</code>, cached until it nears expiry.
+            </p>
+            <.input
+              field={auth[:token_url]}
+              type="text"
+              label="Token URL"
+              placeholder="https://login.example.com/oauth2/token"
+              required
+              force_errors={@submitted?}
+              phx-debounce="blur"
+            />
+            <.input
+              field={auth[:client_id]}
+              type="text"
+              label="Client ID"
+              required
+              force_errors={@submitted?}
+              phx-debounce="blur"
+            />
+            <.input
+              field={auth[:client_secret]}
+              type="password"
+              autocomplete="one-time-code"
+              label="Client Secret"
+              required={@action == :new}
+              force_errors={@submitted?}
+              placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
+              phx-debounce="blur"
+            />
+            <.input
+              field={auth[:scopes]}
+              type="text"
+              label="Scopes"
+              placeholder="space-delimited, e.g. https://graph.microsoft.com/.default"
+              phx-debounce="blur"
+            />
+            <.input
+              field={auth[:audience]}
+              type="text"
+              label="Audience (optional)"
+              phx-debounce="blur"
+            />
+            <.input
+              field={auth[:auth_style]}
+              type="select"
+              label="Token Endpoint Auth"
+              options={[{"Credentials in body (post)", "post"}, {"HTTP Basic", "basic"}]}
             />
           <% _ -> %>
         <% end %>
@@ -358,7 +411,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
       </div>
 
       <div class="divider my-2"></div>
-      <h5 class="font-semibold mb-3">SMTP Server</h5>
+      <h5 class="font-semibold mb-3">Delivery Method</h5>
 
       <.inputs_for :let={adapter} field={@tc[:adapter]}>
         <.input
@@ -367,56 +420,120 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
           phx-target={@myself}
           type="select"
           label="Delivery Method"
-          options={[{"SMTP", "smtp"}]}
+          options={[{"SMTP", "smtp"}, {"Microsoft Graph (App-only)", "ms_graph"}]}
         />
-        <%= if adapter.params["_union_type"] in [nil, "smtp"] do %>
-          <.input
-            field={adapter[:relay]}
-            type="text"
-            label="Host"
-            placeholder="smtp.example.com"
-            required
-            force_errors={@submitted?}
-            phx-debounce="blur"
-          />
-          <div class="flex gap-2">
+        <%= case adapter.params["_union_type"] do %>
+          <% "ms_graph" -> %>
+            <p class="text-sm text-base-content/60 mb-2">
+              App-only (client-credentials) send via Microsoft Graph — an Azure app
+              registration with the <code>Mail.Send</code> application permission and
+              admin consent. No user consent flow.
+            </p>
             <.input
-              field={adapter[:port]}
+              field={adapter[:user_id]}
               type="text"
-              label="Port"
-              placeholder="587"
+              label="Sending mailbox (optional)"
+              placeholder="user@tenant.onmicrosoft.com or object id — defaults to the From address"
               phx-debounce="blur"
             />
+            <.inputs_for :let={oauth2} field={adapter[:oauth2]}>
+              <.input
+                field={oauth2[:token_url]}
+                type="text"
+                label="Token URL"
+                placeholder="https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+                required
+                force_errors={@submitted?}
+                phx-debounce="blur"
+              />
+              <.input
+                field={oauth2[:client_id]}
+                type="text"
+                label="Client ID"
+                required
+                force_errors={@submitted?}
+                phx-debounce="blur"
+              />
+              <.input
+                field={oauth2[:client_secret]}
+                type="password"
+                autocomplete="one-time-code"
+                label="Client Secret"
+                required={@action == :new}
+                force_errors={@submitted?}
+                placeholder={if @has_secrets[:oauth2], do: "Leave blank to keep current"}
+                phx-debounce="blur"
+              />
+              <.input
+                field={oauth2[:scopes]}
+                type="text"
+                label="Scopes"
+                placeholder="https://graph.microsoft.com/.default"
+                phx-debounce="blur"
+              />
+              <.input
+                field={oauth2[:auth_style]}
+                type="select"
+                label="Token Endpoint Auth"
+                options={[{"Credentials in body (post)", "post"}, {"HTTP Basic", "basic"}]}
+              />
+            </.inputs_for>
+          <% _ -> %>
             <.input
-              field={adapter[:ssl]}
-              type="select"
-              label="Implicit TLS (SSL)"
-              options={[{"No", "false"}, {"Yes", "true"}]}
+              field={adapter[:relay]}
+              type="text"
+              label="Host"
+              placeholder="smtp.example.com"
+              required
+              force_errors={@submitted?}
+              phx-debounce="blur"
             />
-          </div>
-          <.input field={adapter[:username]} type="text" label="Username" phx-debounce="blur" />
-          <.input
-            field={adapter[:password]}
-            type="password"
-            autocomplete="one-time-code"
-            label="Password"
-            placeholder={if @has_secrets[:smtp_password], do: "Leave blank to keep current"}
-            phx-debounce="blur"
-          />
-          <div class="flex gap-2">
+            <div class="flex gap-2">
+              <.input
+                field={adapter[:port]}
+                type="text"
+                label="Port"
+                placeholder="587"
+                phx-debounce="blur"
+              />
+              <.input
+                field={adapter[:ssl]}
+                type="select"
+                label="Implicit TLS (SSL)"
+                options={[{"No", "false"}, {"Yes", "true"}]}
+              />
+            </div>
+            <.input field={adapter[:username]} type="text" label="Username" phx-debounce="blur" />
             <.input
-              field={adapter[:tls]}
-              type="select"
-              label="STARTTLS"
-              options={[{"If available", "if_available"}, {"Always", "always"}, {"Never", "never"}]}
+              field={adapter[:password]}
+              type="password"
+              autocomplete="one-time-code"
+              label="Password"
+              placeholder={if @has_secrets[:smtp_password], do: "Leave blank to keep current"}
+              phx-debounce="blur"
             />
-            <.input
-              field={adapter[:auth]}
-              type="select"
-              label="Auth"
-              options={[{"If available", "if_available"}, {"Always", "always"}, {"Never", "never"}]}
-            />
-          </div>
+            <div class="flex gap-2">
+              <.input
+                field={adapter[:tls]}
+                type="select"
+                label="STARTTLS"
+                options={[
+                  {"If available", "if_available"},
+                  {"Always", "always"},
+                  {"Never", "never"}
+                ]}
+              />
+              <.input
+                field={adapter[:auth]}
+                type="select"
+                label="Auth"
+                options={[
+                  {"If available", "if_available"},
+                  {"Always", "always"},
+                  {"Never", "never"}
+                ]}
+              />
+            </div>
         <% end %>
       </.inputs_for>
     </div>
