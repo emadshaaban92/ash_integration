@@ -118,6 +118,27 @@ defmodule AshIntegration.Transport.Egress do
     end
   end
 
+  @doc """
+  True when `host` (an IP literal or a hostname) is confined to internal address
+  space — every address it resolves to is private, loopback, link-local, or
+  otherwise non-public-routable by the same classification `classify/1` uses.
+
+  Reuses the module's address classification rather than re-deriving CIDR checks,
+  so callers that treat internal endpoints differently (e.g. relaxing a warning
+  for a firewalled SMTP relay) stay consistent with the egress policy. A host
+  that resolves to *any* public address — or that can't be resolved at all — is
+  NOT internal (returns `false`), erring toward the internet-facing treatment.
+  """
+  @spec internal_host?(String.t() | nil) :: boolean()
+  def internal_host?(host) when is_binary(host) and host != "" do
+    case resolve(host) do
+      {:ok, [_ | _] = addresses} -> Enum.all?(addresses, &blocked_address?/1)
+      _ -> false
+    end
+  end
+
+  def internal_host?(_host), do: false
+
   defp do_classify(url) when is_binary(url) do
     case URI.parse(url) do
       %URI{host: host} when is_binary(host) and host != "" ->
