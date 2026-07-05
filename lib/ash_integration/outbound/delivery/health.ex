@@ -82,6 +82,15 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   def init(opts) do
     config = validate!(Keyword.merge(Application.get_env(:ash_integration, :health, []), opts))
 
+    # `recompute/0` and `probe/0` are also called directly (tests, manual runs) and
+    # re-read these knobs off-process, so publish the merged values (start_link opts
+    # over app env) to `:persistent_term` for lock-free reads — mirroring how
+    # `Retention` threads its window knobs. Without this, start_link opts for
+    # `window_attempts`/`probe_batch` were silently dropped (only the intervals were
+    # kept), so tests configuring them via start_link had no effect.
+    put_config(:window_attempts, config[:window_attempts])
+    put_config(:probe_batch, config[:probe_batch])
+
     schedule(:recompute, config[:recompute_interval_ms])
     schedule(:probe, config[:probe_interval_ms])
 
@@ -162,7 +171,7 @@ defmodule AshIntegration.Outbound.Delivery.Health do
 
     scope.resource
     |> Ash.get!(id, authorize?: false)
-    |> Ash.Changeset.for_update(:suspend, %{reason: reason}, authorize?: false)
+    |> Ash.Changeset.for_update(:suspend, %{reason: reason, source: :auto}, authorize?: false)
     |> Ash.Changeset.filter(Ash.Expr.expr(suspended == false))
     |> Ash.update(authorize?: false, return_notifications?: true)
     |> case do
@@ -178,11 +187,18 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     end
   end
 
+  # Only ever unwind an AUTO (derived-health) suspension. A `:manual` operator pause
+  # or a `:parked` opt-in suspend has its own origin and recovery path — the recompute
+  # must not silently resume it just because the entity's frozen `Log` window happens
+  # to contain a success (a manually-paused-but-healthy connection; a parked-suspended
+  # subscription whose earlier lanes delivered fine). The `suspension_source == :auto`
+  # guard is what keeps those distinct suspensions from flapping. See
+  # `design/connection-health.md` §8 and the ParkedHealth "distinct suspension" note.
   defp unsuspend(scope, id) do
     scope.resource
     |> Ash.get!(id, authorize?: false)
     |> Ash.Changeset.for_update(:unsuspend, %{}, authorize?: false)
-    |> Ash.Changeset.filter(Ash.Expr.expr(suspended == true))
+    |> Ash.Changeset.filter(Ash.Expr.expr(suspended == true and suspension_source == :auto))
     |> Ash.update(authorize?: false, return_notifications?: true)
     |> case do
       {:ok, _record, _notifications} -> :ok
@@ -209,28 +225,42 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   end
 
   # The probe's policy: pick `m` suspended entities, **oldest-probed-first** — ordered
-  # by each one's most recent transport/response `Log` row (for a suspended entity
-  # that row IS its last probe, since the scheduler promotes no other traffic while
-  # suspended) — skipping any that still hold an in-flight `:scheduled` delivery so a
-  # probe is never stacked. (A suspended entity's other heads sit in `:failed`,
-  # promoted only by the probe; a terminal `:failed` head is not `:scheduled`, so it
-  # never blocks probing here.) Promotion itself is the scheduler's job
-  # (`promote_probe/2`).
+  # by each one's most recent probe-relevant `Log` row, skipping any that still hold
+  # an in-flight `:scheduled` delivery so a probe is never stacked. (A suspended
+  # entity's other heads sit in `:failed`, promoted only by the probe; a terminal
+  # `:failed` head is not `:scheduled`, so it never blocks probing here.) Promotion
+  # itself is the scheduler's job (`promote_probe/2`).
   #
-  # The `JOIN LATERAL … LIMIT 1` is an inner join, so an entity with NO transport/
-  # response `Log` row is excluded — a manual `suspend` on a quiet entity is inert
-  # here (no window to probe), recovered by the operator, not the probe. Derived
-  # suspension can't hit this (a tripped entity has failures in the `Log`). See §8.
+  # The cursor's match set is `status = 'success' OR failure_class IN
+  # ('<scope class>', 'probe')`. A FAILED probe is logged `failure_class: 'probe'`
+  # (relay.ex — a suspended entity's retryable failure is probe-paced, out of the
+  # health windows), NOT the scope class, so it must be counted here or the cursor
+  # would never advance on a failing probe: with more suspended entities than
+  # `probe_batch` and fast-failing endpoints the same batch would be re-probed every
+  # tick and the rest NEVER probed — stuck suspended even after recovery. Including
+  # `'probe'` makes each failing probe advance the entity to the back of the rotation.
+  #
+  # The `LEFT JOIN LATERAL` (was an inner join) keeps an entity with NO matching
+  # `Log` row in the set, ordered FIRST (`NULLS FIRST`) as the most-starved. This
+  # matters after retention: `Retention` trims `Log` rows older than `delivery_days`
+  # with no status filter, so an entity suspended longer than that window loses its
+  # last anchor row; an inner join would drop it from the probe (and it is also
+  # absent from `recompute`'s candidate set) — stuck suspended forever with zero
+  # signal. With the left join it stays probeable, and the first failing probe writes
+  # a fresh `'probe'` anchor. (`e.id` breaks ties so anchorless entities still rotate
+  # deterministically.) A manual `suspend` on a genuinely quiet entity with no
+  # deliverable head still promotes nothing — `promote_probe/2` returns `:none` — so
+  # it remains operator-recovered (§8), just no longer excluded by a missing anchor.
   # sobelow_skip ["SQL.Query"]
   defp pick_suspended(scope, m) do
     sql = """
     SELECT e.id::text
     FROM #{table(scope.resource)} e
-    JOIN LATERAL (
+    LEFT JOIN LATERAL (
       SELECT l.id AS last_log_id
       FROM #{log_table()} l
       WHERE l.#{scope.id_column} = e.id
-        AND (l.status = 'success' OR l.failure_class = '#{scope.failure_class}')
+        AND (l.status = 'success' OR l.failure_class IN ('#{scope.failure_class}', 'probe'))
       ORDER BY l.id DESC
       LIMIT 1
     ) ll ON true
@@ -239,7 +269,7 @@ defmodule AshIntegration.Outbound.Delivery.Health do
         SELECT 1 FROM #{ed_table()} s
         WHERE s.#{scope.id_column} = e.id AND s.state = 'scheduled'
       )
-    ORDER BY ll.last_log_id ASC
+    ORDER BY ll.last_log_id ASC NULLS FIRST, e.id ASC
     LIMIT $1
     """
 
@@ -325,8 +355,30 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     ]
   end
 
-  def window_attempts, do: Keyword.fetch!(config(), :window_attempts)
-  defp probe_batch, do: Keyword.fetch!(config(), :probe_batch)
+  def window_attempts, do: get_config(:window_attempts)
+  defp probe_batch, do: get_config(:probe_batch)
+
+  # Prefer the value the running GenServer published (start_link opts merged over app
+  # env); fall back to the app-env config when no GenServer is running (direct
+  # `recompute/0`/`probe/0` calls in tests/manual runs). This keeps both the
+  # start_link path and the `Application.put_env` path effective.
+  defp get_config(key) do
+    case :persistent_term.get({__MODULE__, key}, :__unset__) do
+      :__unset__ -> Keyword.fetch!(config(), key)
+      value -> value
+    end
+  end
+
+  # Guarded put so a restart with unchanged config triggers no persistent_term
+  # global heap-scan (same pattern as `Retention.put_config/2`).
+  defp put_config(key, value) do
+    pt_key = {__MODULE__, key}
+
+    case :persistent_term.get(pt_key, :__unset__) do
+      ^value -> :ok
+      _ -> :persistent_term.put(pt_key, value)
+    end
+  end
 
   defp config, do: validate!(Application.get_env(:ash_integration, :health, []))
 

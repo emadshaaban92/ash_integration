@@ -130,7 +130,7 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
 
     resource
     |> Ash.get!(subscription_id, authorize?: false)
-    |> Ash.Changeset.for_update(:suspend, %{reason: reason}, authorize?: false)
+    |> Ash.Changeset.for_update(:suspend, %{reason: reason, source: :parked}, authorize?: false)
     |> Ash.Changeset.filter(Ash.Expr.expr(suspended == false))
     # `return_notifications?: true` (then discard): nothing consumes subscription
     # suspension notifications, and returning them keeps Ash from warning about

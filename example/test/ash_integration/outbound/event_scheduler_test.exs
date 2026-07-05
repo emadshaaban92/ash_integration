@@ -188,10 +188,39 @@ defmodule Example.Outbound.EventSchedulerTest do
     end
   end
 
+  describe "guarded :failed-head promotion replays backoff (multi-node race)" do
+    test "does not re-promote a re-failed head whose fresh backoff is still in the future",
+         %{connection: dest} do
+      s1 = create_subscription!(dest, "widget.updated")
+
+      due = create_event!(s1, event_key: "due", state: :failed)
+      future = create_event!(s1, event_key: "future", state: :failed)
+
+      # `future` re-failed with a fresh `next_attempt_at` ahead — the exact race the
+      # write-time guard defends: a sweep read it eligible, then another node promoted
+      # and the relay re-failed it before this (stale) batch's write lands. Without the
+      # `next_attempt_at <= now()` predicate on the write, it would be re-promoted
+      # immediately, skipping its new backoff.
+      set_next_attempt_at!(future, DateTime.add(DateTime.utc_now(), 3600, :second))
+
+      assert Scheduler.bulk_schedule_failed([due.id, future.id]) == 1
+
+      assert reload(due).state == :scheduled
+      assert reload(future).state == :failed, "a fresh backoff must not be skipped"
+    end
+  end
+
   # Derived suspension (recompute / park / probe) lives in its own DB-backed suite:
   # `Example.Outbound.HealthTest`. This file stays focused on scheduling/ordering.
 
   # ── Helpers ───────────────────────────────────────────────────────────────
+
+  defp set_next_attempt_at!(delivery, at) do
+    Example.Repo.update_all(
+      from(d in "outbound_event_deliveries", where: d.id == type(^delivery.id, Ecto.UUID)),
+      set: [next_attempt_at: at]
+    )
+  end
 
   defp deliver!(event) do
     Ash.update!(
