@@ -11,6 +11,7 @@ defmodule AshIntegration.Outbound.Wire.TransportDispatchTest do
     test "maps the supported transports" do
       assert Transport.module_for(:http) == AshIntegration.Outbound.Wire.Transports.Http
       assert Transport.module_for(:kafka) == AshIntegration.Outbound.Wire.Transports.Kafka
+      assert Transport.module_for(:email) == AshIntegration.Outbound.Wire.Transports.Email
     end
   end
 

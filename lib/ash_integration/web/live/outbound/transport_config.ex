@@ -300,6 +300,129 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
     """
   end
 
+  def transport_config(%{selected_transport: "email"} = assigns) do
+    ~H"""
+    <div class="card card-border border-base-300 p-4 mt-4">
+      <h4 class="font-semibold mb-3">Email Configuration</h4>
+      <p class="text-sm text-base-content/60 mb-3">
+        The sender identity and SMTP server live here. Each subscription sets its
+        recipients and subject — or the Lua transform renders them per event.
+      </p>
+
+      <.input
+        field={@tc[:from]}
+        type="text"
+        label="From"
+        placeholder="Acme <notifications@acme.com>"
+        required
+        phx-debounce="blur"
+      />
+
+      <label class="label">Custom Headers</label>
+      <div class="space-y-2">
+        <div :for={{id, {key, value}} <- @header_rows} class="flex gap-2 items-center">
+          <input
+            type="text"
+            name={@tc[:headers].name <> "[#{id}][key]"}
+            value={key}
+            placeholder="Header name"
+            class="input input-bordered input-sm flex-1"
+            phx-debounce="blur"
+          />
+          <input
+            type="text"
+            name={@tc[:headers].name <> "[#{id}][value]"}
+            value={value}
+            placeholder="Header value"
+            class="input input-bordered input-sm flex-1"
+            phx-debounce="blur"
+          />
+          <button
+            type="button"
+            phx-click="remove-header"
+            phx-target={@myself}
+            phx-value-id={id}
+            class="btn btn-ghost btn-sm btn-square"
+          >
+            &times;
+          </button>
+        </div>
+        <button
+          type="button"
+          phx-click="add-header"
+          phx-target={@myself}
+          class="btn btn-outline btn-xs"
+        >
+          + Add Header
+        </button>
+      </div>
+
+      <div class="divider my-2"></div>
+      <h5 class="font-semibold mb-3">SMTP Server</h5>
+
+      <.inputs_for :let={adapter} field={@tc[:adapter]}>
+        <.input
+          field={adapter[:_union_type]}
+          phx-change="adapter-type-changed"
+          phx-target={@myself}
+          type="select"
+          label="Delivery Method"
+          options={[{"SMTP", "smtp"}]}
+        />
+        <%= if adapter.params["_union_type"] in [nil, "smtp"] do %>
+          <.input
+            field={adapter[:relay]}
+            type="text"
+            label="Host"
+            placeholder="smtp.example.com"
+            required
+            force_errors={@submitted?}
+            phx-debounce="blur"
+          />
+          <div class="flex gap-2">
+            <.input
+              field={adapter[:port]}
+              type="text"
+              label="Port"
+              placeholder="587"
+              phx-debounce="blur"
+            />
+            <.input
+              field={adapter[:ssl]}
+              type="select"
+              label="Implicit TLS (SSL)"
+              options={[{"No", "false"}, {"Yes", "true"}]}
+            />
+          </div>
+          <.input field={adapter[:username]} type="text" label="Username" phx-debounce="blur" />
+          <.input
+            field={adapter[:password]}
+            type="password"
+            autocomplete="one-time-code"
+            label="Password"
+            placeholder={if @has_secrets[:smtp_password], do: "Leave blank to keep current"}
+            phx-debounce="blur"
+          />
+          <div class="flex gap-2">
+            <.input
+              field={adapter[:tls]}
+              type="select"
+              label="STARTTLS"
+              options={[{"If available", "if_available"}, {"Always", "always"}, {"Never", "never"}]}
+            />
+            <.input
+              field={adapter[:auth]}
+              type="select"
+              label="Auth"
+              options={[{"If available", "if_available"}, {"Always", "always"}, {"Never", "never"}]}
+            />
+          </div>
+        <% end %>
+      </.inputs_for>
+    </div>
+    """
+  end
+
   def transport_config(assigns) do
     ~H"""
     <div></div>

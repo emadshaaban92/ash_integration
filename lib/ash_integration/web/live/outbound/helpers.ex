@@ -157,7 +157,26 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     end
   end
 
-  # Signing applies to BOTH transports, so this is ensured for http and kafka alike.
+  def ensure_email_adapter_subform(form) do
+    tc = form.forms[:transport_config]
+
+    cond do
+      is_nil(tc) ->
+        form
+
+      is_nil(tc.forms[:adapter]) ->
+        AshPhoenix.Form.add_form(form, "form[transport_config][adapter]",
+          params: %{"_union_type" => "smtp"}
+        )
+
+      true ->
+        form
+    end
+  end
+
+  # Signing applies to the HTTP and Kafka transports, so this is ensured for both.
+  # Email carries no payload-signing scheme (nothing on the receiving end verifies
+  # it), so the connection form skips it for email.
   def ensure_signing_subform(form) do
     tc = form.forms[:transport_config]
 
@@ -199,6 +218,11 @@ defmodule AshIntegration.Web.Outbound.Helpers do
             |> maybe_drop_blank("client_cert_pem")
             |> maybe_drop_blank("client_key_pem")
           end)
+          # `adapter` is Email-only (the SMTP credential); update_if_present leaves
+          # http/kafka params untouched since they carry no `adapter` key.
+          |> update_if_present("adapter", fn adapter when is_map(adapter) ->
+            maybe_drop_blank(adapter, "password")
+          end)
 
         put_in(params, ["transport_config"], tc)
 
@@ -234,6 +258,9 @@ defmodule AshIntegration.Web.Outbound.Helpers do
           auth: false
         }
 
+      %Ash.Union{type: :email, value: tc} ->
+        %{smtp_password: email_smtp_password?(tc.adapter), auth: false}
+
       _ ->
         %{signing: false, auth: false}
     end
@@ -253,6 +280,11 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     do: sec.encrypted_password != nil
 
   defp kafka_sasl_password?(_), do: false
+
+  defp email_smtp_password?(%Ash.Union{type: :smtp, value: smtp}),
+    do: smtp.encrypted_password != nil
+
+  defp email_smtp_password?(_), do: false
 
   def inject_headers_map(params) do
     params

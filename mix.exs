@@ -65,6 +65,8 @@ defmodule AshIntegration.MixProject do
       {:nimble_options, "~> 1.0"},
       {:req, "~> 0.5"},
       {:brod, "~> 4.0", optional: true},
+      {:swoosh, "~> 1.0", optional: true},
+      {:gen_smtp, "~> 1.0", optional: true},
       {:lua, "~> 0.4"},
       {:jason, "~> 1.0"},
       {:phoenix, "~> 1.7"},
@@ -97,7 +99,8 @@ defmodule AshIntegration.MixProject do
         "guides/observability.md",
         "guides/producers.md",
         "guides/http-transport.md",
-        "guides/kafka-transport.md"
+        "guides/kafka-transport.md",
+        "guides/email-transport.md"
       ],
       groups_for_extras: [
         Guides: ~r/guides\/.*/

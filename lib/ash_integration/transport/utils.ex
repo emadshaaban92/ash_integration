@@ -286,17 +286,24 @@ defmodule AshIntegration.Transport.Utils do
 
   @doc """
   The transport types available in this environment. HTTP is always included;
-  Kafka appears when `:brod` is loaded.
+  Kafka appears when `:brod` is loaded, Email when Swoosh + `:gen_smtp` are.
   """
-  @spec available() :: [:http | :kafka]
+  @spec available() :: [:http | :kafka | :email]
   def available do
-    [:http] ++ if(available?(:kafka), do: [:kafka], else: [])
+    [:http] ++
+      if(available?(:kafka), do: [:kafka], else: []) ++
+      if(available?(:email), do: [:email], else: [])
   end
 
   @doc "Whether the given transport type is available (its optional deps are loaded)."
   @spec available?(atom()) :: boolean()
   def available?(:http), do: true
   def available?(:kafka), do: Code.ensure_loaded?(:brod)
+  # SMTP delivery needs both Swoosh (to build the message) and gen_smtp (the
+  # actual SMTP client Swoosh's SMTP adapter drives).
+  def available?(:email),
+    do: Code.ensure_loaded?(Swoosh.Adapters.SMTP) and Code.ensure_loaded?(:gen_smtp_client)
+
   def available?(_), do: false
 
   @doc """

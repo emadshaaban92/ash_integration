@@ -50,9 +50,10 @@ defmodule AshIntegration.Outbound.Wire.Transport do
   @callback deliver_batch(connection :: struct(), events :: [struct()]) :: batch_results()
   @optional_callbacks deliver_batch: 2
 
-  @spec module_for(:http | :kafka) :: module()
+  @spec module_for(:http | :kafka | :email) :: module()
   def module_for(:http), do: AshIntegration.Outbound.Wire.Transports.Http
   def module_for(:kafka), do: AshIntegration.Outbound.Wire.Transports.Kafka
+  def module_for(:email), do: AshIntegration.Outbound.Wire.Transports.Email
 
   @doc """
   Deliver `event` to `connection` over its configured transport.
@@ -64,7 +65,7 @@ defmodule AshIntegration.Outbound.Wire.Transport do
   @spec deliver(struct(), struct()) :: {:ok, success()} | {:error, error()}
   def deliver(connection, event) do
     case connection.transport_config do
-      %Ash.Union{type: type} when type in [:http, :kafka] ->
+      %Ash.Union{type: type} when type in [:http, :kafka, :email] ->
         module_for(type).deliver(connection, event)
 
       %Ash.Union{type: type} ->
@@ -90,7 +91,7 @@ defmodule AshIntegration.Outbound.Wire.Transport do
       failure_class: :transport,
       retryable: false,
       error_message:
-        "Unsupported transport #{inspect(type)}; valid transports are :http and :kafka."
+        "Unsupported transport #{inspect(type)}; valid transports are :http, :kafka and :email."
     }
   end
 
@@ -109,7 +110,7 @@ defmodule AshIntegration.Outbound.Wire.Transport do
   @spec deliver_batch(struct(), [struct()]) :: batch_results()
   def deliver_batch(connection, events) do
     case connection.transport_config do
-      %Ash.Union{type: type} when type in [:http, :kafka] ->
+      %Ash.Union{type: type} when type in [:http, :kafka, :email] ->
         deliver_batch_via(module_for(type), connection, events)
 
       %Ash.Union{type: type} ->

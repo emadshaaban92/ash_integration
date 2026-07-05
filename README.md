@@ -2,13 +2,13 @@
 
 A Spark DSL extension for [Ash Framework](https://ash-hq.org) that adds outbound integration support to your Ash resources — with a built-in dashboard UI.
 
-Declare named, versioned **event types** that your resource actions contribute to, write Lua transform scripts, and deliver payloads to external systems via HTTP or Kafka. Includes event-driven delivery with at-least-once semantics, automatic retries, two-level suspension, delivery logging, and a full management UI.
+Declare named, versioned **event types** that your resource actions contribute to, write Lua transform scripts, and deliver payloads to external systems via HTTP, Kafka, or email. Includes event-driven delivery with at-least-once semantics, automatic retries, two-level suspension, delivery logging, and a full management UI.
 
 ## Features
 
 - **Event-first DSL** — add `outbound_events` to any Ash resource to declare which actions contribute to which **event types** (`product.created`, `stock.changed`)
 - **Subscriptions over shared connections** — a connection holds the transport, auth, and ordering domain; subscriptions hang off it, one per `(event_type, version)`
-- **Multi-transport** — deliver via [HTTP](guides/http-transport.md) or [Kafka](guides/kafka-transport.md)
+- **Multi-transport** — deliver via [HTTP](guides/http-transport.md), [Kafka](guides/kafka-transport.md), or [Email/SMTP](guides/email-transport.md)
 - **Schema versioning** — pin subscriptions to specific payload versions for safe consumer upgrades
 - **Lua transform scripts** — sandboxed Lua execution to reshape event data before delivery
 - **Payload signing** — an explicit per-connection signing scheme (`none`/`stripe`/`custom`) across all transports: a native Stripe-style HMAC built-in, plus sandboxed custom signing scripts for novel schemes (canonical request strings, embedded body signatures)
@@ -38,11 +38,15 @@ end
 
 ### Optional transport dependencies
 
-HTTP transport works out of the box. To enable the Kafka transport, add its dependency:
+HTTP transport works out of the box. To enable the Kafka or Email transport, add its dependencies:
 
 ```elixir
 # Kafka transport — requires the brod Erlang Kafka client
-{:brod, "~> 4.0"}
+{:brod, "~> 4.0"},
+
+# Email transport — SMTP over Swoosh + gen_smtp
+{:swoosh, "~> 1.0"},
+{:gen_smtp, "~> 1.0"}
 ```
 
 The dashboard automatically shows only the transports that are available in your environment.
@@ -442,12 +446,13 @@ listed in `:source_domains` so it's discovered at boot.
 
 ## Transports
 
-AshIntegration supports two transport types, configured per connection. Each has its own settings, security options, and behavior:
+AshIntegration supports three transport types, configured per connection. Each has its own settings, security options, and behavior:
 
 - **[HTTP Transport](guides/http-transport.md)** — JSON payloads over HTTP with Bearer, API Key, or Basic Auth
 - **[Kafka Transport](guides/kafka-transport.md)** — Kafka messages with SASL/TLS security and event-key partitioning
+- **[Email Transport](guides/email-transport.md)** — email over SMTP (built on Swoosh), with credentials encrypted at rest
 
-Both transports lead with the event type on the wire and support payload signing via the `signing` config union — `none` (default), `stripe` (native Stripe-style HMAC-SHA256, configurable header name), or `custom` (a sandboxed signing script; the secret never enters the sandbox). See the transport guides for details.
+The HTTP and Kafka transports lead with the event type on the wire and support payload signing via the `signing` config union — `none` (default), `stripe` (native Stripe-style HMAC-SHA256, configurable header name), or `custom` (a sandboxed signing script; the secret never enters the sandbox). See the transport guides for details.
 
 ## Lua Transform Scripts
 

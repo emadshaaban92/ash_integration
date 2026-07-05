@@ -44,12 +44,15 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
     # auth is a subform on HttpConfig only; KafkaConfig has security. Branch on
     # the connection's transport type exactly like the transport-type-changed
     # handler does, then ensure signing for both (it applies to every transport).
+    type = transport_type(connection.transport_config)
+
     form =
-      case transport_type(connection.transport_config) do
+      case type do
         "http" -> Helpers.ensure_auth_subform(form)
+        "email" -> Helpers.ensure_email_adapter_subform(form)
         _ -> Helpers.ensure_security_subform(form)
       end
-      |> Helpers.ensure_signing_subform()
+      |> maybe_ensure_signing(type)
 
     {header_rows, broker_rows, kafka_header_rows} =
       existing_rows(connection.transport_config)
@@ -71,6 +74,9 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
 
   defp existing_rows(%Ash.Union{type: :kafka, value: config}),
     do: {[], broker_rows(config.brokers), kv_rows(config.headers)}
+
+  defp existing_rows(%Ash.Union{type: :email, value: config}),
+    do: {kv_rows(config.headers), [], []}
 
   defp existing_rows(_), do: {[], [], []}
 
@@ -114,9 +120,10 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
     form =
       case new_type do
         "http" -> Helpers.ensure_auth_subform(form)
+        "email" -> Helpers.ensure_email_adapter_subform(form)
         _ -> Helpers.ensure_security_subform(form)
       end
-      |> Helpers.ensure_signing_subform()
+      |> maybe_ensure_signing(new_type)
 
     {:noreply,
      assign(socket,
@@ -125,7 +132,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
        header_rows: [],
        broker_rows: [],
        kafka_header_rows: [],
-       has_secrets: %{signing: false, auth: false, sasl_password: false}
+       has_secrets: %{signing: false, auth: false, sasl_password: false, smtp_password: false}
      )}
   end
 
@@ -152,6 +159,9 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
 
   def handle_event("security-type-changed", params, socket),
     do: union_type_changed(socket, params, :sasl_password)
+
+  def handle_event("adapter-type-changed", params, socket),
+    do: union_type_changed(socket, params, :smtp_password)
 
   def handle_event("signing-type-changed", params, socket),
     do: union_type_changed(socket, params, :signing)
@@ -181,6 +191,10 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
 
   defp transport_type(%Ash.Union{type: type}), do: to_string(type)
   defp transport_type(_), do: "http"
+
+  # Payload signing applies to HTTP and Kafka; email has no signing scheme.
+  defp maybe_ensure_signing(form, "email"), do: form
+  defp maybe_ensure_signing(form, _type), do: Helpers.ensure_signing_subform(form)
 
   defp success_message(:new), do: "Connection created"
   defp success_message(:edit), do: "Connection updated"
@@ -238,7 +252,10 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
               myself={@myself}
             />
 
-            <div class="card card-border border-base-300 p-4 mt-4">
+            <div
+              :if={@selected_transport != "email"}
+              class="card card-border border-base-300 p-4 mt-4"
+            >
               <h4 class="font-semibold mb-3">Payload Signing</h4>
               <.inputs_for :let={sig} field={tc[:signing]}>
                 <.input
@@ -330,7 +347,8 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
 
     base =
       [{"HTTP (Webhook)", "http"}] ++
-        if(:kafka in available, do: [{"Kafka", "kafka"}], else: [])
+        if(:kafka in available, do: [{"Kafka", "kafka"}], else: []) ++
+        if(:email in available, do: [{"Email (SMTP)", "email"}], else: [])
 
     selected_atom = String.to_existing_atom(selected_transport)
 

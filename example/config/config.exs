@@ -105,6 +105,11 @@ config :example, Example.Vault,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
+# The email transport uses Swoosh's SMTP adapter (gen_smtp), not an HTTP API
+# adapter, so Swoosh needs no HTTP API client. Disabling it avoids Swoosh's
+# boot-time hackney requirement.
+config :swoosh, :api_client, false
+
 config :ash_integration,
   otp_app: :example,
   connection_resource: Example.Outbound.Connection,

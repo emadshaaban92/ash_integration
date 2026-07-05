@@ -55,6 +55,22 @@ defmodule Example.Outbound.ConnectionFormLiveTest do
     assert html =~ ~s(name="form[transport_config][signing][_union_type]")
   end
 
+  test "mounts the edit form for an Email connection with its SMTP adapter subform", %{
+    conn: conn,
+    user: user
+  } do
+    email = create_email_connection!(user)
+
+    {:ok, _view, html} = live(conn, edit_path(email.id))
+
+    # Email gets the adapter subform, not auth/security.
+    assert html =~ ~s(name="form[transport_config][adapter][_union_type]")
+    refute html =~ ~s(name="form[transport_config][auth][_union_type]")
+    refute html =~ ~s(name="form[transport_config][security][_union_type]")
+    # Email has no payload-signing scheme, so that card is not rendered.
+    refute html =~ ~s(name="form[transport_config][signing][_union_type]")
+  end
+
   # ── helpers ───────────────────────────────────────────────────────────────
 
   defp edit_path(id), do: "/integrations/connections/edit/#{id}"
@@ -101,6 +117,24 @@ defmodule Example.Outbound.ConnectionFormLiveTest do
           brokers: ["localhost:9092"],
           topic: "default-topic",
           security: %{type: "none"}
+        }
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
+  end
+
+  defp create_email_connection!(owner) do
+    Connection
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        name: "Email-#{System.unique_integer([:positive])}",
+        owner_id: owner.id,
+        transport_config: %{
+          type: :email,
+          from: "notifications@acme.com",
+          adapter: %{type: "smtp", relay: "smtp.acme.com", port: 587}
         }
       },
       authorize?: false

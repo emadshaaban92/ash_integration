@@ -82,8 +82,10 @@ defmodule Example.MixProject do
       {:cloak, "~> 1.1"},
       {:picosat_elixir, "~> 0.2"},
       {:excoveralls, "~> 0.18", only: :test},
-      # Optional transports — add this to enable Kafka in the dashboard
-      {:brod, "~> 4.0"}
+      # Optional transports — add these to enable Kafka / Email in the dashboard
+      {:brod, "~> 4.0"},
+      {:swoosh, "~> 1.0"},
+      {:gen_smtp, "~> 1.0"}
     ]
   end
 
