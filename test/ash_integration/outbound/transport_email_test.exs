@@ -254,11 +254,40 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
       assert Keyword.get(tls_options, :cacerts) == :public_key.cacerts_get()
     end
 
+    test "verify_peer defaults server_name_indication to the relay host (STARTTLS SNI)" do
+      assert {:ok, _adapter, config} =
+               Email.adapter_config(adapter_union(relay: "smtp.gmail.com"), nil)
+
+      tls_options = Keyword.fetch!(config, :tls_options)
+      assert Keyword.get(tls_options, :server_name_indication) == ~c"smtp.gmail.com"
+    end
+
+    test "an explicit sni overrides the relay host" do
+      assert {:ok, _adapter, config} =
+               Email.adapter_config(
+                 adapter_union(relay: "smtp.internal", sni: "mail.example.com"),
+                 nil
+               )
+
+      tls_options = Keyword.fetch!(config, :tls_options)
+      assert Keyword.get(tls_options, :server_name_indication) == ~c"mail.example.com"
+    end
+
     test "verify_none yields only the chosen opt-out when explicitly selected" do
       assert {:ok, _adapter, config} =
                Email.adapter_config(adapter_union(verify: :verify_none), nil)
 
       assert Keyword.fetch!(config, :tls_options) == [verify: :verify_none]
+    end
+
+    test "verify_none omits server_name_indication even with a relay host" do
+      assert {:ok, _adapter, config} =
+               Email.adapter_config(
+                 adapter_union(verify: :verify_none, relay: "smtp.gmail.com"),
+                 nil
+               )
+
+      refute Keyword.has_key?(Keyword.fetch!(config, :tls_options), :server_name_indication)
     end
 
     test "a valid cacert_pem AUGMENTS the OS trust store (roots ++ pasted DER)" do

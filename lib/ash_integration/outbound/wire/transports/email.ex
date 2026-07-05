@@ -146,7 +146,10 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   #
   # `tls_options` is verified-by-default (see `TlsOptions`): certs are checked on
   # both the implicit-SSL (`ssl: true`) and STARTTLS-upgrade paths unless the
-  # operator sets `verify: :verify_none` on this one connection.
+  # operator sets `verify: :verify_none` on this one connection. The relay host is
+  # passed as the default SNI so the STARTTLS upgrade — which gen_smtp opens with no
+  # server_name_indication — still verifies (verify_peer + the hostname match_fun
+  # otherwise reject an otherwise-valid cert for lack of a reference hostname).
   def adapter_config(%Ash.Union{type: :smtp, value: smtp}, _email) do
     with {:ok, loaded} <- Utils.load_secret(smtp, [:password], "SMTP password"),
          {:ok, tls_options} <- tls_options(smtp) do
@@ -213,7 +216,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   # classify it as a non-retryable transport failure rather than crashing the
   # batcher (mirrors `load_secret`'s treatment of a decrypt failure).
   defp tls_options(smtp) do
-    case TlsOptions.build(smtp) do
+    case TlsOptions.build(smtp, default_sni: smtp.relay) do
       {:ok, opts} ->
         {:ok, opts}
 

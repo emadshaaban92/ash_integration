@@ -24,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     behavior, or trust the endpoint's private CA via `cacert_pem`. The opt-out is
     per-connection and stored/visible — there is deliberately **no global flag**
     to disable verification everywhere.
-  - New per-connection fields: `verify` (`:verify_peer` default | `:verify_none`)
-    and `cacert_pem` on Kafka `:tls`/`:sasl_tls` and SMTP; plus `sni` (handshake
-    server-name override) on the Kafka TLS variants. `cacert_pem` is an **inline
+  - New per-connection fields: `verify` (`:verify_peer` default | `:verify_none`),
+    `cacert_pem`, and `sni` (handshake server-name override) on Kafka
+    `:tls`/`:sasl_tls` and SMTP. `cacert_pem` is an **inline
     PEM certificate** stored on the connection record (so a connection is
     self-contained and works across a multi-node cluster with no side-channel
     file); when set it **augments** the OS trust store rather than replacing it.
@@ -158,6 +158,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     auto-halt. When it fires it reuses the `[:ash_integration, :subscription,
     :suspended]` event with `failure_class: "parked"` (and `parked_count` in
     measurements), so a suspension monitor catches the opt-in halt.
+
+### Fixed
+
+- **SMTP STARTTLS with `verify: :verify_peer` (the default) no longer fails the
+  handshake with `bad_certificate`.** gen_smtp upgrades a plaintext connection by
+  calling `ssl:connect/3` on the existing socket without setting
+  `server_name_indication`, so verify_peer + the HTTPS hostname match_fun had no
+  reference hostname and rejected an otherwise-valid certificate (surfaced as
+  `SMTP rejected: :tls_failed`). The SMTP relay host is now passed through as the
+  default SNI, so the upgrade verifies. `verify: :verify_none` still bypasses it,
+  and an explicit `sni` still wins.
 
 ## [0.2.0]
 

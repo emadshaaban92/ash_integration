@@ -85,6 +85,15 @@ defmodule AshIntegration.Transport.EmailAdapter.Smtp do
       public? true
       sensitive? true
     end
+
+    # Optional server-name override for the TLS handshake. By default the relay
+    # host is used as the SNI (so the STARTTLS upgrade, which gen_smtp opens with
+    # no server_name_indication, still verifies); set this only when the relay
+    # fronts a certificate whose CN differs from the relay address.
+    attribute :sni, :string do
+      allow_nil? true
+      public? true
+    end
   end
 
   validations do

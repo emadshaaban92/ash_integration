@@ -587,6 +587,17 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
               Paste a private/self-signed CA certificate to trust it in addition to
               the public trust store. Only needed for private/self-signed CAs.
             </p>
+            <.input
+              field={adapter[:sni]}
+              type="text"
+              label="Server name override (optional)"
+              placeholder="mail.example.com"
+              phx-debounce="blur"
+            />
+            <p class="text-xs text-base-content/60 -mt-1 mb-2">
+              Defaults to the relay host. Only set this when the relay presents a
+              certificate whose name differs from the relay address.
+            </p>
         <% end %>
       </.inputs_for>
     </div>
