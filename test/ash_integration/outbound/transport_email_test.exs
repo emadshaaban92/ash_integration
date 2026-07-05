@@ -12,7 +12,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
   # it crash the batch.
   defmodule RaisingAdapter do
     def deliver(_email, _config) do
-      :erlang.map_get(:content_type_params, %{})
+      raise KeyError, key: :content_type_params, term: %{}
     end
   end
 
