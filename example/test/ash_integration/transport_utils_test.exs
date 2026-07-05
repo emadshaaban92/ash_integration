@@ -143,4 +143,84 @@ defmodule AshIntegration.TransportUtilsTest do
       assert Utils.redact_response_body(nil) == nil
     end
   end
+
+  describe "mask_response_body/1" do
+    test "masks reflected auth/signature/cookie headers echoed in the body" do
+      body =
+        ~s({"authorization":"Bearer s3cret","x-signature":"t=1,v1=abc","cookie":"sid=xyz","ok":true})
+
+      masked = Utils.mask_response_body(body)
+
+      refute masked =~ "s3cret"
+      refute masked =~ "v1=abc"
+      refute masked =~ "sid=xyz"
+      assert masked =~ "[REDACTED]"
+      # The OTHER system's actual content is preserved.
+      assert masked =~ "ok"
+    end
+
+    test "is idempotent — masking an already-masked body is a no-op" do
+      body = ~s({"authorization":"Bearer s3cret","ok":true})
+      once = Utils.mask_response_body(body)
+
+      assert Utils.mask_response_body(once) == once
+      refute once =~ "s3cret"
+    end
+
+    test "does NOT truncate — a long non-secret body passes through whole" do
+      body = String.duplicate("x", 10_000)
+      assert Utils.mask_response_body(body) == body
+    end
+
+    test "passes nil through" do
+      assert Utils.mask_response_body(nil) == nil
+    end
+  end
+
+  describe "mask_and_cap_response_body/1" do
+    test "masks a reflected secret in the stored copy" do
+      body = ~s(reflected request headers: authorization: Bearer s3cret-token)
+      result = Utils.mask_and_cap_response_body(body)
+
+      refute result =~ "s3cret-token"
+      assert result =~ "[REDACTED]"
+    end
+
+    test "keeps a normal body full-size but caps a pathological body over the default ceiling" do
+      # Under the generous default ceiling: verbatim, no truncation.
+      small = String.duplicate("y", 10_000)
+      assert Utils.mask_and_cap_response_body(small) == small
+
+      # Over the default 64 KB ceiling: capped, but far more generously than the
+      # 4 KB audit Log copy (`redact_response_body/1`).
+      huge = String.duplicate("z", 70_000)
+      stored = Utils.mask_and_cap_response_body(huge)
+
+      assert stored =~ "(truncated)"
+      assert byte_size(stored) < byte_size(huge)
+      assert byte_size(stored) > 4_096
+      assert byte_size(Utils.redact_response_body(huge)) < byte_size(stored)
+    end
+
+    test "reads the ceiling from config (:max_stored_response_body_len)" do
+      original = Application.get_env(:ash_integration, :max_stored_response_body_len)
+      Application.put_env(:ash_integration, :max_stored_response_body_len, 128)
+
+      try do
+        stored = Utils.mask_and_cap_response_body(String.duplicate("z", 500))
+
+        assert stored =~ "(truncated)"
+        assert byte_size(stored) < 500
+      after
+        case original do
+          nil -> Application.delete_env(:ash_integration, :max_stored_response_body_len)
+          value -> Application.put_env(:ash_integration, :max_stored_response_body_len, value)
+        end
+      end
+    end
+
+    test "passes nil through" do
+      assert Utils.mask_and_cap_response_body(nil) == nil
+    end
+  end
 end

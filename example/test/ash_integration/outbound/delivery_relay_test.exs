@@ -222,6 +222,49 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
+  describe "reflected-secret masking in delivery_metadata (the dashboard's full-detail view)" do
+    test "stores the response body with a reflected outbound secret MASKED", %{connection: conn} do
+      # A debug/echo target reflects our own live `Authorization`/`x-signature` back in
+      # its body — that is OUR outbound credential and must never be persisted.
+      echoed =
+        "reflected request:\nauthorization: Bearer super-secret-token\n" <>
+          "x-signature: t=1,v1=deadbeef\nstatus: ok"
+
+      stub_webhook_body(200, echoed)
+      d = scheduled_delivery!(create_subscription!(conn))
+
+      drain_delivery!()
+
+      delivered = reload(d)
+      assert delivered.state == :delivered
+      stored = delivered.delivery_metadata["response_body"]
+
+      assert stored =~ "[REDACTED]"
+      refute stored =~ "super-secret-token"
+      refute stored =~ "deadbeef"
+      # The OTHER system's actual content survives — this is the debugging view.
+      assert stored =~ "status: ok"
+
+      # The audit Log copy is likewise masked (re-masking is idempotent).
+      assert [log] = Ash.read!(Log, authorize?: false)
+      assert log.response_body =~ "[REDACTED]"
+      refute log.response_body =~ "super-secret-token"
+    end
+
+    test "stores a normal (non-secret) response body VERBATIM — full length, unchanged", %{
+      connection: conn
+    } do
+      body = ~s(warehouse=ACME-01; note=shipment received, 42 units; tracking=1Z999AA)
+      stub_webhook_body(200, body)
+      d = scheduled_delivery!(create_subscription!(conn))
+
+      drain_delivery!()
+
+      # The debugging use case: the dashboard shows exactly what the target sent.
+      assert reload(d).delivery_metadata["response_body"] == body
+    end
+  end
+
   describe "terminal (:permanent) — non-retryable, terminal on the first attempt" do
     test "an HTTP 4xx is terminal at once (`:failed` + terminal_reason), surfaced, never re-claimed",
          %{connection: conn} do
@@ -490,6 +533,17 @@ defmodule Example.Outbound.DeliveryRelayTest do
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────
+
+  # Stub the webhook target to reply with an exact `body` (as `text/plain`, so Req
+  # keeps it a raw binary — `body_to_string/1` then stores it byte-for-byte, letting
+  # a test assert on the exact stored/masked response body).
+  defp stub_webhook_body(status, body) do
+    Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("text/plain")
+      |> Plug.Conn.send_resp(status, body)
+    end)
+  end
 
   # A Broadway message wrapping a claimed delivery, as the producer would emit it.
   defp message(delivery) do

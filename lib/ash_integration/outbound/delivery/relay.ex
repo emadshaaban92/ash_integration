@@ -61,6 +61,7 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   alias AshIntegration.Outbound.Delivery.Dispatcher
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
   alias AshIntegration.Outbound.Wire.Transport
+  alias AshIntegration.Transport.Utils
   alias Broadway.Message
 
   @doc """
@@ -153,6 +154,8 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   defp apply_non_deliver(%Message{data: _delivery}), do: :ok
 
   defp apply_result(delivery, {:ok, metadata}) do
+    metadata = mask_stored_metadata(metadata)
+
     # Emit `:delivered` only when the fenced `:deliver` actually applied (a stale
     # claimer that lost the lease race wrote nothing).
     case finalize(delivery, :deliver, %{delivery_metadata: metadata}) do
@@ -167,6 +170,7 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   # bumped it). A `:failed` row keeps its lane via the `{scheduled,failed}` index, so
   # ordering holds and a terminal head blocks its lane.
   defp apply_result(delivery, {:error, metadata}) do
+    metadata = mask_stored_metadata(metadata)
     error_message = Map.get(metadata, :error_message, "Unknown error")
 
     cond do
@@ -263,6 +267,23 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
       _ -> nil
     end
   end
+
+  # Mask any reflected outbound secret (our own `authorization`/`x-signature`/
+  # `cookie`/… echoed back by a debug/echo endpoint) in the `response_body` BEFORE
+  # it is persisted to `delivery_metadata` and rendered on the dashboard. Done at
+  # this single choke point — every transport result flows through here — so any
+  # future transport that adds a `response_body` key is covered uniformly. The
+  # masked-but-full-size copy stays useful for operators; the 4 KB audit-Log
+  # truncation is applied separately when the Log row is written (masking is
+  # idempotent, so re-masking there is a no-op). Handles both atom keys (a fresh
+  # transport result) and string keys (a round-tripped map).
+  defp mask_stored_metadata(%{response_body: body} = metadata),
+    do: %{metadata | response_body: Utils.mask_and_cap_response_body(body)}
+
+  defp mask_stored_metadata(%{"response_body" => body} = metadata),
+    do: %{metadata | "response_body" => Utils.mask_and_cap_response_body(body)}
+
+  defp mask_stored_metadata(metadata), do: metadata
 
   # Apply a state-transition action, fenced on the lease token (`claimed_at` the
   # claimer saw) so a stale claimer never finalizes a re-claimed row. An unmatched
