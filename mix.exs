@@ -100,7 +100,8 @@ defmodule AshIntegration.MixProject do
         "guides/producers.md",
         "guides/http-transport.md",
         "guides/kafka-transport.md",
-        "guides/email-transport.md"
+        "guides/email-transport.md",
+        "guides/whatsapp-transport.md"
       ],
       groups_for_extras: [
         Guides: ~r/guides\/.*/

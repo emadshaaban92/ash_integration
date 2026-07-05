@@ -492,6 +492,186 @@ defmodule Example.Outbound.DeliveryResolverTest do
     end
   end
 
+  describe "WhatsApp" do
+    test "the transform renders the recipient and expands body_params into a body component",
+         %{owner: owner} do
+      dest = whatsapp_connection!(owner)
+
+      script = """
+      function transform(event, defaults)
+        defaults.to = event.data.phone
+        defaults.type = "template"
+        defaults.template = { name = "order_shipped", language = "en_US",
+                              body_params = { event.data.order_id, event.data.tracking } }
+        return defaults
+      end
+      """
+
+      sub = subscription!(dest, "stock.changed", script)
+
+      {:ok, d} =
+        resolve(dest, sub, %{"phone" => "+15551234567", "order_id" => "A-1", "tracking" => "T-9"})
+
+      # A leading "+" is stripped to bare E.164 digits.
+      assert d["to"] == "15551234567"
+      assert d["type"] == "template"
+      assert d["template"]["name"] == "order_shipped"
+      assert d["template"]["language"] == "en_US"
+
+      assert d["template"]["components"] == [
+               %{
+                 "type" => "body",
+                 "parameters" => [
+                   %{"type" => "text", "text" => "A-1"},
+                   %{"type" => "text", "text" => "T-9"}
+                 ]
+               }
+             ]
+    end
+
+    test "a raw components array is an escape hatch that passes through untouched", %{
+      owner: owner
+    } do
+      dest = whatsapp_connection!(owner)
+
+      script = """
+      function transform(event, defaults)
+        defaults.to = "15551234567"
+        defaults.type = "template"
+        defaults.template = { name = "receipt", language = "en_US",
+          components = { { type = "button", sub_type = "url", index = "0",
+                           parameters = { { type = "text", text = "TOKEN" } } } } }
+        return defaults
+      end
+      """
+
+      sub = subscription!(dest, "stock.changed", script)
+      {:ok, d} = resolve(dest, sub, %{})
+
+      assert [%{"type" => "button", "sub_type" => "url"}] = d["template"]["components"]
+    end
+
+    test "a text (session) message renders its body", %{owner: owner} do
+      dest = whatsapp_connection!(owner)
+
+      script = """
+      function transform(event, defaults)
+        defaults.to = "15551234567"
+        defaults.type = "text"
+        defaults.text = "Your code is " .. (event.data.code or "")
+        return defaults
+      end
+      """
+
+      sub = subscription!(dest, "stock.changed", script)
+      {:ok, d} = resolve(dest, sub, %{"code" => "123456"})
+
+      assert d["type"] == "text"
+      assert d["text"] == "Your code is 123456"
+    end
+
+    test "the route's default template name/language and recipient seed the defaults",
+         %{owner: owner} do
+      dest = whatsapp_connection!(owner)
+
+      route = %{type: :whatsapp, to: "15550000000", template_name: "welcome", language: "en_US"}
+
+      sub =
+        email_subscription!(
+          dest,
+          "stock.changed",
+          "function transform(event, defaults) return defaults end",
+          route
+        )
+
+      {:ok, d} = resolve(dest, sub, %{})
+
+      assert d["to"] == "15550000000"
+      assert d["type"] == "template"
+      assert d["template"]["name"] == "welcome"
+      assert d["template"]["language"] == "en_US"
+    end
+
+    test "a missing recipient parks", %{owner: owner} do
+      dest = whatsapp_connection!(owner)
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          ~s|function transform(event, defaults) defaults.type = "text" defaults.text = "hi" return defaults end|
+        )
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "requires a recipient"
+    end
+
+    test "a template without a name parks", %{owner: owner} do
+      dest = whatsapp_connection!(owner)
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          ~s|function transform(event, defaults) defaults.to = "15551234567" defaults.type = "template" defaults.template = { language = "en_US" } return defaults end|
+        )
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "requires a name"
+    end
+
+    test "a non-E.164 recipient parks (digits only)", %{owner: owner} do
+      dest = whatsapp_connection!(owner)
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          ~s|function transform(event, defaults) defaults.to = "not-a-phone" defaults.type = "text" defaults.text = "hi" return defaults end|
+        )
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "E.164"
+    end
+
+    test "a CR/LF in the recipient parks (control chars rejected)", %{owner: owner} do
+      dest = whatsapp_connection!(owner)
+
+      sub =
+        subscription!(
+          dest,
+          "stock.changed",
+          ~s|function transform(event, defaults) defaults.to = "1555\\r\\n1234567" defaults.type = "text" defaults.text = "hi" return defaults end|
+        )
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "E.164"
+    end
+
+    test "a table-valued body_param parks instead of raising", %{owner: owner} do
+      # A Lua table body_param decodes to a map; expanding it with `to_string/1`
+      # would RAISE out of the resolver (crash-looping the batch on re-claim) rather
+      # than returning {:error, _}. It must PARK with a readable reason like every
+      # other invalid-output path.
+      dest = whatsapp_connection!(owner)
+
+      script = """
+      function transform(event, defaults)
+        defaults.to = "15551234567"
+        defaults.type = "template"
+        defaults.template = { name = "order_shipped", language = "en_US",
+                              body_params = { { nested = true } } }
+        return defaults
+      end
+      """
+
+      sub = subscription!(dest, "stock.changed", script)
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "body_params entries must be strings/numbers/booleans"
+    end
+  end
+
   # The transform script is validated at SAVE time (not just at dispatch) by
   # delegating to the runtime through the Transformer seam, so a malformed script
   # is a clean field error on the form rather than a parked delivery later.
@@ -704,6 +884,22 @@ defmodule Example.Outbound.DeliveryResolverTest do
     connection!(owner, config)
   end
 
+  defp whatsapp_connection!(owner, _opts \\ []) do
+    config = %{
+      type: :whatsapp,
+      adapter: %{
+        type: "meta_cloud",
+        phone_number_id: "123456789012345",
+        api_version: "v21.0",
+        access_token: "EAAG-token"
+      }
+    }
+
+    connection!(owner, config)
+  end
+
+  # Generic route-carrying subscription factory (used by both the Email and
+  # WhatsApp route tests).
   defp email_subscription!(dest, event_type, transform_source, route_config) do
     Subscription
     |> Ash.Changeset.for_create(

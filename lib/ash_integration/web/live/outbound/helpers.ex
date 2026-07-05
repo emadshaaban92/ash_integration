@@ -174,6 +174,23 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     end
   end
 
+  def ensure_whatsapp_adapter_subform(form) do
+    tc = form.forms[:transport_config]
+
+    cond do
+      is_nil(tc) ->
+        form
+
+      is_nil(tc.forms[:adapter]) ->
+        AshPhoenix.Form.add_form(form, "form[transport_config][adapter]",
+          params: %{"_union_type" => "meta_cloud"}
+        )
+
+      true ->
+        form
+    end
+  end
+
   # Signing applies to the HTTP and Kafka transports, so this is ensured for both.
   # Email carries no payload-signing scheme (nothing on the receiving end verifies
   # it), so the connection form skips it for email.
@@ -218,10 +235,14 @@ defmodule AshIntegration.Web.Outbound.Helpers do
             |> maybe_drop_blank("client_cert_pem")
             |> maybe_drop_blank("client_key_pem")
           end)
-          # `adapter` is Email-only (the SMTP credential); update_if_present leaves
-          # http/kafka params untouched since they carry no `adapter` key.
+          # `adapter` is Email-only (the SMTP `password`) or WhatsApp-only (the
+          # Meta Cloud `access_token`); update_if_present leaves http/kafka params
+          # untouched since they carry no `adapter` key, and dropping a blank of a
+          # key the other adapter lacks is a harmless no-op.
           |> update_if_present("adapter", fn adapter when is_map(adapter) ->
-            maybe_drop_blank(adapter, "password")
+            adapter
+            |> maybe_drop_blank("password")
+            |> maybe_drop_blank("access_token")
           end)
 
         put_in(params, ["transport_config"], tc)
@@ -261,6 +282,9 @@ defmodule AshIntegration.Web.Outbound.Helpers do
       %Ash.Union{type: :email, value: tc} ->
         %{smtp_password: email_smtp_password?(tc.adapter), auth: false}
 
+      %Ash.Union{type: :whatsapp, value: tc} ->
+        %{access_token: whatsapp_access_token?(tc.adapter), auth: false}
+
       _ ->
         %{signing: false, auth: false}
     end
@@ -285,6 +309,11 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     do: smtp.encrypted_password != nil
 
   defp email_smtp_password?(_), do: false
+
+  defp whatsapp_access_token?(%Ash.Union{type: :meta_cloud, value: mc}),
+    do: mc.encrypted_access_token != nil
+
+  defp whatsapp_access_token?(_), do: false
 
   def inject_headers_map(params) do
     params
