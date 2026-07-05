@@ -112,27 +112,41 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
   end
 
   def handle_event("reprocess-parked", _params, socket) do
+    case socket.assigns.filters.connection do
+      # No single connection is in scope — there is nothing to bulk-reprocess.
+      nil -> {:noreply, socket}
+      connection_id -> {:noreply, reprocess_parked(socket, connection_id)}
+    end
+  end
+
+  # Bulk reprocess reads+mutates ALL of a connection's parked deliveries under
+  # system authority (`authorize?: false` in the Reprocessor). LiveView events are
+  # client-triggerable even when the button is hidden, so this server path is the
+  # only real gate. Fail closed in two independent ways before touching anything:
+  #
+  #   1. Resolve the connection *as the actor* — if they can't even READ it (nil /
+  #      error), they have no business re-triggering its deliveries. This binds the
+  #      URL-supplied `connection_id` to something the actor is actually allowed to
+  #      see, instead of trusting the filter param.
+  #   2. Run the STRICT reprocess gate (`maybe_is: false`), so a record-scoped
+  #      (`:maybe`) host policy denies rather than grants.
+  defp reprocess_parked(socket, connection_id) do
     actor = socket.assigns.current_user
 
-    # Bulk reprocess runs under system authority; enforce the actor's permission.
-    can? = Helpers.can?({AshIntegration.event_delivery_resource(), :reprocess}, actor)
+    with {:ok, _connection} <-
+           Ash.get(AshIntegration.connection_resource(), connection_id, actor: actor),
+         true <-
+           Helpers.can_strict?({AshIntegration.event_delivery_resource(), :reprocess}, actor) do
+      %{reprocessed: ok, failed: failed} =
+        Reprocessor.reprocess_parked_for_connection(connection_id)
 
-    case socket.assigns.filters.connection do
-      _ when not can? ->
-        {:noreply, put_flash(socket, :error, "Not authorized to reprocess deliveries")}
+      msg =
+        "Reprocessed #{ok} parked delivery(ies)" <>
+          if(failed > 0, do: ", #{failed} still failing", else: "")
 
-      nil ->
-        {:noreply, socket}
-
-      connection_id ->
-        %{reprocessed: ok, failed: failed} =
-          Reprocessor.reprocess_parked_for_connection(connection_id)
-
-        msg =
-          "Reprocessed #{ok} parked delivery(ies)" <>
-            if(failed > 0, do: ", #{failed} still failing", else: "")
-
-        {:noreply, socket |> put_flash(:info, msg) |> load_deliveries(socket.assigns.page.offset)}
+      socket |> put_flash(:info, msg) |> load_deliveries(socket.assigns.page.offset)
+    else
+      _ -> put_flash(socket, :error, "Not authorized to reprocess deliveries")
     end
   end
 

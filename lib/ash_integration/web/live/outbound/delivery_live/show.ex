@@ -29,7 +29,11 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
           delivery: delivery,
           page_title: delivery.event_type,
           perms: %{
-            reprocess: Helpers.can?({delivery, :reprocess}, actor),
+            # `reprocess` gates the parked-reprocess button, which runs under system
+            # authority — strict (fail-closed on an indeterminate policy). `reset`/
+            # `cancel` drive actor-authorized updates whose real enforcement is the
+            # Ash action itself, so their affordance may stay permissive.
+            reprocess: Helpers.can_strict?({delivery, :reprocess}, actor),
             reset: Helpers.can?({delivery, :reset_to_pending}, actor),
             cancel: Helpers.can?({delivery, :cancel}, actor)
           }
@@ -45,8 +49,9 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
   @impl true
   def handle_event("reprocess", _params, socket) do
     # Reprocess re-runs project→transform under system authority, so it bypasses
-    # the actor's Ash policies — enforce the actor's permission to reprocess here.
-    if Helpers.can?({socket.assigns.delivery, :reprocess}, socket.assigns.current_user) do
+    # the actor's Ash policies — the strict gate here is the only real enforcement
+    # (fail-closed on an indeterminate / record-scoped policy).
+    if Helpers.can_strict?({socket.assigns.delivery, :reprocess}, socket.assigns.current_user) do
       do_reprocess(socket)
     else
       {:noreply, put_flash(socket, :error, "Not authorized to reprocess this delivery")}

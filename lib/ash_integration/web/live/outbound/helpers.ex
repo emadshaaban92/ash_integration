@@ -77,10 +77,33 @@ defmodule AshIntegration.Web.Outbound.Helpers do
 
   Hiding a control is cosmetic; the underlying Ash action (run with the same actor)
   is the real enforcement. For the few UI-triggered operations that run under system
-  authority (reprocess/redispatch), call this in the handler too, to enforce.
+  authority (reprocess/redispatch), call `can_strict?/2` in the handler too, to enforce.
   """
   def can?(subject, actor) do
     Ash.can?(subject, actor)
+  rescue
+    _ -> false
+  end
+
+  @doc """
+  **Strict** authorization gate for the privileged operator actions that run the
+  underlying pipeline under system authority (`authorize?: false`) — bulk/single
+  reprocess and event redispatch. Because that pipeline bypasses the host's Ash
+  policies, this UI-side check is the *only* real authz gate, so it must not be
+  permissive.
+
+  Unlike `can?/2`, this passes `maybe_is: false` to `Ash.can?/3`, so an
+  **indeterminate** (record-scoped / `:maybe`) policy DENIES rather than grants. A
+  host whose reprocess policy is "only deliveries of connections you own" resolves
+  to `:maybe` at the query level; the permissive default (`maybe_is: true`) would
+  grant it to *everyone*. This variant fails closed on both an indeterminate policy
+  and any error resolving the check.
+
+  Use this for every privileged operator gate; keep `can?/2` for read-only UI
+  affordance (showing/hiding buttons), where a false grant is merely cosmetic.
+  """
+  def can_strict?(subject, actor) do
+    Ash.can?(subject, actor, maybe_is: false)
   rescue
     _ -> false
   end

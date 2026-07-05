@@ -19,5 +19,8 @@ defmodule AshIntegration.Outbound.Capture.Event do
   """
 
   use Spark.Dsl.Extension,
-    transformers: [AshIntegration.Outbound.Capture.Event.Transformer]
+    transformers: [
+      AshIntegration.Outbound.Capture.Event.Transformer,
+      AshIntegration.Outbound.Capture.Event.PolicyTransformer
+    ]
 end
