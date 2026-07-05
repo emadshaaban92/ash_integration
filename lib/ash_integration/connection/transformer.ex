@@ -400,9 +400,6 @@ defmodule AshIntegration.Connection.Transformer do
     if Info.action(dsl_state, :index) do
       dsl_state
     else
-      search_arg =
-        Transformer.build_entity!(Dsl, [:actions, :read], :argument, name: :search, type: :string)
-
       pagination =
         Transformer.build_entity!(Dsl, [:actions, :read], :pagination,
           keyset?: true,
@@ -419,7 +416,6 @@ defmodule AshIntegration.Connection.Transformer do
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :read,
           name: :index,
-          arguments: [search_arg],
           preparations: [prepare],
           pagination: pagination
         )

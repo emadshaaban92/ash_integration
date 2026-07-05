@@ -25,18 +25,6 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
 
   @table __MODULE__
 
-  # How long before a token's expiry to refresh it, so a token doesn't expire
-  # mid-flight between the cache read and the wire send.
-  @refresh_skew_ms Application.compile_env(:ash_integration, :oauth2_refresh_skew_ms, 60_000)
-
-  # An idle entry (expired and untouched) is swept after this long, bounding
-  # memory for credentials that stop being used. Mirrors `:kafka_idle_timeout_ms`.
-  @idle_timeout_ms Application.compile_env(:ash_integration, :oauth2_idle_timeout_ms, 300_000)
-  @check_interval_ms div(@idle_timeout_ms, 2)
-
-  # How long a waiter blocks for the leader's fetch result before giving up.
-  @wait_timeout_ms Application.compile_env(:ash_integration, :oauth2_wait_timeout_ms, 30_000)
-
   # Ceiling on a token's effective lifetime, regardless of the server-reported
   # `expires_in`. A buggy or hostile IdP returning a huge `expires_in` would
   # otherwise pin a token far past real server-side revocation AND defeat the idle
@@ -72,7 +60,7 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   end
 
   defp coordinate(key, descriptor) do
-    case GenServer.call(__MODULE__, {:acquire, key}, @wait_timeout_ms) do
+    case GenServer.call(__MODULE__, {:acquire, key}, wait_timeout_ms()) do
       {:hit, token} ->
         {:ok, token}
 
@@ -87,12 +75,14 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   end
 
   defp await_leader(key) do
+    wait_timeout_ms = wait_timeout_ms()
+
     receive do
       {:oauth2_token, ^key, result} -> finalize(result)
     after
-      @wait_timeout_ms ->
+      wait_timeout_ms ->
         Logger.warning(
-          "OAuth2 TokenCache: timed out after #{@wait_timeout_ms}ms waiting for an " <>
+          "OAuth2 TokenCache: timed out after #{wait_timeout_ms}ms waiting for an " <>
             "in-flight token fetch; failing this delivery (retryable)"
         )
 
@@ -202,7 +192,7 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   end
 
   def handle_info(:cleanup, state) do
-    cutoff = now() - @idle_timeout_ms
+    cutoff = now() - idle_timeout_ms()
 
     # Match expired-and-idle entries: `expires_at < cutoff`. `:ets.select_delete`
     # with a guard on the 4th element (expires_at).
@@ -256,12 +246,31 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
     # 60s default the provider uses when the endpoint omits `expires_in`) would put
     # `refresh_at` at or behind `now` and never be cached at all: every delivery
     # would re-fetch. Capping at half the lifetime guarantees a positive cache window.
-    skew = min(@refresh_skew_ms, div(ttl_ms, 2))
+    skew = min(refresh_skew_ms(), div(ttl_ms, 2))
     refresh_at = expires_at - skew
     :ets.insert(@table, {key, token, refresh_at, expires_at})
   end
 
-  defp schedule_cleanup, do: Process.send_after(self(), :cleanup, @check_interval_ms)
+  defp schedule_cleanup, do: Process.send_after(self(), :cleanup, check_interval_ms())
 
   defp now, do: System.monotonic_time(:millisecond)
+
+  # ── Host-tunable timings ──────────────────────────────────────────────────────
+  # Read at RUNTIME (`Application.get_env`) so a release's `runtime.exs` config is
+  # honoured rather than baked in at compile time. Each is a cheap ETS-backed
+  # lookup on a code path that already does I/O (token store / idle sweep).
+
+  # How long before a token's expiry to refresh it, so a token doesn't expire
+  # mid-flight between the cache read and the wire send.
+  defp refresh_skew_ms, do: Application.get_env(:ash_integration, :oauth2_refresh_skew_ms, 60_000)
+
+  # An idle entry (expired and untouched) is swept after this long, bounding
+  # memory for credentials that stop being used. Mirrors `:kafka_idle_timeout_ms`.
+  defp idle_timeout_ms,
+    do: Application.get_env(:ash_integration, :oauth2_idle_timeout_ms, 300_000)
+
+  defp check_interval_ms, do: div(idle_timeout_ms(), 2)
+
+  # How long a waiter blocks for the leader's fetch result before giving up.
+  defp wait_timeout_ms, do: Application.get_env(:ash_integration, :oauth2_wait_timeout_ms, 30_000)
 end

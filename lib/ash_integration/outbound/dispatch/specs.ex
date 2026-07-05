@@ -106,8 +106,9 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
     ]
   end
 
-  # Resolve + sign the full transport-shaped descriptor (config defaults + transform
-  # over `data`). Transform skip → cancelled; transform error → parked; ok → pending.
+  # Resolve the full transport-shaped descriptor (config defaults + transform over
+  # `data`); the signature/auth are NOT applied here — they are live carve-outs
+  # added at delivery. Transform skip → cancelled; transform error → parked; ok → pending.
   defp materialize_spec(event, subscription, data) do
     envelope = build_envelope(event, data)
 

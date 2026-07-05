@@ -4,10 +4,12 @@ defmodule AshIntegration.Outbound.Declare.Registry do
 
   An event type is not declared centrally — it is the **union** of every
   resource-level `event` declaration that names it. This module derives that
-  union by scanning the configured `source_domains`, and exposes the two views
-  the dispatcher and the form need:
+  union by scanning the configured `source_domains`. The form and dispatcher read
+  the derived `catalog/0` (and `producer_for/1`); the change-capture `triggers`
+  view is derived internally to build the `producer_for/1` lookup and is exposed
+  as `triggers/1` for tests.
 
-    * `triggers/0` — `{resource, action} => [trigger]`, where each trigger is the
+    * `triggers/1` — `{resource, action} => [trigger]`, where each trigger is the
       `%{event_type, versions, producer}` that the `(resource, action)` contributes.
     * `catalog/0` — `event_type => %{versions, producers}`, the derived catalog.
 
@@ -60,8 +62,7 @@ defmodule AshIntegration.Outbound.Declare.Registry do
     |> Enum.find_value(fn t -> if t.event_type == event_type, do: t.producer end)
   end
 
-  @doc "`{resource, action} => [trigger]` — the change-capture side of the registry."
-  def triggers, do: cached().triggers
+  @doc "`{resource, action} => [trigger]` — the change-capture side of the registry (test helper; derive for an explicit resource subset)."
   def triggers(resources), do: build_triggers(resources)
 
   @doc """
@@ -78,10 +79,10 @@ defmodule AshIntegration.Outbound.Declare.Registry do
   def catalog(resources), do: build_catalog(resources)
 
   # ── Boot-built cache (the DSL is compile-time, so the derived registry is
-  # immutable for the running system). `catalog/0` / `triggers/0` / `producer_for/1`
-  # rebuilt from a full domain scan on every dispatch batch, subscription write, and
-  # LiveView render; instead we compute the snapshot once and read it from
-  # `:persistent_term`. ──────────────────────────────────────────────────────────
+  # immutable for the running system). `catalog/0` / `producer_for/1` would
+  # otherwise be rebuilt from a full domain scan on every dispatch batch,
+  # subscription write, and LiveView render; instead we compute the snapshot once
+  # and read it from `:persistent_term`. ─────────────────────────────────────────
 
   @doc """
   Build the derived snapshot and store it in `:persistent_term`. Called once at

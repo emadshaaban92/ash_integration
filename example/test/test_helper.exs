@@ -1,4 +1,4 @@
-ExUnit.start(exclude: [:kafka_integration])
+ExUnit.start()
 Ecto.Adapters.SQL.Sandbox.mode(Example.Repo, :manual)
 
 # Under coverage, also instrument the :ash_integration dependency — the library
