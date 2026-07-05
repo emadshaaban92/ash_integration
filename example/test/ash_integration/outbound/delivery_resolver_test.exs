@@ -647,6 +647,29 @@ defmodule Example.Outbound.DeliveryResolverTest do
       assert {:error, message} = resolve(dest, sub, %{})
       assert message =~ "E.164"
     end
+
+    test "a table-valued body_param parks instead of raising", %{owner: owner} do
+      # A Lua table body_param decodes to a map; expanding it with `to_string/1`
+      # would RAISE out of the resolver (crash-looping the batch on re-claim) rather
+      # than returning {:error, _}. It must PARK with a readable reason like every
+      # other invalid-output path.
+      dest = whatsapp_connection!(owner)
+
+      script = """
+      function transform(event, defaults)
+        defaults.to = "15551234567"
+        defaults.type = "template"
+        defaults.template = { name = "order_shipped", language = "en_US",
+                              body_params = { { nested = true } } }
+        return defaults
+      end
+      """
+
+      sub = subscription!(dest, "stock.changed", script)
+
+      assert {:error, message} = resolve(dest, sub, %{})
+      assert message =~ "body_params entries must be strings/numbers/booleans"
+    end
   end
 
   # The transform script is validated at SAVE time (not just at dispatch) by

@@ -600,14 +600,38 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     do: {:error, "the transform's template.components must be a list, got #{inspect(other)}"}
 
   defp normalize_components(%{"body_params" => params}) when is_list(params) do
-    parameters = Enum.map(params, fn param -> %{"type" => "text", "text" => to_string(param)} end)
-    {:ok, [%{"type" => "body", "parameters" => parameters}]}
+    # Each entry must be a scalar that renders to a Graph text parameter. A Lua
+    # table (decoded as a map) or a list would make `to_string/1` RAISE out of the
+    # resolver — the one invalid-output path that wouldn't park — and a list of
+    # small integers would silently coerce into a charlist. Validate here so bad
+    # output PARKS with a readable reason like every other invalid descriptor.
+    params
+    |> Enum.reduce_while({:ok, []}, fn param, {:ok, acc} ->
+      case body_param_text(param) do
+        {:ok, text} -> {:cont, {:ok, [%{"type" => "text", "text" => text} | acc]}}
+        :error -> {:halt, {:error, "body_params entries must be strings/numbers/booleans"}}
+      end
+    end)
+    |> case do
+      {:ok, parameters} ->
+        {:ok, [%{"type" => "body", "parameters" => Enum.reverse(parameters)}]}
+
+      {:error, _message} = error ->
+        error
+    end
   end
 
   defp normalize_components(%{"body_params" => other}) when not is_nil(other),
     do: {:error, "the transform's template.body_params must be a list, got #{inspect(other)}"}
 
   defp normalize_components(_template), do: {:ok, nil}
+
+  # A body parameter is a scalar rendered to text. Anything else (a table/map or a
+  # list) is rejected so the delivery parks instead of `to_string/1` raising.
+  defp body_param_text(value) when is_binary(value), do: {:ok, value}
+  defp body_param_text(value) when is_boolean(value), do: {:ok, to_string(value)}
+  defp body_param_text(value) when is_number(value), do: {:ok, to_string(value)}
+  defp body_param_text(_value), do: :error
 
   # Store the body/value as the decoded TERM (encoding happens once at delivery).
   # An empty or unset body (nil, or an empty map/list — which Lua can't tell

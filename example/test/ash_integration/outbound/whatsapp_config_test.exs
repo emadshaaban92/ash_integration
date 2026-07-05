@@ -34,6 +34,42 @@ defmodule Example.Outbound.WhatsAppConfigTest do
     assert adapter.business_account_id == "998877"
   end
 
+  test "a phone_number_id with a control character is rejected at save (not at send)", %{
+    owner: owner
+  } do
+    # A CR/LF or space in phone_number_id would be interpolated into the Graph URL
+    # and make Req/Mint RAISE while building the request target — a crash-loop the
+    # send path can't rescue. The `match:` constraint rejects it as a field error.
+    assert {:error, error} = create_whatsapp_connection(owner, phone_number_id: "123\r\n456")
+
+    assert Exception.message(error) =~ "phone_number_id"
+  end
+
+  test "a non-numeric phone_number_id is rejected at save", %{owner: owner} do
+    assert {:error, error} = create_whatsapp_connection(owner, phone_number_id: "123 456")
+
+    assert Exception.message(error) =~ "phone_number_id"
+  end
+
+  test "a malformed api_version is rejected at save", %{owner: owner} do
+    # Anything but `v<major>.<minor>` (e.g. a value carrying whitespace/CR-LF) is
+    # rejected before it can crash the send by corrupting the request target.
+    assert {:error, error} = create_whatsapp_connection(owner, api_version: "v21.0 evil")
+
+    assert Exception.message(error) =~ "api_version"
+  end
+
+  test "a well-formed phone_number_id and api_version save cleanly", %{owner: owner} do
+    conn =
+      whatsapp_connection!(owner, access_token: "EAAG-secret-token")
+
+    %Ash.Union{type: :whatsapp, value: config} = conn.transport_config
+    %Ash.Union{type: :meta_cloud, value: adapter} = config.adapter
+
+    assert adapter.phone_number_id == "123456789012345"
+    assert adapter.api_version == "v21.0"
+  end
+
   test "the access token is required on create", %{owner: owner} do
     assert {:error, error} =
              Connection
@@ -55,11 +91,19 @@ defmodule Example.Outbound.WhatsAppConfigTest do
   end
 
   defp whatsapp_connection!(owner, opts) do
+    case create_whatsapp_connection(owner, opts) do
+      {:ok, conn} -> conn
+      {:error, error} -> raise error
+    end
+  end
+
+  defp create_whatsapp_connection(owner, opts) do
     adapter =
       %{
         type: "meta_cloud",
-        phone_number_id: "123456789012345",
-        access_token: opts[:access_token],
+        phone_number_id: Keyword.get(opts, :phone_number_id, "123456789012345"),
+        api_version: Keyword.get(opts, :api_version, "v21.0"),
+        access_token: Keyword.get(opts, :access_token, "EAAG-secret-token"),
         business_account_id: "998877"
       }
 
@@ -73,7 +117,7 @@ defmodule Example.Outbound.WhatsAppConfigTest do
       },
       authorize?: false
     )
-    |> Ash.create!(authorize?: false)
+    |> Ash.create(authorize?: false)
   end
 
   defp create_user! do

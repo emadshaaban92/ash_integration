@@ -75,57 +75,88 @@ defmodule AshIntegration.Outbound.Wire.Transports.WhatsAppTest do
     end
   end
 
-  describe "classify_error/1 → two-level suspension mapping" do
+  describe "classify_error/2 → two-level suspension mapping" do
     defp error(code), do: %{"error" => %{"code" => code, "message" => "boom"}}
 
     test "rate / pair-rate limits are retryable transport errors" do
       for code <- [429, 130_429, 80_007, 131_056] do
         assert %{failure_class: :transport, retryable: true} =
-                 WhatsApp.classify_error(error(code))
+                 WhatsApp.classify_error(error(code), 400)
       end
     end
 
     test "an expired/invalid access token is a non-retryable transport error (suspend connection)" do
       assert %{failure_class: :transport, retryable: false, error_message: msg} =
-               WhatsApp.classify_error(error(190))
+               WhatsApp.classify_error(error(190), 401)
 
       assert msg =~ "190"
     end
 
+    test "a recognized code refines the status baseline (190 on a 500 is still non-retryable)" do
+      # The HTTP status alone (500) would retry; the recognized token-failure code
+      # overrides it to non-retryable so a broken credential suspends, not loops.
+      assert %{failure_class: :transport, retryable: false} =
+               WhatsApp.classify_error(error(190), 500)
+    end
+
     test "a policy block (368) is a non-retryable transport error" do
-      assert %{failure_class: :transport, retryable: false} = WhatsApp.classify_error(error(368))
+      assert %{failure_class: :transport, retryable: false} =
+               WhatsApp.classify_error(error(368), 403)
     end
 
     test "undeliverable / re-engagement / unsupported / invalid-param are response failures" do
       for code <- [131_026, 131_047, 131_051, 100] do
         assert %{failure_class: :response, retryable: false} =
-                 WhatsApp.classify_error(error(code))
+                 WhatsApp.classify_error(error(code), 400)
       end
     end
 
     test "template errors across the 132000–132016 band are non-retryable response failures" do
       for code <- [132_000, 132_001, 132_007, 132_012, 132_016] do
         assert %{failure_class: :response, retryable: false} =
-                 WhatsApp.classify_error(error(code))
+                 WhatsApp.classify_error(error(code), 400)
       end
     end
 
-    test "an unknown code defaults to a retryable transport error (mirrors HTTP's network default)" do
-      assert %{failure_class: :transport, retryable: true} =
-               WhatsApp.classify_error(error(999_999))
+    test "an unmapped code on a deterministic 4xx is NON-retryable (does not burn retries)" do
+      # A new/unrecognized code arriving on a 400 is a deterministic rejection, so
+      # it defers to the HTTP-status baseline (non-retryable) rather than the old
+      # blanket retryable default that looped until the health window suspended.
+      assert %{failure_class: :transport, retryable: false} =
+               WhatsApp.classify_error(error(999_999), 400)
     end
 
-    test "a bodyless / unparsable error still classifies rather than crashing" do
-      assert %{failure_class: :transport, retryable: true} = WhatsApp.classify_error(nil)
-      assert %{failure_class: :transport, retryable: true} = WhatsApp.classify_error("not json")
-      assert %{failure_class: :transport, retryable: true} = WhatsApp.classify_error(%{})
+    test "an unmapped code on a 429 is retryable (status baseline says try again)" do
+      assert %{failure_class: :transport, retryable: true} =
+               WhatsApp.classify_error(error(999_999), 429)
+    end
+
+    test "an unmapped code on a 5xx is retryable (mirrors HTTP's server-error default)" do
+      assert %{failure_class: :transport, retryable: true} =
+               WhatsApp.classify_error(error(999_999), 503)
+    end
+
+    test "a string error.code is coerced so \"190\" isn't treated as unknown" do
+      assert %{failure_class: :transport, retryable: false} =
+               WhatsApp.classify_error(error("190"), 500)
+    end
+
+    test "a bodyless / unparsable error defers to the HTTP status" do
+      # No recognized code → the status decides: a 5xx retries, a 4xx does not.
+      assert %{failure_class: :transport, retryable: true} = WhatsApp.classify_error(nil, 500)
+
+      assert %{failure_class: :transport, retryable: true} =
+               WhatsApp.classify_error("not json", 500)
+
+      assert %{failure_class: :transport, retryable: true} = WhatsApp.classify_error(%{}, 500)
+      assert %{failure_class: :transport, retryable: false} = WhatsApp.classify_error(nil, 400)
     end
 
     test "a raw JSON string body is decoded before classification" do
       body = ~s({"error":{"code":190,"message":"Session expired"}})
 
       assert %{failure_class: :transport, retryable: false, error_message: msg} =
-               WhatsApp.classify_error(body)
+               WhatsApp.classify_error(body, 401)
 
       assert msg =~ "Session expired"
     end

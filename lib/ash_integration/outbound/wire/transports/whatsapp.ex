@@ -10,8 +10,9 @@ defmodule AshIntegration.Outbound.Wire.Transports.WhatsApp do
   # decrypted per send via `load_secret` and injected as a `Bearer` header — never
   # persisted in the descriptor, never logged.
   #
-  # A non-2xx is classified on Meta's `error.code` (see `classify_error/1`): rate
-  # limits and 5xx are `:transport`/retryable (honoring `Retry-After`), an
+  # A non-2xx is classified on the HTTP status refined by Meta's `error.code` (see
+  # `classify_error/2`): rate limits and 5xx are `:transport`/retryable (honoring
+  # `Retry-After`), an
   # expired/blocked token is `:transport`/non-retryable (suspend the connection),
   # and undeliverable/re-engagement/template/param errors are `:response`/non-retryable
   # (suspend the subscription). NB: a 200 means Meta **accepted** the message, not
@@ -82,8 +83,8 @@ defmodule AshIntegration.Outbound.Wire.Transports.WhatsApp do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, %{whatsapp_message_id: message_id(body), response_status: status}}
 
-      {:ok, %Req.Response{body: body} = resp} ->
-        error = classify_error(body)
+      {:ok, %Req.Response{status: status, body: body} = resp} ->
+        error = classify_error(body, status)
         {:error, HttpWire.put_retry_after(error, error.retryable, resp)}
 
       {:error, %Req.TransportError{reason: reason}} ->
@@ -150,41 +151,64 @@ defmodule AshIntegration.Outbound.Wire.Transports.WhatsApp do
   #   * 132000–132016 — template errors (not found / not approved / param
   #     mismatch / paused / disabled / policy) → `:response`, non-retryable.
   #   * 100 — invalid parameter → `:response`, non-retryable.
-  #   * default unknown (incl. an unclassified 5xx) → `:transport`, retryable,
-  #     mirroring the HTTP transport's network-error default.
+  #   * default unknown code → fall back to the HTTP status, classified exactly as
+  #     the HTTP transport does (`HttpWire.retryable_status?/1`: 5xx and 408/429
+  #     retry, every other 4xx/3xx does not). A deterministic 4xx carrying a
+  #     new/unmapped code is therefore NON-retryable instead of burning retries.
   #
-  # Keyed on the code alone, so it needs no HTTP status: an unrecognized code (or a
-  # bodyless 5xx) lands on the retryable transport default either way. Takes the
-  # decoded response body (a map with `error.code`/`error.message`) or a raw
-  # string; exposed for unit-testing the table.
-  @spec classify_error(map() | binary() | nil) :: map()
-  def classify_error(body) do
+  # The HTTP status is the baseline; a RECOGNIZED Meta code refines it (e.g. a 400
+  # bearing code 190 is still a non-retryable token failure). `error.code` is
+  # coerced to an integer so a string like `"190"` matches the same branch as the
+  # integer. Takes the decoded response body (a map with `error.code`/
+  # `error.message`) or a raw string, plus the response status; exposed for
+  # unit-testing the table.
+  @spec classify_error(map() | binary() | nil, integer()) :: map()
+  def classify_error(body, status) do
     {code, message} = error_fields(body)
-    classify(code, message)
+    classify(coerce_code(code), message, status)
   end
 
+  # A recognized code fixes the outcome regardless of the HTTP status.
+
   # Rate / pair-rate limits — Meta is throttling, retry (Retry-After honored).
-  defp classify(code, message) when code in [429, 130_429, 80_007, 131_056],
+  defp classify(code, message, _status) when code in [429, 130_429, 80_007, 131_056],
     do: transport_error(message, code, true)
 
   # Access token expired/invalid — the connection credential is broken.
-  defp classify(190, message), do: transport_error(message, 190, false)
+  defp classify(190, message, _status), do: transport_error(message, 190, false)
 
   # Temporarily blocked for policy — suspend the connection until it clears.
-  defp classify(368, message), do: transport_error(message, 368, false)
+  defp classify(368, message, _status), do: transport_error(message, 368, false)
 
   # Undeliverable recipient / re-engagement (24h window) / unsupported type /
   # invalid parameter — this exact payload won't succeed, suspend the subscription.
-  defp classify(code, message) when code in [131_026, 131_047, 131_051, 100],
+  defp classify(code, message, _status) when code in [131_026, 131_047, 131_051, 100],
     do: response_error(message, code)
 
   # Template errors (not found / not approved / param mismatch / paused / …).
-  defp classify(code, message) when code in 132_000..132_016,
+  defp classify(code, message, _status) when code in 132_000..132_016,
     do: response_error(message, code)
 
-  # No recognized code (or a bodyless 5xx) defaults to a retryable transport error,
-  # mirroring the HTTP transport's unknown-network-error default.
-  defp classify(_code, message), do: transport_error(message, nil, true)
+  # No recognized code — defer to the HTTP status the way the HTTP transport does:
+  # a 5xx or 408/429 retries, any other 4xx/3xx is a deterministic non-retryable
+  # rejection (so an unmapped code doesn't burn retries until the health window
+  # auto-suspends the connection).
+  defp classify(_code, message, status),
+    do: transport_error(message, nil, HttpWire.retryable_status?(status))
+
+  # `error.code` arrives as an integer, but Meta sometimes sends it as a string
+  # (`"190"`); coerce so it hits the same branch. Anything non-numeric → `nil`,
+  # which lands on the status-driven default.
+  defp coerce_code(code) when is_integer(code), do: code
+
+  defp coerce_code(code) when is_binary(code) do
+    case Integer.parse(code) do
+      {int, ""} -> int
+      _ -> nil
+    end
+  end
+
+  defp coerce_code(_code), do: nil
 
   defp response_error(message, code) do
     %{

@@ -53,9 +53,9 @@ below). Set the connection's `transport_config.type` to `:whatsapp`:
   type: :whatsapp,
   adapter: %{
     type: "meta_cloud",
-    phone_number_id: "123456789012345",   # Required — the WhatsApp Business phone number ID
+    phone_number_id: "123456789012345",   # Required — the WhatsApp Business phone number ID (digits only)
     access_token: "EAAG…",                 # Required on create — encrypted at rest (AshCloak)
-    api_version: "v21.0",                  # Defaults to v21.0
+    api_version: "v21.0",                  # Defaults to v21.0 — must be `v<major>.<minor>`
     business_account_id: "998877665544"    # Optional
   }
 }
@@ -70,7 +70,10 @@ Content-Type: application/json
 ```
 
 Pick a recent `api_version` (Meta ships a new one regularly and deprecates old
-ones — verify the current version against Meta's docs). The `access_token` is
+ones — verify the current version against Meta's docs). Both `phone_number_id`
+(bare digits) and `api_version` (`v<major>.<minor>`) are validated on save — they
+are interpolated into the Graph URL, so a stray space or CR/LF is rejected as a
+field error at save rather than crashing the send. The `access_token` is
 encrypted at rest exactly like an HTTP bearer token, a Kafka SASL password, or an
 SMTP password, and is decrypted **live at delivery** — never stored in the wire
 descriptor, never logged, and a rotated token takes effect immediately.
