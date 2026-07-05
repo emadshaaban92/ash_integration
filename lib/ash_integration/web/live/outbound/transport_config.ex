@@ -348,6 +348,37 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             phx-debounce="blur"
           />
         <% end %>
+        <%= if sec.params["_union_type"] in ["tls", "sasl_tls"] do %>
+          <.input
+            field={sec[:verify]}
+            type="select"
+            label="Certificate Verification"
+            options={[{"Verify peer", "verify_peer"}, {"Do not verify", "verify_none"}]}
+          />
+          <p class="text-xs text-base-content/60 -mt-1 mb-2">
+            "Do not verify" disables certificate checking — only for internal
+            brokers without a valid cert.
+          </p>
+          <.input
+            field={sec[:cacert_pem]}
+            type="textarea"
+            label="Private CA certificate (PEM, optional)"
+            rows="6"
+            placeholder="-----BEGIN CERTIFICATE-----"
+            phx-debounce="blur"
+          />
+          <p class="text-xs text-base-content/60 -mt-1 mb-2">
+            Paste a private/self-signed CA certificate to trust it in addition to
+            the public trust store. Only needed for private/self-signed CAs.
+          </p>
+          <.input
+            field={sec[:sni]}
+            type="text"
+            label="Server name override (optional)"
+            placeholder="broker.internal"
+            phx-debounce="blur"
+          />
+        <% end %>
       </.inputs_for>
     </div>
     """
@@ -534,6 +565,28 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
                 ]}
               />
             </div>
+            <.input
+              field={adapter[:verify]}
+              type="select"
+              label="Certificate Verification"
+              options={[{"Verify peer", "verify_peer"}, {"Do not verify", "verify_none"}]}
+            />
+            <p class="text-xs text-base-content/60 -mt-1 mb-2">
+              "Do not verify" disables certificate checking — only for internal
+              relays without a valid cert.
+            </p>
+            <.input
+              field={adapter[:cacert_pem]}
+              type="textarea"
+              label="Private CA certificate (PEM, optional)"
+              rows="6"
+              placeholder="-----BEGIN CERTIFICATE-----"
+              phx-debounce="blur"
+            />
+            <p class="text-xs text-base-content/60 -mt-1 mb-2">
+              Paste a private/self-signed CA certificate to trust it in addition to
+              the public trust store. Only needed for private/self-signed CAs.
+            </p>
         <% end %>
       </.inputs_for>
     </div>

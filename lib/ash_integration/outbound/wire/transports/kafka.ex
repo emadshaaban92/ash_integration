@@ -15,6 +15,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
 
   alias AshIntegration.Transport.KafkaClientManager
   alias AshIntegration.Transport.Signing
+  alias AshIntegration.Transport.TlsOptions
   alias AshIntegration.Transport.Utils
 
   @impl true
@@ -159,20 +160,52 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
     end
   end
 
-  defp build_client_config(config) do
+  @doc false
+  # The kpro client config for `config.security`. Exposed for testing the TLS
+  # option assembly and the classified error on a bad `cacert_pem` without a
+  # broker.
+  def build_client_config(config) do
     case config.security do
       %Ash.Union{type: :none} ->
         {:ok, []}
 
-      %Ash.Union{type: :tls} ->
-        {:ok, [ssl: true]}
+      %Ash.Union{type: :tls, value: tls} ->
+        with {:ok, opts} <- classify_ssl_opts(ssl_opts(tls)), do: {:ok, [ssl: opts]}
 
       %Ash.Union{type: :sasl, value: sasl} ->
         with {:ok, tuple} <- sasl_tuple(sasl), do: {:ok, [sasl: tuple]}
 
       %Ash.Union{type: :sasl_tls, value: sasl} ->
-        with {:ok, tuple} <- sasl_tuple(sasl), do: {:ok, [ssl: true, sasl: tuple]}
+        with {:ok, tuple} <- sasl_tuple(sasl),
+             {:ok, opts} <- classify_ssl_opts(ssl_opts(sasl)),
+             do: {:ok, [ssl: opts, sasl: tuple]}
     end
+  end
+
+  @doc false
+  # The LIST-valued `ssl:` option handed straight to kpro (a bare `true` would
+  # collapse to `verify_none`). Built from the security variant's `verify` /
+  # `cacert_pem` / `sni` fields, shared by the :tls and :sasl_tls branches so
+  # they can't drift. See `AshIntegration.Transport.TlsOptions` for the shape:
+  # verify_peer with the HTTPS hostname match_fun by default, verify_none only
+  # when the operator explicitly opts a connection out.
+  #
+  # Returns `{:ok, opts}` or `{:error, message}` when `cacert_pem` is set but
+  # undecodable.
+  def ssl_opts(variant), do: TlsOptions.build(variant)
+
+  # A bad `cacert_pem` is an operator misconfiguration on this connection —
+  # classify it as a non-retryable transport failure (surfaced/suspended) rather
+  # than letting it become a generic broker error or crash the batcher.
+  defp classify_ssl_opts({:ok, opts}), do: {:ok, opts}
+
+  defp classify_ssl_opts({:error, message}) do
+    {:error,
+     %{
+       failure_class: :transport,
+       error_message: "Kafka TLS configuration error: #{message}",
+       retryable: false
+     }}
   end
 
   defp sasl_tuple(sasl) do

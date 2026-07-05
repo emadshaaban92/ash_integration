@@ -68,7 +68,9 @@ connection's `transport_config.type` to `:email`:
     password: "super-secret",      # Optional — encrypted at rest (AshCloak)
     ssl: false,                    # Implicit TLS on connect (SMTPS, usually port 465)
     tls: :if_available,            # STARTTLS: :if_available (default), :always, :never
-    auth: :if_available            # SMTP AUTH: :if_available (default), :always, :never
+    auth: :if_available,           # SMTP AUTH: :if_available (default), :always, :never
+    verify: :verify_peer,          # Certificate verification (default; see TLS below)
+    cacert_pem: nil                # Optional inline PEM cert for a private CA
   },
   headers: %{                      # Optional static email headers
     "x-source" => "my-app"
@@ -162,6 +164,68 @@ short-lived, per-send token as the credential, and app-only SMTP OAuth is
 historically limited on the major providers. Microsoft Graph app-only (above) is
 the recommended OAuth2 email path; SMTP XOAUTH2 remains a possible future
 follow-up if a provider-agnostic need arises.
+
+## TLS and certificate verification
+
+**Certificate verification is on by default.** Whenever a delivery negotiates
+TLS — implicit SSL (`ssl: true`) or a STARTTLS upgrade (`tls: :always` /
+`:if_available`) — the relay's certificate chain **and** hostname are verified
+against the OS trust store before any mail is sent. This is the secure default;
+no configuration is needed.
+
+Two fields tune verification:
+
+| Field        | Default        | Purpose                                                        |
+| ------------ | -------------- | ------------------------------------------------------------- |
+| `verify`     | `:verify_peer` | `:verify_peer` checks chain + hostname; `:verify_none` disables checking |
+| `cacert_pem` | `nil`          | Inline PEM certificate for a private CA; **augments** the OS trust store when set |
+
+**Opting a specific internal relay out.** An internal relay with a self-signed
+or absent certificate can turn verification off — but only for that one
+connection, as a stored, visible choice:
+
+```elixir
+adapter: %{type: "smtp", relay: "internal-relay.corp", verify: :verify_none, ...}
+```
+
+There is no global switch that disables verification everywhere.
+
+> **Hostname check.** Because the default verifies the hostname, a relay reached
+> by IP address, or by a name not listed in the certificate's SAN, fails the
+> handshake. This is inherent to real verification — fix it at the source (issue
+> the cert with the right SANs) or, for a relay that genuinely can't present a
+> matching cert, opt that one connection out with `verify: :verify_none`.
+
+**Trusting a private CA.** When the relay's certificate is signed by an internal
+CA, keep verification on and paste the CA's PEM certificate directly onto the
+connection via `cacert_pem`. It is stored on the connection record itself — no
+side-channel file to place on every node — and **augments** the OS trust store,
+so the same connection can still reach public-CA relays:
+
+```elixir
+adapter: %{
+  type: "smtp",
+  relay: "mail.corp",
+  cacert_pem: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+  ...
+}
+```
+
+A `cacert_pem` that contains no decodable certificate is rejected at delivery as
+a non-retryable transport error rather than silently trusting nothing.
+
+### STARTTLS downgrade caveat (`tls: :if_available`)
+
+`tls: :if_available` (the default) upgrades to TLS **only if** the relay
+advertises STARTTLS. An active network attacker can **strip** that advertisement
+and keep the session in plaintext — the connection silently falls back rather
+than failing. This is intentionally tolerated because many internal plaintext
+relays rely on it.
+
+For an **internet-facing relay, set `tls: :always`** so a stripped STARTTLS
+offer aborts delivery instead of leaking mail over plaintext. When a delivery
+uses `:if_available` against a non-internal (non-RFC1918/loopback) relay, the
+library logs a one-time warning recommending `:always`.
 
 ## Recipients and subject (per subscription)
 

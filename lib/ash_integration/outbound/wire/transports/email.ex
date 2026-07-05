@@ -19,6 +19,10 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
 
   @behaviour AshIntegration.Outbound.Wire.Transport
 
+  require Logger
+
+  alias AshIntegration.Transport.Egress
+  alias AshIntegration.Transport.TlsOptions
   alias AshIntegration.Transport.Utils
 
   @impl true
@@ -116,14 +120,22 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   @doc false
   # Resolve the Swoosh adapter + config for the connection's adapter union, folding
   # in the live secret carve-out (SMTP password / OAuth2 access token). Exposed for
-  # testing the adapter wiring without a live SMTP/Graph endpoint.
+  # testing the adapter wiring — including the SMTP TLS-options shape and the
+  # STARTTLS-downgrade warning — without a live SMTP/Graph endpoint.
   #
   # The SMTP credential is the live carve-out: decrypted per send via `load_secret`
   # (a rotated password auto-applies, a decrypt failure classifies as a
   # non-retryable `:transport` error instead of crashing the batcher) and folded
   # into the gen_smtp config, never into the stored descriptor.
+  #
+  # `tls_options` is verified-by-default (see `TlsOptions`): certs are checked on
+  # both the implicit-SSL (`ssl: true`) and STARTTLS-upgrade paths unless the
+  # operator sets `verify: :verify_none` on this one connection.
   def adapter_config(%Ash.Union{type: :smtp, value: smtp}, _email) do
-    with {:ok, loaded} <- Utils.load_secret(smtp, [:password], "SMTP password") do
+    with {:ok, loaded} <- Utils.load_secret(smtp, [:password], "SMTP password"),
+         {:ok, tls_options} <- tls_options(smtp) do
+      warn_starttls_downgrade(smtp)
+
       config =
         [
           relay: smtp.relay,
@@ -133,6 +145,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
           ssl: smtp.ssl,
           tls: smtp.tls,
           auth: smtp.auth,
+          tls_options: tls_options,
           retries: 1
         ]
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -179,6 +192,50 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   # `from` format validation, so this only guards against a truly empty address).
   defp mailbox_address(%Swoosh.Email{from: {_name, address}}) when is_binary(address), do: address
   defp mailbox_address(_email), do: ""
+
+  # A bad `cacert_pem` is an operator misconfiguration on this connection —
+  # classify it as a non-retryable transport failure rather than crashing the
+  # batcher (mirrors `load_secret`'s treatment of a decrypt failure).
+  defp tls_options(smtp) do
+    case TlsOptions.build(smtp) do
+      {:ok, opts} ->
+        {:ok, opts}
+
+      {:error, message} ->
+        {:error,
+         %{
+           failure_class: :transport,
+           error_message: "SMTP TLS configuration error: #{message}",
+           retryable: false
+         }}
+    end
+  end
+
+  # `tls: :if_available` lets an active attacker STRIP the STARTTLS offer and
+  # keep the session in plaintext — acceptable for the internal plaintext relays
+  # this library must keep supporting, but a real downgrade risk for an
+  # internet-facing relay. We DON'T force `:always` (that would break those
+  # internal relays); instead we warn once per relay when `:if_available` is used
+  # against a non-internal host, recommending `:always` there. Host classification
+  # reuses `Egress` rather than reimplementing CIDR/loopback checks.
+  defp warn_starttls_downgrade(%{tls: :if_available, relay: relay})
+       when is_binary(relay) do
+    key = {__MODULE__, :starttls_downgrade_warned, relay}
+
+    if not :persistent_term.get(key, false) and not Egress.internal_host?(relay) do
+      :persistent_term.put(key, true)
+
+      Logger.warning(
+        "SMTP relay #{relay} is configured with tls: :if_available, which lets an " <>
+          "active attacker strip STARTTLS and deliver over plaintext. For an " <>
+          "internet-facing relay, set tls: :always on this connection."
+      )
+    end
+
+    :ok
+  end
+
+  defp warn_starttls_downgrade(_smtp), do: :ok
 
   defp send_email(adapter, email, adapter_config) do
     case adapter.deliver(email, adapter_config) do

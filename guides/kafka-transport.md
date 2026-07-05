@@ -80,6 +80,57 @@ Combines SASL authentication with SSL/TLS.
 security: %{type: "sasl_tls", mechanism: :scram_sha_256, username: "user", password: "secret"}
 ```
 
+### Certificate verification (TLS and SASL + TLS)
+
+**Certificate verification is on by default.** Any `:tls` or `:sasl_tls`
+connection verifies the broker's certificate chain **and** hostname against the
+OS trust store before sending. This is the secure default — no configuration
+needed.
+
+The `:tls` and `:sasl_tls` variants accept three verification fields:
+
+| Field         | Default        | Purpose                                                        |
+| ------------- | -------------- | ------------------------------------------------------------- |
+| `verify`      | `:verify_peer` | `:verify_peer` checks chain + hostname; `:verify_none` disables checking |
+| `cacert_pem`  | `nil`          | Inline PEM certificate for a private CA; **augments** the OS trust store when set |
+| `sni`         | `nil`          | Server-name override for the handshake (broker fronts a different cert CN) |
+
+**Opting a specific internal connection out.** An internal/firewalled broker
+with a self-signed or absent certificate can turn verification off — but only
+for that one connection, as a stored, visible choice:
+
+```elixir
+security: %{type: "tls", verify: :verify_none}
+```
+
+`:verify_none` disables both chain and hostname checks for this connection only.
+There is no global switch that disables verification everywhere; the opt-out
+lives on the connection so its blast radius is that single endpoint.
+
+> **Hostname check.** Because the default verifies the hostname, a broker reached
+> by IP address, or by a name not listed in the certificate's SAN, fails the
+> handshake. This is inherent to real verification — fix it at the source (issue
+> the cert with the right SANs), override the presented name with `sni`, or, for
+> a broker that genuinely can't present a matching cert, opt that one connection
+> out with `verify: :verify_none`.
+
+**Trusting a private CA.** When the broker's certificate is signed by an
+internal CA (rather than a public one in the OS trust store), keep verification
+on and paste the CA's PEM certificate directly onto the connection via
+`cacert_pem`. It is stored on the connection record itself — no side-channel
+file to place on every node — and **augments** the OS trust store, so the same
+connection can still reach public-CA endpoints:
+
+```elixir
+security: %{type: "sasl_tls",
+            mechanism: :scram_sha_256, username: "user", password: "secret",
+            cacert_pem: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+            sni: "broker.internal"}
+```
+
+A `cacert_pem` that contains no decodable certificate is rejected at delivery as
+a non-retryable transport error rather than silently trusting nothing.
+
 ## Partitioning
 
 Messages are partitioned by the event's **event key** using `:erlang.phash2/2`.
