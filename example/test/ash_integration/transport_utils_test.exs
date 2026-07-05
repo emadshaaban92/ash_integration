@@ -70,6 +70,35 @@ defmodule AshIntegration.TransportUtilsTest do
     end
   end
 
+  describe "retryable_error?/1 (Kafka/brod produce errors)" do
+    test "transient broker/metadata errors are retryable" do
+      for reason <- [
+            :leader_not_available,
+            :not_leader_for_partition,
+            :request_timed_out,
+            :coordinator_not_available,
+            {:connect_error, :nxdomain}
+          ] do
+        assert Utils.retryable_error?(reason), "expected #{inspect(reason)} to be retryable"
+      end
+    end
+
+    test "brod lifecycle races (client_down / producer_down) are retryable, not terminal" do
+      # These are benign transient races — the client restarting, or idle cleanup
+      # terminating a partition producer that raced an in-flight produce — not real
+      # broker rejections. The supervisor brings the process back, so retry rather
+      # than permanently failing the delivery.
+      assert Utils.retryable_error?(:client_down)
+      assert Utils.retryable_error?({:client_down, :shutdown})
+      assert Utils.retryable_error?({:producer_down, :normal})
+    end
+
+    test "an unknown error stays non-retryable (surface permanent failures quickly)" do
+      refute Utils.retryable_error?(:unknown_server_error)
+      refute Utils.retryable_error?(:message_too_large)
+    end
+  end
+
   describe "scrub_reason/1" do
     test "passes through readable network reasons (atoms, tuples)" do
       assert Utils.scrub_reason(:econnrefused) == ":econnrefused"

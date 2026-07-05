@@ -96,7 +96,9 @@ defmodule Example.Outbound.TransportKafkaTest do
     dest = create_kafka_connection!(owner, signing: signing)
     event = create_event!(dest, data: %{"a" => 1})
 
-    assert {:error, %{failure_class: :transport, error_message: message}} =
+    # A pure-config error (Kafka has no URL) fails identically every attempt, so it
+    # must be NON-retryable rather than burning the delivery's retry budget.
+    assert {:error, %{failure_class: :transport, retryable: false, error_message: message}} =
              Kafka.build_message(dest, event)
 
     assert message =~ "`url` placement callback does not apply to the Kafka transport"

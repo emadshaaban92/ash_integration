@@ -335,6 +335,14 @@ defmodule AshIntegration.Transport.Utils do
   def retryable_error?({:connect_error, _}), do: true
   def retryable_error?(:coordinator_not_available), do: true
   def retryable_error?(:not_coordinator), do: true
+  # brod lifecycle races, not real broker rejections: `client_down` /
+  # `{:client_down, _}` (the client process restarting) and `{:producer_down, _}`
+  # (a partition producer terminated — e.g. idle cleanup racing an in-flight
+  # produce). These are benign and transient — the supervisor brings the process
+  # back — so retry rather than failing the delivery permanently.
+  def retryable_error?(:client_down), do: true
+  def retryable_error?({:client_down, _}), do: true
+  def retryable_error?({:producer_down, _}), do: true
   # Catch-all: unknown errors default to non-retryable to surface permanent
   # failures quickly rather than burning through delivery attempts.
   def retryable_error?(_), do: false

@@ -76,7 +76,11 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
        failure_class: :transport,
        error_message:
          "signing failed: a `url` placement callback does not apply to the Kafka transport",
-       retryable: true
+       # A pure-config error: the author wrote a `url` placement for a transport
+       # that has no URL. It fails identically on every attempt, so it is
+       # non-retryable — retrying only burns the budget (consistent with how the
+       # signing/secret/TLS config errors are classified).
+       retryable: false
      }}
   end
 
