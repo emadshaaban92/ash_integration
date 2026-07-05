@@ -6,6 +6,22 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
   alias AshIntegration.Outbound.Wire.Transports.Email
   alias AshIntegration.Transport.EmailAdapter.Smtp
 
+  # A stand-in adapter whose `deliver/2` raises the way gen_smtp's `mimemail` does
+  # when a stray `Content-Type` header collides with a multipart body. Used to prove
+  # the transport turns an adapter raise into a classified failure instead of letting
+  # it crash the batch.
+  defmodule RaisingAdapter do
+    def deliver(_email, _config) do
+      :erlang.map_get(:content_type_params, %{})
+    end
+  end
+
+  # An adapter whose `deliver/2` exits (a gen_smtp GenServer timeout is an exit, not
+  # a raise) — the `catch` arm must classify it too.
+  defmodule ExitingAdapter do
+    def deliver(_email, _config), do: exit(:timeout)
+  end
+
   # A self-signed CA used to exercise inline-PEM trust augmentation. Its DER is
   # what a valid `cacert_pem` should append to the OS roots.
   @ca_pem """
@@ -103,6 +119,85 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
       assert email.bcc == []
       assert email.html_body == nil
       assert email.text_body == "hi"
+    end
+
+    test "drops MIME-structural headers so a stray content-type can't reach the encoder" do
+      delivery = %{
+        "to" => ["a@x.com"],
+        "subject" => "Hi",
+        "text" => "hi",
+        "headers" => %{
+          # Case-insensitive: an upper/mixed-case structural header is still dropped.
+          "Content-Type" => "application/json",
+          "content-transfer-encoding" => "base64",
+          "MIME-Version" => "1.0",
+          "Content-Disposition" => "inline",
+          "x-event-id" => "evt_1"
+        }
+      }
+
+      assert {:ok, email} = Email.build_email(connection(), event(delivery))
+
+      # The wire-metadata header survives; the structural ones are gone (Swoosh
+      # stores header names as given, so check case-insensitively).
+      assert email.headers["x-event-id"] == "evt_1"
+
+      refute Enum.any?(email.headers, fn {name, _} ->
+               String.downcase(name) in ~w(content-type content-transfer-encoding mime-version content-disposition)
+             end)
+    end
+  end
+
+  # Regression for the multipart-crash bug: a delivery descriptor carrying
+  # `content-type: application/json` (as the old resolver seeded) alongside BOTH an
+  # html and a text body used to crash gen_smtp's `mimemail` — it only generates the
+  # `multipart/alternative` boundary when no `Content-Type` header is present, so the
+  # injected header left the params map empty and `encode_component/5` raised
+  # `KeyError key :content_type_params`. Building the email and encoding it must now
+  # succeed.
+  describe "golden multipart encode (html + text)" do
+    test "encodes cleanly even when the descriptor headers include content-type: application/json" do
+      delivery = %{
+        "to" => ["a@x.com"],
+        "subject" => "Order shipped",
+        "html" => "<b>shipped</b>",
+        "text" => "shipped",
+        "headers" => %{"content-type" => "application/json", "x-event-id" => "evt_1"}
+      }
+
+      assert {:ok, email} = Email.build_email(connection(), event(delivery))
+
+      # gen_smtp encodes without raising, and the encoded message really is a
+      # multipart/alternative carrying both bodies.
+      encoded = Swoosh.Adapters.SMTP.Helpers.body(email, [])
+      assert is_binary(encoded)
+      assert encoded =~ "multipart/alternative"
+      assert encoded =~ "shipped"
+    end
+  end
+
+  # An adapter that RAISES (or exits) must not escape the transport's
+  # `{:ok, _} | {:error, classified}` contract — otherwise it crashes the Broadway
+  # batch and the delivery silently retries forever with no DeliveryLog written.
+  describe "send_email/3 turns an adapter raise into a classified failure" do
+    test "a raising adapter becomes a retryable :transport error" do
+      {:ok, email} =
+        Email.build_email(connection(), event(%{"to" => ["a@x.com"], "text" => "hi"}))
+
+      assert {:error, %{failure_class: :transport, retryable: true, error_message: msg}} =
+               Email.send_email(RaisingAdapter, email, [])
+
+      assert msg =~ "SMTP delivery raised"
+    end
+
+    test "an exiting adapter becomes a retryable :transport error" do
+      {:ok, email} =
+        Email.build_email(connection(), event(%{"to" => ["a@x.com"], "text" => "hi"}))
+
+      assert {:error, %{failure_class: :transport, retryable: true, error_message: msg}} =
+               Email.send_email(ExitingAdapter, email, [])
+
+      assert msg =~ "SMTP delivery"
     end
   end
 

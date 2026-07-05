@@ -32,8 +32,12 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     * **`Authorization`/auth** — the decrypted credential, injected live from the
       encrypted connection (never persisted, never exposed to the sandbox).
 
-  `defaults.headers` is pre-seeded with the wire-metadata headers, `content-type`,
-  and the connection's static headers — ALL overridable and removable.
+  `defaults.headers` is pre-seeded with the wire-metadata headers and the
+  connection's static headers — ALL overridable and removable. HTTP and Kafka
+  also seed a default `content-type: application/json`; **email does not** —
+  MIME owns `Content-Type` (a seeded one suppresses gen_smtp's multipart
+  boundary generation and crashes the mailer), so the email preseed carries only
+  the `x-`-prefixed wire metadata plus static headers.
 
   Returns `{:ok, descriptor, body_hash}`, `:skip`, or `{:error, message}` (the
   transform raised or produced an invalid descriptor → the event parks).
@@ -192,27 +196,38 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     # subject and text/html body (and usually the recipients) from the event. The
     # route's static recipients/subject are the fallbacks it starts from. Wire
     # metadata renders as `x-`-prefixed mail headers, mirroring the HTTP transport.
+    # No default `content-type`: MIME owns `Content-Type` for email. Seeding
+    # `application/json` here would ride into the message and, for a multipart
+    # (html+text) body, suppress gen_smtp's boundary generation and crash the
+    # mailer. The `x-`-prefixed wire metadata and static headers still seed.
     drop_nils(%{
       "from" => config.from,
       "to" => route.to,
       "cc" => route.cc,
       "subject" => route.subject,
-      "headers" => preseed_headers(config, envelope, &"x-#{&1}")
+      "headers" => preseed_headers(config, envelope, &"x-#{&1}", json_content_type?: false)
     })
   end
 
   # The full header set the library sends EXCEPT the secret-derived signature
-  # (added post-transform). Wire metadata + content-type win the case-insensitive
-  # de-dup over a colliding connection-static header, so a static header can't
-  # shadow the wire contract — but every entry here is still overridable/removable
-  # by the transform. `render` prefixes the wire suffix per transport.
-  defp preseed_headers(config, envelope, render) do
+  # (added post-transform). Wire metadata (and, where seeded, content-type) win
+  # the case-insensitive de-dup over a colliding connection-static header, so a
+  # static header can't shadow the wire contract — but every entry here is still
+  # overridable/removable by the transform. `render` prefixes the wire suffix per
+  # transport. `json_content_type?` seeds the default JSON `content-type` for
+  # HTTP/Kafka; email passes `false` (MIME owns `Content-Type`).
+  defp preseed_headers(config, envelope, render, opts \\ []) do
     static = Enum.map(config.headers || %{}, fn {k, v} -> {to_string(k), to_string(v)} end)
 
     wire =
       Enum.map(Envelope.wire_pairs(envelope), fn {s, v} -> {render.(s), v} end)
 
-    (static ++ [{"content-type", "application/json"}] ++ wire)
+    content_type =
+      if Keyword.get(opts, :json_content_type?, true),
+        do: [{"content-type", "application/json"}],
+        else: []
+
+    (static ++ content_type ++ wire)
     |> Utils.dedup_keep_last()
     |> Map.new()
   end
