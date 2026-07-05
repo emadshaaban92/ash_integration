@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **TLS certificate verification is now on by default for Kafka and SMTP
+  connections.** Previously a Kafka `:tls` / `:sasl_tls` connection sent
+  `ssl: true` to kpro, which maps to `verify_none` (no chain or hostname check),
+  and the SMTP adapter passed no `tls_options`, so gen_smtp never verified the
+  relay's certificate. Both now verify the certificate **chain and hostname**
+  (against the OS trust store) by default.
+  - **Upgrade behavior — action may be required.** Existing `:tls`, `:sasl_tls`,
+    and TLS-using SMTP connections that point at an endpoint with a **self-signed
+    or otherwise invalid certificate will start failing to connect** after this
+    upgrade, because verification is now enforced. Operators of such internal
+    endpoints must set **`verify: :verify_none` on those specific connections**
+    (Kafka `security` variant or SMTP `adapter`) to restore the previous
+    behavior, or provide a private-CA bundle via `cacertfile`. The opt-out is
+    per-connection and stored/visible — there is deliberately **no global flag**
+    to disable verification everywhere.
+  - New per-connection fields: `verify` (`:verify_peer` default | `:verify_none`)
+    and `cacertfile` on Kafka `:tls`/`:sasl_tls` and SMTP; plus `sni` (handshake
+    server-name override) on the Kafka TLS variants.
+  - SMTP `tls: :if_available` is unchanged (internal plaintext relays still work),
+    but a delivery using it against a non-internal relay now logs a one-time
+    warning: STARTTLS can be stripped by an active attacker, so `tls: :always` is
+    recommended for internet-facing relays.
+
 ### Changed
 
 - **BREAKING: reworked the delivery retry / backoff / terminal model** (see

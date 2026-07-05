@@ -295,6 +295,32 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             phx-debounce="blur"
           />
         <% end %>
+        <%= if sec.params["_union_type"] in ["tls", "sasl_tls"] do %>
+          <.input
+            field={sec[:verify]}
+            type="select"
+            label="Certificate Verification"
+            options={[{"Verify peer", "verify_peer"}, {"Do not verify", "verify_none"}]}
+          />
+          <p class="text-xs text-base-content/60 -mt-1 mb-2">
+            "Do not verify" disables certificate checking — only for internal
+            brokers without a valid cert.
+          </p>
+          <.input
+            field={sec[:cacertfile]}
+            type="text"
+            label="CA bundle path (optional)"
+            placeholder="/etc/ssl/internal-ca.pem"
+            phx-debounce="blur"
+          />
+          <.input
+            field={sec[:sni]}
+            type="text"
+            label="Server name override (optional)"
+            placeholder="broker.internal"
+            phx-debounce="blur"
+          />
+        <% end %>
       </.inputs_for>
     </div>
     """
@@ -417,6 +443,23 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
               options={[{"If available", "if_available"}, {"Always", "always"}, {"Never", "never"}]}
             />
           </div>
+          <.input
+            field={adapter[:verify]}
+            type="select"
+            label="Certificate Verification"
+            options={[{"Verify peer", "verify_peer"}, {"Do not verify", "verify_none"}]}
+          />
+          <p class="text-xs text-base-content/60 -mt-1 mb-2">
+            "Do not verify" disables certificate checking — only for internal
+            relays without a valid cert.
+          </p>
+          <.input
+            field={adapter[:cacertfile]}
+            type="text"
+            label="CA bundle path (optional)"
+            placeholder="/etc/ssl/internal-ca.pem"
+            phx-debounce="blur"
+          />
         <% end %>
       </.inputs_for>
     </div>

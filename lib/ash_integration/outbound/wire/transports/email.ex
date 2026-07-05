@@ -19,6 +19,10 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
 
   @behaviour AshIntegration.Outbound.Wire.Transport
 
+  require Logger
+
+  alias AshIntegration.Transport.Egress
+  alias AshIntegration.Transport.TlsOptions
   alias AshIntegration.Transport.Utils
 
   @impl true
@@ -97,12 +101,22 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
 
   defp put_headers(email, _headers), do: email
 
+  @doc false
+  # The gen_smtp adapter config for `smtp`. Exposed for testing the TLS-options
+  # shape and the STARTTLS-downgrade warning without an SMTP server.
+  #
   # The SMTP credential is the live carve-out: decrypted per send via `load_secret`
   # (a rotated password auto-applies, a decrypt failure classifies as a
   # non-retryable `:transport` error instead of crashing the batcher) and folded
   # into the gen_smtp config, never into the stored descriptor.
-  defp adapter_config(%Ash.Union{type: :smtp, value: smtp}) do
+  #
+  # `tls_options` is verified-by-default (see `TlsOptions`): certs are checked on
+  # both the implicit-SSL (`ssl: true`) and STARTTLS-upgrade paths unless the
+  # operator sets `verify: :verify_none` on this one connection.
+  def adapter_config(%Ash.Union{type: :smtp, value: smtp}) do
     with {:ok, loaded} <- Utils.load_secret(smtp, [:password], "SMTP password") do
+      warn_starttls_downgrade(smtp)
+
       config =
         [
           relay: smtp.relay,
@@ -112,6 +126,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
           ssl: smtp.ssl,
           tls: smtp.tls,
           auth: smtp.auth,
+          tls_options: TlsOptions.build(smtp),
           retries: 1
         ]
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -119,6 +134,32 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
       {:ok, Swoosh.Adapters.SMTP, config}
     end
   end
+
+  # `tls: :if_available` lets an active attacker STRIP the STARTTLS offer and
+  # keep the session in plaintext — acceptable for the internal plaintext relays
+  # this library must keep supporting, but a real downgrade risk for an
+  # internet-facing relay. We DON'T force `:always` (that would break those
+  # internal relays); instead we warn once per relay when `:if_available` is used
+  # against a non-internal host, recommending `:always` there. Host classification
+  # reuses `Egress` rather than reimplementing CIDR/loopback checks.
+  defp warn_starttls_downgrade(%{tls: :if_available, relay: relay})
+       when is_binary(relay) do
+    key = {__MODULE__, :starttls_downgrade_warned, relay}
+
+    if not :persistent_term.get(key, false) and not Egress.internal_host?(relay) do
+      :persistent_term.put(key, true)
+
+      Logger.warning(
+        "SMTP relay #{relay} is configured with tls: :if_available, which lets an " <>
+          "active attacker strip STARTTLS and deliver over plaintext. For an " <>
+          "internet-facing relay, set tls: :always on this connection."
+      )
+    end
+
+    :ok
+  end
+
+  defp warn_starttls_downgrade(_smtp), do: :ok
 
   defp send_email(adapter, email, adapter_config) do
     case adapter.deliver(email, adapter_config) do

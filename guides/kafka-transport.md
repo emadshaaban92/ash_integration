@@ -80,6 +80,44 @@ Combines SASL authentication with SSL/TLS.
 security: %{type: "sasl_tls", mechanism: :scram_sha_256, username: "user", password: "secret"}
 ```
 
+### Certificate verification (TLS and SASL + TLS)
+
+**Certificate verification is on by default.** Any `:tls` or `:sasl_tls`
+connection verifies the broker's certificate chain **and** hostname against the
+OS trust store before sending. This is the secure default — no configuration
+needed.
+
+The `:tls` and `:sasl_tls` variants accept three verification fields:
+
+| Field        | Default        | Purpose                                                        |
+| ------------ | -------------- | ------------------------------------------------------------- |
+| `verify`     | `:verify_peer` | `:verify_peer` checks chain + hostname; `:verify_none` disables checking |
+| `cacertfile` | `nil`          | Path to a private-CA bundle; **replaces** the OS trust store when set |
+| `sni`        | `nil`          | Server-name override for the handshake (broker fronts a different cert CN) |
+
+**Opting a specific internal connection out.** An internal/firewalled broker
+with a self-signed or absent certificate can turn verification off — but only
+for that one connection, as a stored, visible choice:
+
+```elixir
+security: %{type: "tls", verify: :verify_none}
+```
+
+`:verify_none` disables both chain and hostname checks for this connection only.
+There is no global switch that disables verification everywhere; the opt-out
+lives on the connection so its blast radius is that single endpoint.
+
+**Pointing at a private CA.** When the broker's certificate is signed by an
+internal CA (rather than a public one in the OS trust store), keep verification
+on and point at the CA bundle:
+
+```elixir
+security: %{type: "sasl_tls",
+            mechanism: :scram_sha_256, username: "user", password: "secret",
+            cacertfile: "/etc/ssl/internal-ca.pem",
+            sni: "broker.internal"}
+```
+
 ## Partitioning
 
 Messages are partitioned by the event's **event key** using `:erlang.phash2/2`.

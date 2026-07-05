@@ -62,6 +62,25 @@ defmodule AshIntegration.Transport.EmailAdapter.Smtp do
       default :if_available
       constraints one_of: [:always, :never, :if_available]
     end
+
+    # Verify the relay's certificate (chain + hostname) on both the implicit-SSL
+    # and STARTTLS-upgrade paths by default. An operator on an internal relay
+    # with a self-signed or absent cert opts THAT connection out with
+    # :verify_none — a stored, visible, per-connection choice, never a global
+    # switch.
+    attribute :verify, :atom do
+      allow_nil? false
+      public? true
+      default :verify_peer
+      constraints one_of: [:verify_peer, :verify_none]
+    end
+
+    # Optional path to a private-CA bundle. When set it REPLACES the OS trust
+    # store, so verification pins to exactly the CA that signed the relay cert.
+    attribute :cacertfile, :string do
+      allow_nil? true
+      public? true
+    end
   end
 
   actions do

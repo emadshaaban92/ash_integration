@@ -15,6 +15,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
 
   alias AshIntegration.Transport.KafkaClientManager
   alias AshIntegration.Transport.Signing
+  alias AshIntegration.Transport.TlsOptions
   alias AshIntegration.Transport.Utils
 
   @impl true
@@ -164,16 +165,25 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
       %Ash.Union{type: :none} ->
         {:ok, []}
 
-      %Ash.Union{type: :tls} ->
-        {:ok, [ssl: true]}
+      %Ash.Union{type: :tls, value: tls} ->
+        {:ok, [ssl: ssl_opts(tls)]}
 
       %Ash.Union{type: :sasl, value: sasl} ->
         with {:ok, tuple} <- sasl_tuple(sasl), do: {:ok, [sasl: tuple]}
 
       %Ash.Union{type: :sasl_tls, value: sasl} ->
-        with {:ok, tuple} <- sasl_tuple(sasl), do: {:ok, [ssl: true, sasl: tuple]}
+        with {:ok, tuple} <- sasl_tuple(sasl), do: {:ok, [ssl: ssl_opts(sasl), sasl: tuple]}
     end
   end
+
+  @doc false
+  # The LIST-valued `ssl:` option handed straight to kpro (a bare `true` would
+  # collapse to `verify_none`). Built from the security variant's `verify` /
+  # `cacertfile` / `sni` fields, shared by the :tls and :sasl_tls branches so
+  # they can't drift. See `AshIntegration.Transport.TlsOptions` for the shape:
+  # verify_peer with the HTTPS hostname match_fun by default, verify_none only
+  # when the operator explicitly opts a connection out.
+  def ssl_opts(variant), do: TlsOptions.build(variant)
 
   defp sasl_tuple(sasl) do
     with {:ok, loaded} <- Utils.load_secret(sasl, [:password], "Kafka SASL credentials") do

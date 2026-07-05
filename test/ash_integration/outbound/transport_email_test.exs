@@ -1,7 +1,10 @@
 defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias AshIntegration.Outbound.Wire.Transports.Email
+  alias AshIntegration.Transport.EmailAdapter.Smtp
 
   # The descriptor is already normalized/validated by the resolver, so these
   # exercise the pure replay mapping (delivery descriptor → Swoosh.Email) and the
@@ -11,6 +14,16 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
     do: %{transport_config: %Ash.Union{type: :email, value: %{from: from}}}
 
   defp event(delivery), do: %{delivery: delivery}
+
+  defp smtp(overrides) do
+    params = Enum.into(overrides, %{relay: "1.1.1.1", port: 587, tls: :always})
+
+    Smtp
+    |> Ash.Changeset.for_create(:create, params)
+    |> Ash.create!()
+  end
+
+  defp adapter_union(overrides), do: %Ash.Union{type: :smtp, value: smtp(overrides)}
 
   describe "build_email/2 replay mapping" do
     test "maps recipients, subject, both bodies, and wire headers" do
@@ -97,6 +110,66 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
     test "an auth/credential failure is a non-retryable transport error" do
       assert %{failure_class: :transport, retryable: false} =
                Email.classify_error(:no_credentials)
+    end
+  end
+
+  # `adapter_config/1` folds the live SMTP credential into the gen_smtp config and
+  # attaches verified-by-default `tls_options`. gen_smtp passes `tls_options`
+  # through on both the implicit-SSL and STARTTLS-upgrade paths, so this is where
+  # cert verification is switched on (or, per connection, off).
+  describe "adapter_config/1 TLS options" do
+    test "verify_peer with the HTTPS hostname match_fun and OS trust store by default" do
+      assert {:ok, Swoosh.Adapters.SMTP, config} = Email.adapter_config(adapter_union([]))
+
+      tls_options = Keyword.fetch!(config, :tls_options)
+      assert Keyword.get(tls_options, :verify) == :verify_peer
+      assert Keyword.get(tls_options, :depth) == 3
+      assert [match_fun: match_fun] = Keyword.get(tls_options, :customize_hostname_check)
+      assert is_function(match_fun)
+      assert is_list(Keyword.get(tls_options, :cacerts))
+      refute Keyword.has_key?(tls_options, :cacertfile)
+    end
+
+    test "verify_none yields only the chosen opt-out when explicitly selected" do
+      assert {:ok, _adapter, config} =
+               Email.adapter_config(adapter_union(verify: :verify_none))
+
+      assert Keyword.fetch!(config, :tls_options) == [verify: :verify_none]
+    end
+
+    test "cacertfile replaces the OS trust store when set" do
+      assert {:ok, _adapter, config} =
+               Email.adapter_config(adapter_union(cacertfile: "/etc/ssl/internal-ca.pem"))
+
+      tls_options = Keyword.fetch!(config, :tls_options)
+      assert Keyword.get(tls_options, :cacertfile) == ~c"/etc/ssl/internal-ca.pem"
+      refute Keyword.has_key?(tls_options, :cacerts)
+    end
+
+    test "ssl/tls/auth pass through unchanged" do
+      assert {:ok, _adapter, config} =
+               Email.adapter_config(adapter_union(ssl: true, tls: :never, auth: :always))
+
+      assert Keyword.get(config, :ssl) == true
+      assert Keyword.get(config, :tls) == :never
+      assert Keyword.get(config, :auth) == :always
+    end
+  end
+
+  describe "adapter_config/1 STARTTLS-downgrade warning" do
+    test "warns once for tls: :if_available against a public relay" do
+      union = adapter_union(relay: "1.1.1.1", tls: :if_available)
+
+      log = capture_log(fn -> Email.adapter_config(union) end)
+      assert log =~ "tls: :if_available"
+      assert log =~ "strip STARTTLS"
+    end
+
+    test "does NOT warn for tls: :if_available against an RFC1918 relay" do
+      union = adapter_union(relay: "10.0.0.5", tls: :if_available)
+
+      log = capture_log(fn -> Email.adapter_config(union) end)
+      refute log =~ "strip STARTTLS"
     end
   end
 end
