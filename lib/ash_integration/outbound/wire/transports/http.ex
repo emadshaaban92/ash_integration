@@ -174,5 +174,17 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
     end
   end
 
+  # OAuth2 client-credentials: decrypt the client secret live, then fetch (or reuse
+  # a cached) access token from the shared provider. A token-fetch failure is
+  # already classified onto the transport contract, so it short-circuits `deliver/2`
+  # exactly like a decryption failure. The token is a live carve-out — never
+  # persisted, never logged.
+  defp auth_headers(%Ash.Union{type: :oauth2_client_credentials, value: auth}) do
+    with {:ok, auth} <- Utils.load_secret(auth, [:client_secret], "OAuth2 client secret"),
+         {:ok, token} <- AshIntegration.Transport.OAuth2.get_token(auth) do
+      {:ok, [{"authorization", "Bearer #{token}"}]}
+    end
+  end
+
   defp auth_headers(%Ash.Union{type: :none}), do: {:ok, []}
 end

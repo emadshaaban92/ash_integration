@@ -448,10 +448,12 @@ listed in `:source_domains` so it's discovered at boot.
 
 AshIntegration supports four transport types, configured per connection. Each has its own settings, security options, and behavior:
 
-- **[HTTP Transport](guides/http-transport.md)** — JSON payloads over HTTP with Bearer, API Key, or Basic Auth
+- **[HTTP Transport](guides/http-transport.md)** — JSON payloads over HTTP with Bearer, API Key, Basic Auth, or OAuth2 client-credentials
 - **[Kafka Transport](guides/kafka-transport.md)** — Kafka messages with SASL/TLS security and event-key partitioning
-- **[Email Transport](guides/email-transport.md)** — email over SMTP (built on Swoosh), with credentials encrypted at rest
+- **[Email Transport](guides/email-transport.md)** — email over SMTP (built on Swoosh) or Microsoft Graph app-only OAuth2, with credentials encrypted at rest
 - **[WhatsApp Transport](guides/whatsapp-transport.md)** — WhatsApp messages over Meta's WhatsApp Business Cloud API, with pre-approved templates and the access token encrypted at rest
+
+Outbound OAuth2 uses the two-legged, machine-to-machine **client-credentials** grant only (no authorization-code/consent flow, no refresh tokens). Tokens are fetched live at delivery, cached until just before expiry, and single-flighted so many concurrent deliveries share one fetch. The `client_secret` lives on the connection, encrypted at rest, and is shared by the HTTP and Email OAuth2 paths.
 
 The HTTP and Kafka transports lead with the event type on the wire and support payload signing via the `signing` config union — `none` (default), `stripe` (native Stripe-style HMAC-SHA256, configurable header name), or `custom` (a sandboxed signing script; the secret never enters the sandbox). See the transport guides for details.
 

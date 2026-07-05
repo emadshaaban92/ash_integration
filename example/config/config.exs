@@ -105,10 +105,10 @@ config :example, Example.Vault,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
-# The email transport uses Swoosh's SMTP adapter (gen_smtp), not an HTTP API
-# adapter, so Swoosh needs no HTTP API client. Disabling it avoids Swoosh's
-# boot-time hackney requirement.
-config :swoosh, :api_client, false
+# Swoosh's SMTP adapter (gen_smtp) needs no HTTP API client, but the Microsoft
+# Graph app-only adapter sends over HTTP and requires one. Req is already a
+# dependency and the SMTP path ignores the api_client, so this is safe for both.
+config :swoosh, :api_client, Swoosh.ApiClient.Req
 
 config :ash_integration,
   otp_app: :example,

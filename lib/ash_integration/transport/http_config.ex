@@ -36,6 +36,11 @@ defmodule AshIntegration.Transport.HttpConfig do
                       type: AshIntegration.Transport.HttpAuth.BasicAuth,
                       tag: :type,
                       tag_value: "basic_auth"
+                    ],
+                    oauth2_client_credentials: [
+                      type: AshIntegration.Transport.OAuth2.ClientCredentials,
+                      tag: :type,
+                      tag_value: "oauth2_client_credentials"
                     ]
                   ],
                   storage: :map_with_tag

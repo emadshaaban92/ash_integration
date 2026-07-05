@@ -45,7 +45,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
     %Ash.Union{type: :email, value: config} = connection.transport_config
 
     with {:ok, email} <- build_email(connection, event),
-         {:ok, adapter, adapter_config} <- adapter_config(config.adapter) do
+         {:ok, adapter, adapter_config} <- adapter_config(config.adapter, email) do
       send_email(adapter, email, adapter_config)
     end
   end
@@ -71,9 +71,25 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
       |> put_body(delivery["html"], &Swoosh.Email.html_body/2)
       |> put_body(delivery["text"], &Swoosh.Email.text_body/2)
       |> put_headers(delivery["headers"])
+      |> put_client_options(Map.get(config, :adapter))
 
     {:ok, email}
   end
+
+  # Defense-in-depth for the Graph SEND path. Swoosh's Req ApiClient reads Req
+  # options from `email.private[:client_options]`, so pass `redirect: false`
+  # there — mirroring the token request and the HTTP transport — so the send never
+  # chases a 3xx. The host is the fixed public graph.microsoft.com, so this is
+  # belt-and-braces rather than an active SSRF fix. The same seam lets test config
+  # (`:graph_req_options`) route the send through `Req.Test` to assert the final
+  # request path. The SMTP adapter ignores `client_options`, so this is a no-op for
+  # it, but only the Graph adapter needs it.
+  defp put_client_options(email, %Ash.Union{type: :ms_graph}) do
+    opts = [redirect: false] ++ Application.get_env(:ash_integration, :graph_req_options, [])
+    Swoosh.Email.put_private(email, :client_options, opts)
+  end
+
+  defp put_client_options(email, _adapter), do: email
 
   # Swoosh takes a sender as `{name, address}` or a bare `address`. Split the
   # common `"Display Name <addr@host>"` form so the From header is well-formed;
@@ -102,8 +118,10 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   defp put_headers(email, _headers), do: email
 
   @doc false
-  # The gen_smtp adapter config for `smtp`. Exposed for testing the TLS-options
-  # shape and the STARTTLS-downgrade warning without an SMTP server.
+  # Resolve the Swoosh adapter + config for the connection's adapter union, folding
+  # in the live secret carve-out (SMTP password / OAuth2 access token). Exposed for
+  # testing the adapter wiring — including the SMTP TLS-options shape and the
+  # STARTTLS-downgrade warning — without a live SMTP/Graph endpoint.
   #
   # The SMTP credential is the live carve-out: decrypted per send via `load_secret`
   # (a rotated password auto-applies, a decrypt failure classifies as a
@@ -113,7 +131,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   # `tls_options` is verified-by-default (see `TlsOptions`): certs are checked on
   # both the implicit-SSL (`ssl: true`) and STARTTLS-upgrade paths unless the
   # operator sets `verify: :verify_none` on this one connection.
-  def adapter_config(%Ash.Union{type: :smtp, value: smtp}) do
+  def adapter_config(%Ash.Union{type: :smtp, value: smtp}, _email) do
     with {:ok, loaded} <- Utils.load_secret(smtp, [:password], "SMTP password"),
          {:ok, tls_options} <- tls_options(smtp) do
       warn_starttls_downgrade(smtp)
@@ -135,6 +153,45 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
       {:ok, Swoosh.Adapters.SMTP, config}
     end
   end
+
+  # Microsoft Graph app-only send. The client-credentials access token is the live
+  # carve-out: decrypt the client secret, fetch (or reuse a cached) token from the
+  # shared provider, and hand it to Swoosh's MsGraph adapter via its `auth` fn seam.
+  # A token-fetch failure is already classified onto the transport contract, so it
+  # short-circuits here before any send is attempted. An optional `user_id` pins the
+  # sending mailbox via the adapter's `:url` override.
+  def adapter_config(%Ash.Union{type: :ms_graph, value: ms_graph}, email) do
+    with {:ok, loaded} <-
+           Utils.load_secret(ms_graph.oauth2, [:client_secret], "OAuth2 client secret"),
+         {:ok, token} <- AshIntegration.Transport.OAuth2.get_token(loaded) do
+      config = [auth: fn -> token end, url: ms_graph_url(ms_graph.user_id, email)]
+      {:ok, Swoosh.Adapters.MsGraph, config}
+    end
+  end
+
+  # ALWAYS pin an explicit `:url`, so Swoosh's MsGraph adapter never builds the
+  # endpoint itself. Left to its own devices it interpolates the message `from`
+  # (which a Lua transform can set to a path-bearing string) into the URL with NO
+  # encoding — request-forgery across the `.default`-scoped Graph surface. Here the
+  # sending mailbox — an explicit `user_id` override, else the resolved `from`
+  # address — is percent-encoded with a reserved-safe predicate so no path/query
+  # metacharacter (`/ ? # @ ...`) survives to rewrite the path or query.
+  defp ms_graph_url(user_id, _email) when is_binary(user_id) and user_id != "" do
+    build_send_url(user_id)
+  end
+
+  defp ms_graph_url(_user_id, email), do: build_send_url(mailbox_address(email))
+
+  defp build_send_url(mailbox) do
+    "https://graph.microsoft.com/v1.0/users/" <>
+      URI.encode(mailbox, &URI.char_unreserved?/1) <> "/sendMail"
+  end
+
+  # Swoosh normalizes a sender to a `{name, address}` tuple; the mailbox is the
+  # address part. Falls back to "" for a malformed sender (rejected upstream by the
+  # `from` format validation, so this only guards against a truly empty address).
+  defp mailbox_address(%Swoosh.Email{from: {_name, address}}) when is_binary(address), do: address
+  defp mailbox_address(_email), do: ""
 
   # A bad `cacert_pem` is an operator misconfiguration on this connection —
   # classify it as a non-retryable transport failure rather than crashing the

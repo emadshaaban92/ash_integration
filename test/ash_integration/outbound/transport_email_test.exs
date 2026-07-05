@@ -143,13 +143,13 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
     end
   end
 
-  # `adapter_config/1` folds the live SMTP credential into the gen_smtp config and
+  # `adapter_config/2` folds the live SMTP credential into the gen_smtp config and
   # attaches verified-by-default `tls_options`. gen_smtp passes `tls_options`
   # through on both the implicit-SSL and STARTTLS-upgrade paths, so this is where
   # cert verification is switched on (or, per connection, off).
-  describe "adapter_config/1 TLS options" do
+  describe "adapter_config/2 TLS options" do
     test "verify_peer with the HTTPS hostname match_fun and OS trust store by default" do
-      assert {:ok, Swoosh.Adapters.SMTP, config} = Email.adapter_config(adapter_union([]))
+      assert {:ok, Swoosh.Adapters.SMTP, config} = Email.adapter_config(adapter_union([]), nil)
 
       tls_options = Keyword.fetch!(config, :tls_options)
       assert Keyword.get(tls_options, :verify) == :verify_peer
@@ -161,14 +161,14 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
 
     test "verify_none yields only the chosen opt-out when explicitly selected" do
       assert {:ok, _adapter, config} =
-               Email.adapter_config(adapter_union(verify: :verify_none))
+               Email.adapter_config(adapter_union(verify: :verify_none), nil)
 
       assert Keyword.fetch!(config, :tls_options) == [verify: :verify_none]
     end
 
     test "a valid cacert_pem AUGMENTS the OS trust store (roots ++ pasted DER)" do
       assert {:ok, _adapter, config} =
-               Email.adapter_config(adapter_union(cacert_pem: @ca_pem))
+               Email.adapter_config(adapter_union(cacert_pem: @ca_pem), nil)
 
       tls_options = Keyword.fetch!(config, :tls_options)
       assert Keyword.get(tls_options, :cacerts) == :public_key.cacerts_get() ++ ca_ders()
@@ -176,7 +176,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
 
     test "a blank cacert_pem falls back to OS roots only" do
       assert {:ok, _adapter, config} =
-               Email.adapter_config(adapter_union(cacert_pem: "   \n  "))
+               Email.adapter_config(adapter_union(cacert_pem: "   \n  "), nil)
 
       tls_options = Keyword.fetch!(config, :tls_options)
       assert Keyword.get(tls_options, :cacerts) == :public_key.cacerts_get()
@@ -188,7 +188,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
       union = %Ash.Union{type: :smtp, value: %{smtp(cacert_pem: @ca_pem) | cacert_pem: "bad"}}
 
       assert {:error, %{failure_class: :transport, retryable: false, error_message: msg}} =
-               Email.adapter_config(union)
+               Email.adapter_config(union, nil)
 
       assert msg =~ "SMTP TLS configuration error"
       assert msg =~ "cacert_pem"
@@ -200,13 +200,13 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
         value: %{smtp(verify: :verify_none, cacert_pem: @ca_pem) | cacert_pem: "bad"}
       }
 
-      assert {:ok, _adapter, config} = Email.adapter_config(union)
+      assert {:ok, _adapter, config} = Email.adapter_config(union, nil)
       assert Keyword.fetch!(config, :tls_options) == [verify: :verify_none]
     end
 
     test "ssl/tls/auth pass through unchanged" do
       assert {:ok, _adapter, config} =
-               Email.adapter_config(adapter_union(ssl: true, tls: :never, auth: :always))
+               Email.adapter_config(adapter_union(ssl: true, tls: :never, auth: :always), nil)
 
       assert Keyword.get(config, :ssl) == true
       assert Keyword.get(config, :tls) == :never
@@ -242,11 +242,11 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
     end
   end
 
-  describe "adapter_config/1 STARTTLS-downgrade warning" do
+  describe "adapter_config/2 STARTTLS-downgrade warning" do
     test "warns once for tls: :if_available against a public relay" do
       union = adapter_union(relay: "1.1.1.1", tls: :if_available)
 
-      log = capture_log(fn -> Email.adapter_config(union) end)
+      log = capture_log(fn -> Email.adapter_config(union, nil) end)
       assert log =~ "tls: :if_available"
       assert log =~ "strip STARTTLS"
     end
@@ -254,7 +254,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
     test "does NOT warn for tls: :if_available against an RFC1918 relay" do
       union = adapter_union(relay: "10.0.0.5", tls: :if_available)
 
-      log = capture_log(fn -> Email.adapter_config(union) end)
+      log = capture_log(fn -> Email.adapter_config(union, nil) end)
       refute log =~ "strip STARTTLS"
     end
   end

@@ -142,6 +142,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
          auth: false,
          sasl_password: false,
          smtp_password: false,
+         oauth2: false,
          access_token: false
        }
      )}
@@ -171,8 +172,18 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
   def handle_event("security-type-changed", params, socket),
     do: union_type_changed(socket, params, :sasl_password)
 
-  def handle_event("adapter-type-changed", params, socket),
-    do: union_type_changed(socket, params, :smtp_password)
+  def handle_event("adapter-type-changed", %{"_target" => path} = params, socket) do
+    {:noreply, socket} = union_type_changed(socket, params, :smtp_password)
+
+    form =
+      if get_in(params, path) == "ms_graph" do
+        Helpers.ensure_ms_graph_oauth2_subform(socket.assigns.form)
+      else
+        socket.assigns.form
+      end
+
+    {:noreply, assign(socket, form: form)}
+  end
 
   def handle_event("signing-type-changed", params, socket),
     do: union_type_changed(socket, params, :signing)

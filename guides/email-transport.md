@@ -35,13 +35,18 @@ The email transport requires **Swoosh** and **gen_smtp**. Add them to your
 {:gen_smtp, "~> 1.0"}
 ```
 
-Swoosh only needs an HTTP API client for its *API* adapters; the SMTP adapter
-does not. Disable it so Swoosh doesn't require a client library at boot:
+Swoosh only needs an HTTP API client for its *API* adapters (including the
+Microsoft Graph app-only adapter below); the SMTP adapter does not. This library
+uses **Req** — already a dependency — as the client, and the SMTP path ignores
+it, so a single setting serves both:
 
 ```elixir
 # config/config.exs
-config :swoosh, :api_client, false
+config :swoosh, :api_client, Swoosh.ApiClient.Req
 ```
+
+A host that only ever uses SMTP can set this back to `false` to skip the API
+client entirely.
 
 The transport appears in the dashboard automatically once both dependencies are
 available.
@@ -74,11 +79,91 @@ connection's `transport_config.type` to `:email`:
 ```
 
 `from` accepts a bare address (`bot@acme.com`) or a display-name form
-(`Acme <bot@acme.com>`), which is split into a proper `From` header.
+(`Acme <bot@acme.com>`), which is split into a proper `From` header. The address
+part must be a plausible mailbox — spaces, control characters, and the URL
+metacharacters `/`, `?`, and `#` are rejected, since the address can flow into the
+Microsoft Graph `sendMail` URL.
 
 The SMTP `password` is encrypted at rest exactly like an HTTP bearer token or a
 Kafka SASL password, and is decrypted **live at delivery** — never stored in the
 delivery descriptor, and a rotated password takes effect immediately.
+
+## Microsoft Graph (Office 365) — app-only OAuth2
+
+For Office 365 / Microsoft 365, the **app-only** (consent-free) target is an
+Azure app registration with the **`Mail.Send` application permission + admin
+consent**, sending through the Graph `sendMail` endpoint as a configured
+user/shared mailbox. This is the recommended OAuth2 email path: it uses the same
+two-legged **client-credentials** grant as the HTTP transport (no browser
+consent, no refresh tokens, no per-user delegation) and Swoosh's
+`Swoosh.Adapters.MsGraph` adapter does the sending.
+
+Set the adapter `type` to `ms_graph`. The OAuth2 block is the **same shared
+client-credentials schema** the HTTP transport uses:
+
+```elixir
+%{
+  type: :email,
+  from: "notifications@acme.com",       # the sending mailbox (unless user_id overrides)
+  adapter: %{
+    type: "ms_graph",
+    user_id: nil,                        # optional: send as a specific user/shared mailbox id
+    oauth2: %{
+      token_url: "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+      client_id: "{application-client-id}",
+      client_secret: "{client-secret}",  # encrypted at rest (AshCloak), required
+      scopes: "https://graph.microsoft.com/.default",
+      auth_style: :post                  # :post (default) or :basic
+    }
+  }
+}
+```
+
+Azure setup (once, by a tenant admin):
+
+1. Register an application in Entra ID (Azure AD); note the **Application (client)
+   ID** and **Directory (tenant) ID**.
+2. Add a client secret; use it as `client_secret`.
+3. Under **API permissions**, add the **Application** permission
+   `Microsoft Graph → Mail.Send`, then **Grant admin consent**.
+4. `token_url` is
+   `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`, and `scopes`
+   is `https://graph.microsoft.com/.default` (the client-credentials flow uses
+   the app's consented permissions, so `.default` is correct — not per-request
+   scopes).
+
+The access token is fetched live, cached, and single-flighted by the shared
+token provider exactly as for HTTP (see the HTTP transport guide's OAuth2
+section). The `client_secret` is encrypted at rest and never logged. If
+`user_id` is set, the send targets `/users/{user_id}/sendMail` (a specific
+user/shared mailbox); otherwise the mailbox is derived from the `from` address.
+Either way the mailbox is validated (no spaces, control chars, or `/ ? #`) and
+percent-encoded into the request path, so it can never rewrite the Graph endpoint.
+
+> Requires `config :swoosh, :api_client, Swoosh.ApiClient.Req` (see
+> Prerequisites) — the Graph adapter sends over HTTP.
+
+## Provider API-key adapters (the simpler alternative)
+
+If you don't specifically need OAuth2, most providers offer a plain **API-key**
+HTTP adapter that needs no OAuth at all — Swoosh ships adapters for SendGrid,
+Mailgun, Postmark, Amazon SES, Brevo, Resend, Mailjet, and more. These are often
+the simplest option: set `config :swoosh, :api_client, Swoosh.ApiClient.Req` and
+add a new `adapter` variant wrapping the provider's adapter + its API key
+(encrypted at rest like the SMTP password). Only Microsoft Graph is shipped as a
+first-class OAuth2 adapter today because app-only Graph is the clean,
+consent-free path for Office 365.
+
+## SMTP XOAUTH2 (not shipped)
+
+Provider-agnostic **SMTP OAuth2** (feeding the client-credentials access token as
+an `AUTH XOAUTH2` credential) is mechanically possible — `gen_smtp` implements
+the `XOAUTH2` mechanism — but is **not** shipped. Swoosh's `Swoosh.Adapters.SMTP`
+does not expose a clean seam to force the XOAUTH2 mechanism or pass a
+short-lived, per-send token as the credential, and app-only SMTP OAuth is
+historically limited on the major providers. Microsoft Graph app-only (above) is
+the recommended OAuth2 email path; SMTP XOAUTH2 remains a possible future
+follow-up if a provider-agnostic need arises.
 
 ## TLS and certificate verification
 
