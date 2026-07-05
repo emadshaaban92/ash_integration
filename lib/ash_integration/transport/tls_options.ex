@@ -18,7 +18,10 @@ defmodule AshIntegration.Transport.TlsOptions do
   # private/self-signed CA, stored on the connection record — no side-channel
   # file) AUGMENTS the OS store rather than replacing it, so a connection that
   # mixes public-CA and private-CA endpoints still verifies both. `sni` overrides
-  # the handshake server name for brokers that front a different cert CN.
+  # the handshake server name for brokers/relays that front a different cert CN;
+  # when it is absent the caller can supply a `default_sni` (the SMTP relay host)
+  # so the STARTTLS upgrade — which gen_smtp opens with no server_name_indication —
+  # still presents a reference hostname for the verify_peer match_fun to check.
 
   # A bounded chain depth keeps a pathological cert chain from ballooning the
   # verification work; 3 covers root → intermediate → leaf with headroom.
@@ -33,16 +36,24 @@ defmodule AshIntegration.Transport.TlsOptions do
   #   * `verify_peer` is the verified default: OS roots, augmented with
   #     `cacert_pem`'s certificate(s) when present.
   #
+  # `opts` may carry `default_sni:` — a fallback server name used only when the
+  # config has no explicit `:sni`. The SMTP transport passes the relay host here so
+  # the STARTTLS upgrade (which gen_smtp opens via `ssl:connect/3` with no
+  # server_name_indication) still hands verify_peer a reference hostname to match;
+  # an explicit `:sni` always wins, and `verify_none` never gets an SNI.
+  #
   # Returns `{:ok, opts}`, or `{:error, message}` when `cacert_pem` is present but
   # not decodable to at least one PEM certificate — the bad PEM is surfaced to the
   # caller (which classifies it as a transport error) rather than silently
   # trusting nothing. A blank/whitespace-only `cacert_pem` is treated as "not set".
-  @spec build(map()) :: {:ok, keyword()} | {:error, String.t()}
-  def build(%{verify: :verify_none}), do: {:ok, [verify: :verify_none]}
+  @spec build(map(), keyword()) :: {:ok, keyword()} | {:error, String.t()}
+  def build(config, opts \\ [])
 
-  def build(%{verify: :verify_peer} = opts) do
-    with {:ok, ssl_opts} <- put_trust_store(base_opts(), opts) do
-      {:ok, maybe_put_sni(ssl_opts, opts)}
+  def build(%{verify: :verify_none}, _opts), do: {:ok, [verify: :verify_none]}
+
+  def build(%{verify: :verify_peer} = config, opts) do
+    with {:ok, ssl_opts} <- put_trust_store(base_opts(), config) do
+      {:ok, maybe_put_sni(ssl_opts, config, opts)}
     end
   end
 
@@ -116,13 +127,22 @@ defmodule AshIntegration.Transport.TlsOptions do
     _, _ -> []
   end
 
-  defp maybe_put_sni(ssl_opts, opts) do
-    case Map.get(opts, :sni) do
-      sni when is_binary(sni) and sni != "" ->
-        Keyword.put(ssl_opts, :server_name_indication, String.to_charlist(sni))
+  # An explicit `:sni` on the config wins; otherwise fall back to the caller's
+  # `default_sni` (the SMTP relay host). Only reached on the verify_peer path.
+  defp maybe_put_sni(ssl_opts, config, opts) do
+    case sni_host(config, opts) do
+      host when is_binary(host) and host != "" ->
+        Keyword.put(ssl_opts, :server_name_indication, String.to_charlist(host))
 
       _ ->
         ssl_opts
+    end
+  end
+
+  defp sni_host(config, opts) do
+    case Map.get(config, :sni) do
+      sni when is_binary(sni) and sni != "" -> sni
+      _ -> Keyword.get(opts, :default_sni)
     end
   end
 end
