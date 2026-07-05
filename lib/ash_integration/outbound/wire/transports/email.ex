@@ -109,9 +109,25 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   defp put_body(email, "", _fun), do: email
   defp put_body(email, body, fun), do: fun.(email, body)
 
+  # MIME-structural headers are owned by the encoder, not the transform. gen_smtp's
+  # `mimemail` only generates the `multipart/alternative` boundary (its
+  # `content_type_params`) when no `Content-Type` header is already present; an
+  # injected one leaves the params map empty and CRASHES the mailer on an html+text
+  # email. The resolver no longer seeds `content-type` for email, but a transform or
+  # a connection-static header could still set one (or another structural header), so
+  # skip them case-insensitively here as defense-in-depth — the encoder emits the
+  # correct ones itself.
+  @mime_structural_headers ~w(content-type content-transfer-encoding mime-version content-disposition)
+
   defp put_headers(email, headers) when is_map(headers) do
     Enum.reduce(headers, email, fn {name, value}, acc ->
-      Swoosh.Email.header(acc, to_string(name), to_string(value))
+      name = to_string(name)
+
+      if String.downcase(name) in @mime_structural_headers do
+        acc
+      else
+        Swoosh.Email.header(acc, name, to_string(value))
+      end
     end)
   end
 
@@ -237,7 +253,17 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
 
   defp warn_starttls_downgrade(_smtp), do: :ok
 
-  defp send_email(adapter, email, adapter_config) do
+  @doc false
+  # The adapter's `{:ok, _} | {:error, _}` contract is honored on the happy paths,
+  # but a bug in the MIME encoder (gen_smtp's `mimemail` raises a `KeyError` when a
+  # `Content-Type` header collides with a multipart body) or any other adapter raise
+  # would otherwise escape the transport's `{:ok, _} | {:error, classified}` contract,
+  # crash the Broadway batch, and leave the delivery in an invisible infinite retry
+  # (no DeliveryLog, no failure recorded). Classify an unexpected raise/exit as a
+  # retryable `:transport` failure so it produces a delivery log instead — closing the
+  # raise gap the moduledoc's two-level mapping promises. Exposed for testing the
+  # raise-classification seam without a live SMTP server.
+  def send_email(adapter, email, adapter_config) do
     case adapter.deliver(email, adapter_config) do
       {:ok, receipt} ->
         {:ok, %{email_response: Utils.body_to_string(receipt)}}
@@ -245,6 +271,23 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
       {:error, reason} ->
         {:error, classify_error(reason)}
     end
+  rescue
+    exception ->
+      {:error,
+       %{
+         failure_class: :transport,
+         error_message:
+           "SMTP delivery raised: #{Utils.scrub_reason(Exception.message(exception))}",
+         retryable: true
+       }}
+  catch
+    kind, reason ->
+      {:error,
+       %{
+         failure_class: :transport,
+         error_message: "SMTP delivery #{kind}: #{Utils.scrub_reason(reason)}",
+         retryable: true
+       }}
   end
 
   @doc false
