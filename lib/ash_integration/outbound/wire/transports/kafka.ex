@@ -138,7 +138,6 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
              connection.id,
              brokers,
              client_config,
-             topic,
              producer_config
            ),
          {:ok, partition_count} <- resolve_partition_count(client_id, topic),

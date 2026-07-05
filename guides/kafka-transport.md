@@ -177,6 +177,8 @@ Kafka clients are managed by `AshIntegration.Transport.KafkaClientManager`:
 
 - One [brod](https://hex.pm/packages/brod) client per active connection
 - Clients are started on first delivery
+- Producers are started automatically per topic (`auto_start_producers`), so additional subscriptions/topics on the same connection get a producer without a restart
+- A change to the effective connection config (brokers, TLS/SASL credentials, acks) restarts the client so the new config takes effect
 - Idle clients are automatically torn down after 5 minutes (configurable via `:kafka_idle_timeout_ms`)
 
 ## Retry Behavior
