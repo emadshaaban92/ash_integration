@@ -362,10 +362,16 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   # ── Pure decision (unit-testable) ──────────────────────────────────────────────
 
   @doc """
-  Pure decision for a claimed delivery (no I/O):
+  Pure decision for a claimed delivery (no I/O), read off the row's state as
+  captured in the snapshot loaded just after the claim:
 
-    * `:noop` — no longer `:scheduled` (cancelled / already delivered between claim
-      and execution).
+    * `:noop` — no longer `:scheduled`. This only catches a cancel/deliver that
+      landed in the narrow claim→snapshot-load window; `state` is a snapshot taken
+      microseconds after the claim, so a cancel that arrives AFTER the load is not
+      seen here and does NOT stop the send — the transport call still goes out.
+      That later race is instead caught at write-back: the fenced `:deliver` in
+      `apply_result/2` no-ops against the newer state (the lease-token fence), so a
+      late cancel costs no correctness, only the wasted send.
     * `:deliver` — deliver it.
 
   Suspension is intentionally NOT a gate here. A suspended entity is never given a

@@ -9,14 +9,29 @@ defmodule AshIntegration.Outbound.Retention do
 
   Three tables, two windows:
 
-    * `EventDelivery` and `Log` — terminal/aged rows older than the (shorter)
-      `delivery_days` window;
+    * `EventDelivery` — only rows in a **settled** state (`:delivered`,
+      `:suppressed`, `:cancelled`) older than the (shorter) `delivery_days`
+      window. Terminal-but-retained rows are deliberately NOT reaped: `:failed`
+      (both `:permanent` and `:expired`) and `:parked` deliveries keep their
+      `(connection, event_key)` lane and stay available for operator inspection.
+    * `Log` — all rows older than the `delivery_days` window (no state filter).
     * the immutable `Event` (source of truth) — older than its own (longer)
       `event_days` window, and only once it has been **dispatched** and has **no
       remaining deliveries**, so retention never strands a delivery an operator
       still has to reprocess, and never reaps a stuck/poison event — which would
       silently unblock its `(connection, event_key)` lane (the
       `dispatched_at IS NOT NULL` guard).
+
+  ## Caveat — unbounded growth from unreaped deliveries
+
+  Because an `Event` ages out only once it has **no remaining deliveries**, any
+  delivery that never reaches a settled state pins its parent `Event`
+  indefinitely. `:permanent` and `:parked` rows are bounded in practice by the
+  operator workflows that resolve them, but `:expired` deliveries are terminal and
+  self-generated (an event that outlived its delivery window with nothing left to
+  reprocess), so on a busy lane they — and the Events they pin — accumulate
+  without bound under the current filter. Reaping terminal deliveries is a
+  retention-policy change tracked separately; this stage does not do it today.
 
   The "what is old enough to delete" policy lives here, not on the resources: they
   keep only a generic `:destroy`, while this module owns the filters and runs the

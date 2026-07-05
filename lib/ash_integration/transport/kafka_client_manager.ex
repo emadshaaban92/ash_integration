@@ -10,9 +10,6 @@ defmodule AshIntegration.Transport.KafkaClientManager do
 
   require Logger
 
-  @idle_timeout_ms Application.compile_env(:ash_integration, :kafka_idle_timeout_ms, 300_000)
-  @check_interval_ms div(@idle_timeout_ms, 2)
-
   # Public API
 
   def start_link(opts \\ []) do
@@ -112,7 +109,7 @@ defmodule AshIntegration.Transport.KafkaClientManager do
 
   @impl true
   def handle_info(:cleanup, state) do
-    cutoff = now() - @idle_timeout_ms
+    cutoff = now() - idle_timeout_ms()
 
     {expired, active} =
       Enum.split_with(state.clients, fn {_id, last_active} -> last_active < cutoff end)
@@ -129,10 +126,16 @@ defmodule AshIntegration.Transport.KafkaClientManager do
   end
 
   defp schedule_cleanup do
-    Process.send_after(self(), :cleanup, @check_interval_ms)
+    Process.send_after(self(), :cleanup, check_interval_ms())
   end
 
   defp now, do: System.monotonic_time(:millisecond)
+
+  # Idle-teardown timing, read at RUNTIME (`Application.get_env`) so a release's
+  # `runtime.exs` config is honoured rather than baked in at compile time. Read
+  # only on the infrequent cleanup tick, so the lookup cost is negligible.
+  defp idle_timeout_ms, do: Application.get_env(:ash_integration, :kafka_idle_timeout_ms, 300_000)
+  defp check_interval_ms, do: div(idle_timeout_ms(), 2)
 
   defp client_alive?(client_id) do
     case Process.whereis(client_id) do

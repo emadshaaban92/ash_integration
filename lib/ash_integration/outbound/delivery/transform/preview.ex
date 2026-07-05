@@ -90,8 +90,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Preview do
     {input, sample} = sample_envelope(subscription, created_at)
 
     # Resolve the full transport-shaped descriptor (incl. the pre-seeded wire
-    # headers the author can override/remove and the computed signature) exactly
-    # as dispatch would, so the preview shows what will actually be sent.
+    # headers the author can override/remove) exactly as dispatch would, so the
+    # preview shows what will actually be sent — minus the signature/auth, which
+    # are live carve-outs added at delivery, not part of the resolved descriptor
+    # (see the moduledoc).
     case Resolver.resolve(subscription.connection, subscription, input, created_at) do
       :skip ->
         {:ok, %{outcome: :skipped, input: input, output: nil, source: sample.source}}
