@@ -10,7 +10,9 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
         → Batcher
             handle_batch:     Ash.bulk_update(:dispatch) — stamp dispatched_at +
                               materialize deliveries + coalesce, ALL in ONE
-                              transaction (the change's `after_batch`)
+                              transaction (the change's `after_batch`; `dispatch/2`
+                              pins `batch_size` to the batch length so Ash's default
+                              100-row chunking can't split it into several txns)
         → ack: notify the scheduler (the stamp already happened in the txn)
 
   **Prep happens outside the transaction, on purpose.** `project/3` is host code
@@ -216,6 +218,17 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
         # the default [:atomic_batches, :atomic] would skip them. return_records?
         # so after_batch receives the updated events.
         strategy: :stream,
+        # Force the WHOLE Broadway batch into ONE `transaction: :batch` chunk. Ash's
+        # bulk_update defaults to `batch_size: 100`, chunking a larger stream into
+        # one transaction PER 100 rows — which would (a) break the moduledoc's
+        # "all in ONE transaction" atomicity for a host-configured `dispatch:
+        # [batch_size: N]` above 100, and (b) turn a `:partial_success` (some chunks
+        # committed, some rolled back) into a whole-batch `{:error, _}` that
+        # `retry_one` would then re-dispatch over ALREADY-committed events. Pinning
+        # `batch_size` to the batch length keeps it a single transaction, so the
+        # result is only ever `:success` or `:error` (never `:partial_success`) and
+        # a rollback commits nothing for `retry_one` to duplicate.
+        batch_size: length(events),
         return_records?: true,
         return_errors?: true,
         stop_on_error?: false,

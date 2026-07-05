@@ -83,10 +83,24 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
 
       dsl_state
       |> Transformer.add_entity([:attributes], pk, type: :prepend)
-      |> Spark.Dsl.Transformer.set_option([:postgres], :migration_defaults,
-        id: "fragment(\"uuidv7()\")"
-      )
+      |> put_migration_default(:id, "fragment(\"uuidv7()\")")
     end
+  end
+
+  # MERGE the library's `id` migration default into whatever the host already set,
+  # rather than `set_option`-replacing the whole keyword. A bare `set_option` here
+  # would silently wipe a host's own `migration_defaults` (e.g. a default they set on
+  # one of their added attributes). This branch only runs when the host hasn't
+  # defined `:id` themselves, so overwriting just the `:id` key is safe.
+  defp put_migration_default(dsl_state, key, value) do
+    existing = Transformer.get_option(dsl_state, [:postgres], :migration_defaults) || []
+
+    Spark.Dsl.Transformer.set_option(
+      dsl_state,
+      [:postgres],
+      :migration_defaults,
+      Keyword.put(existing, key, value)
+    )
   end
 
   defp add_attribute_if_not_exists(dsl_state, name, type, opts) do
@@ -151,10 +165,20 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
   defp add_defaults_if_not_set(dsl_state) do
     existing_defaults = Transformer.get_option(dsl_state, [:actions], :defaults) || []
 
-    has_read? = Enum.any?(existing_defaults, &(match?(:read, &1) or match?({:read, _}, &1)))
+    # Check BOTH the `defaults` list AND any explicitly-defined action of that name.
+    # `Ash.Resource.Transformers.SetPrimaryActions` turns each entry in `defaults`
+    # into a `prepend_action(:read)`/`prepend_action(:destroy)` WITHOUT deduping
+    # against a hand-written `read :read`/`destroy :destroy`, so injecting `:read`
+    # here when the host already defined one produces two actions with the same name
+    # → a "Got duplicate action: read" DSL error pointing at library code the host
+    # never wrote. Guard on `Info.action/2` so we only add a default the host lacks.
+    has_read? =
+      Enum.any?(existing_defaults, &(match?(:read, &1) or match?({:read, _}, &1))) or
+        not is_nil(Info.action(dsl_state, :read))
 
     has_destroy? =
-      Enum.any?(existing_defaults, &(match?(:destroy, &1) or match?({:destroy, _}, &1)))
+      Enum.any?(existing_defaults, &(match?(:destroy, &1) or match?({:destroy, _}, &1))) or
+        not is_nil(Info.action(dsl_state, :destroy))
 
     additions = if(has_read?, do: [], else: [:read]) ++ if(has_destroy?, do: [], else: [:destroy])
 
@@ -310,30 +334,37 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
   # ── Code interface ─────────────────────────────────────────────────────
 
   defp add_code_interface_if_not_exists(dsl_state) do
-    existing = Transformer.get_entities(dsl_state, [:code_interface])
-
-    if Enum.any?(existing, &(&1.name == :create)) do
+    existing_names =
       dsl_state
-    else
-      defines = [
-        {:create, [action: :create]},
-        {:read_all, [action: :read]},
-        {:reset_dispatch, [action: :reset_dispatch]},
-        {:destroy, [action: :destroy]}
-      ]
+      |> Transformer.get_entities([:code_interface])
+      |> MapSet.new(& &1.name)
 
-      Enum.reduce(defines, dsl_state, fn {name, opts}, state ->
-        {:ok, define} =
-          Transformer.build_entity(
-            Dsl,
-            [:code_interface],
-            :define,
-            Keyword.put(opts, :name, name)
-          )
+    defines = [
+      {:create, [action: :create]},
+      {:read_all, [action: :read]},
+      {:reset_dispatch, [action: :reset_dispatch]},
+      {:destroy, [action: :destroy]}
+    ]
 
-        Transformer.add_entity(state, [:code_interface], define, type: :append)
-      end)
-    end
+    # Add each `define` only when the host hasn't already defined one of that NAME.
+    # The old `if any create? -> skip all` sentinel meant a host who defined even one
+    # of these interfaces (say `define :destroy`) without a `:create` got the whole
+    # library set re-added on top → a duplicate `define` for the name they wrote,
+    # which is a DSL error. Per-name filtering lets a host override any single
+    # interface without tripping over the rest.
+    defines
+    |> Enum.reject(fn {name, _opts} -> MapSet.member?(existing_names, name) end)
+    |> Enum.reduce(dsl_state, fn {name, opts}, state ->
+      {:ok, define} =
+        Transformer.build_entity(
+          Dsl,
+          [:code_interface],
+          :define,
+          Keyword.put(opts, :name, name)
+        )
+
+      Transformer.add_entity(state, [:code_interface], define, type: :append)
+    end)
   end
 
   # ── Postgres indexes ─────────────────────────────────────────────────────

@@ -11,8 +11,10 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
   #     `dispatched_at` stamp. Either the event is dispatched AND its deliveries
   #     exist, or neither. A crashed/rolled-back batch leaves the event undispatched
   #     for the lease to re-emit; a committed event is never re-claimed
-  #     (`claim/1` filters `dispatched_at IS NULL`), so no per-row idempotency check
-  #     is needed.
+  #     (`claim/1` filters `dispatched_at IS NULL`). `batch_change/3` additionally
+  #     pushes `dispatched_at IS NULL` onto the UPDATE itself, so even a lease-expiry
+  #     race that re-claims an in-flight row can't double-dispatch it (the loser's
+  #     write becomes a dropped `StaleRecord`).
   #
   # The delivery **specs** are precomputed OUTSIDE the transaction by
   # `AshIntegration.Outbound.Dispatch.Specs` (in the Broadway processor stage) and
@@ -23,6 +25,8 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
   # DB failure (a bang insert/update raising) aborts the transaction.
   use Ash.Resource.Change
 
+  import Ash.Expr
+
   require Logger
 
   @impl true
@@ -30,9 +34,21 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
   # that also define a batch change, and `batch_change` serves both the single and
   # bulk paths. It stamps `dispatched_at` (+ clears `dispatch_error`) per changeset;
   # the batch UPDATE persists it, atomic with the `after_batch` materialization.
+  #
+  # The `is_nil(dispatched_at)` filter is a load-bearing idempotency fence, NOT
+  # decoration: the dispatch lease (`@lease_seconds`, a fixed 60s node-liveness
+  # backstop) can expire mid-fan-out while `Specs.specs_for_event` runs slow Lua
+  # transforms sequentially per subscription, so another pass/node can re-claim the
+  # SAME row and dispatch it concurrently. Pushing `AND dispatched_at IS NULL` onto
+  # the UPDATE makes the loser's write match zero rows → Ash yields a `StaleRecord`
+  # that the non-atomic bulk path silently drops (the row never reaches
+  # `after_batch`), so there are no duplicate deliveries, no silent `dispatched_at`
+  # re-stamp on skip-plan events, and no unique-constraint raise recording a
+  # misleading `dispatch_error` on an event that dispatched fine.
   def batch_change(changesets, _opts, _context) do
     Enum.map(changesets, fn changeset ->
       changeset
+      |> Ash.Changeset.filter(expr(is_nil(dispatched_at)))
       |> Ash.Changeset.force_change_attribute(:dispatched_at, DateTime.utc_now())
       |> Ash.Changeset.force_change_attribute(:dispatch_error, nil)
     end)

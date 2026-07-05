@@ -130,7 +130,58 @@ defmodule Example.Outbound.ReprocessorTest do
     assert Enum.all?(all_events(), &(&1.delivery != nil))
   end
 
+  describe "the :reprocess action state guard (item 3)" do
+    test "refuses to resurrect an in-flight :scheduled row (lease fence)", %{connection: dest} do
+      # Reprocessing a :scheduled row would `clear_claim()` its lease token and reset
+      # it to :pending, defeating the delivery relay's fence and duplicating the
+      # delivery. The guard (state != :scheduled) makes the write a no-op — while
+      # still allowing the legitimate :pending/:parked/:failed sources (covered by the
+      # other tests here and the :pending re-derive cases above).
+      sub = create_subscription!(dest, "widget.updated", "-- noop")
+      scheduled = build_delivery!(sub, %{state: :scheduled})
+
+      result =
+        scheduled
+        |> Ash.Changeset.for_update(:reprocess, %{last_error: nil}, authorize?: false)
+        |> Ash.update(authorize?: false)
+
+      assert match?({:error, _}, result)
+      # Untouched: still :scheduled (so set_state/clear_claim never ran).
+      assert reload(scheduled).state == :scheduled
+    end
+
+    test "allows a :failed row (operator retry-now)", %{connection: dest} do
+      sub = create_subscription!(dest, "widget.updated", "-- noop")
+      failed = build_delivery!(sub, %{state: :failed})
+
+      assert {:ok, _} =
+               failed
+               |> Ash.Changeset.for_update(:reprocess, %{last_error: nil}, authorize?: false)
+               |> Ash.update(authorize?: false)
+
+      assert reload(failed).state == :pending
+    end
+
+    test "allows a :parked row (rebuild)", %{connection: dest} do
+      sub = create_subscription!(dest, "widget.updated", "-- noop")
+      parked = build_delivery!(sub, %{state: :parked})
+
+      assert {:ok, _} =
+               parked
+               |> Ash.Changeset.for_update(
+                 :reprocess,
+                 %{delivery: %{"x" => 1}, last_error: nil},
+                 authorize?: false
+               )
+               |> Ash.update(authorize?: false)
+
+      assert reload(parked).state == :pending
+    end
+  end
+
   # ── helpers ───────────────────────────────────────────────────────────────
+
+  defp reload(%resource{id: id}), do: Ash.get!(resource, id, authorize?: false)
 
   defp fix_transform!(sub, script) do
     sub

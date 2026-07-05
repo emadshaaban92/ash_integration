@@ -66,6 +66,23 @@ defmodule Example.Catalog.Widget do
       producer Example.Outbound.Batched
       version 1
     end
+
+    # Fixture pair: a producer that fails via throw/exit (not a raise). The isolated
+    # variant opts into `capture_isolation?` so the failure is caught and the host
+    # action still commits; the coupled variant leaves isolation off so the same
+    # throw/exit rolls the host transaction back. Both inert unless subscribed.
+    event "test.isolated_erratic" do
+      actions [:create]
+      producer Example.Outbound.Erratic
+      version 1
+      capture_isolation?(true)
+    end
+
+    event "test.coupled_erratic" do
+      actions [:create]
+      producer Example.Outbound.Erratic
+      version 1
+    end
   end
 
   actions do

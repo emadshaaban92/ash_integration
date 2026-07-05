@@ -33,7 +33,17 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
   """
   @spec project(module(), [map()], [map()]) :: {:ok, map()} | {:error, String.t()}
   def project(producer, events, subscriptions) do
-    {:ok, producer.project(events, subscriptions, %{})}
+    case producer.project(events, subscriptions, %{}) do
+      decisions when is_map(decisions) ->
+        {:ok, decisions}
+
+      # `project/3` is contracted to return a `%{event_id => decision}` map. A non-map
+      # return is a producer bug; treat it as the documented fail-closed park-all path
+      # (`{:error, reason}`) rather than letting the caller's `Map.get/3` raise a
+      # `BadMapError` out of the processor stage.
+      other ->
+        {:error, "project returned a non-map: #{inspect(other)}"}
+    end
   rescue
     e -> {:error, Exception.message(e)}
   end

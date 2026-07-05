@@ -24,8 +24,22 @@ defmodule Example.Outbound.Scoped do
 
   @impl true
   def project(events, _subscriptions, _context) do
-    if Enum.any?(events, &(mode(&1) == "raise")), do: raise("boom in project")
+    cond do
+      Enum.any?(events, &(mode(&1) == "raise")) ->
+        raise("boom in project")
 
+      # An entirely non-map return (contract is `%{event_id => decision}`) — a
+      # producer bug that must fail-closed to park-all, not crash the processor with
+      # a BadMapError on the caller's `Map.get`.
+      Enum.any?(events, &(mode(&1) == "non_map")) ->
+        :not_a_map
+
+      true ->
+        project_decisions(events)
+    end
+  end
+
+  defp project_decisions(events) do
     for event <- events, mode(event) != "omit", into: %{} do
       case mode(event) do
         "skip" -> {event.id, {:skip, "test skip"}}

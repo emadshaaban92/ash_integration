@@ -76,6 +76,18 @@ defmodule Example.Outbound.EventProjectTest do
     assert error =~ "invalid decision"
   end
 
+  test "a project that returns a non-map parks the candidates (no BadMapError)", %{sub: sub} do
+    # `project/3` is contracted to return a `%{event_id => decision}` map. A non-map
+    # return used to raise a BadMapError out of the processor's `Map.get`; it must
+    # instead take the documented fail-closed park-all path.
+    create_widget!("non_map")
+    drain_dispatch!()
+
+    assert [%{state: :parked, delivery: nil, last_error: error}] = deliveries_for(sub)
+    assert error =~ "project error"
+    assert error =~ "non-map"
+  end
+
   # ── helpers ───────────────────────────────────────────────────────────────
 
   defp deliveries_for(sub) do
