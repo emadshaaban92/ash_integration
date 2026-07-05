@@ -50,6 +50,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
       case type do
         "http" -> Helpers.ensure_auth_subform(form)
         "email" -> Helpers.ensure_email_adapter_subform(form)
+        "whatsapp" -> Helpers.ensure_whatsapp_adapter_subform(form)
         _ -> Helpers.ensure_security_subform(form)
       end
       |> maybe_ensure_signing(type)
@@ -77,6 +78,9 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
 
   defp existing_rows(%Ash.Union{type: :email, value: config}),
     do: {kv_rows(config.headers), [], []}
+
+  # WhatsApp carries no custom wire headers or brokers.
+  defp existing_rows(%Ash.Union{type: :whatsapp}), do: {[], [], []}
 
   defp existing_rows(_), do: {[], [], []}
 
@@ -121,6 +125,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
       case new_type do
         "http" -> Helpers.ensure_auth_subform(form)
         "email" -> Helpers.ensure_email_adapter_subform(form)
+        "whatsapp" -> Helpers.ensure_whatsapp_adapter_subform(form)
         _ -> Helpers.ensure_security_subform(form)
       end
       |> maybe_ensure_signing(new_type)
@@ -132,7 +137,13 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
        header_rows: [],
        broker_rows: [],
        kafka_header_rows: [],
-       has_secrets: %{signing: false, auth: false, sasl_password: false, smtp_password: false}
+       has_secrets: %{
+         signing: false,
+         auth: false,
+         sasl_password: false,
+         smtp_password: false,
+         access_token: false
+       }
      )}
   end
 
@@ -192,8 +203,9 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
   defp transport_type(%Ash.Union{type: type}), do: to_string(type)
   defp transport_type(_), do: "http"
 
-  # Payload signing applies to HTTP and Kafka; email has no signing scheme.
-  defp maybe_ensure_signing(form, "email"), do: form
+  # Payload signing applies to HTTP and Kafka; email and WhatsApp have no signing
+  # scheme (nothing on the receiving end verifies an HMAC).
+  defp maybe_ensure_signing(form, type) when type in ["email", "whatsapp"], do: form
   defp maybe_ensure_signing(form, _type), do: Helpers.ensure_signing_subform(form)
 
   defp success_message(:new), do: "Connection created"
@@ -253,7 +265,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
             />
 
             <div
-              :if={@selected_transport != "email"}
+              :if={@selected_transport not in ["email", "whatsapp"]}
               class="card card-border border-base-300 p-4 mt-4"
             >
               <h4 class="font-semibold mb-3">Payload Signing</h4>
@@ -348,7 +360,8 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
     base =
       [{"HTTP (Webhook)", "http"}] ++
         if(:kafka in available, do: [{"Kafka", "kafka"}], else: []) ++
-        if(:email in available, do: [{"Email (SMTP)", "email"}], else: [])
+        if(:email in available, do: [{"Email (SMTP)", "email"}], else: []) ++
+        if(:whatsapp in available, do: [{"WhatsApp", "whatsapp"}], else: [])
 
     selected_atom = String.to_existing_atom(selected_transport)
 

@@ -87,4 +87,39 @@ defmodule Example.Outbound.ConnectionSecretParamsTest do
 
     assert tc["adapter"]["password"] == "hunter2"
   end
+
+  test "a blank WhatsApp access token is dropped so it doesn't overwrite the stored one" do
+    params = %{
+      "transport_config" => %{
+        "_union_type" => "whatsapp",
+        "adapter" => %{
+          "_union_type" => "meta_cloud",
+          "phone_number_id" => "12345",
+          "access_token" => ""
+        }
+      }
+    }
+
+    tc = Helpers.strip_blank_secrets(params)["transport_config"]
+
+    refute Map.has_key?(tc["adapter"], "access_token")
+    assert tc["adapter"]["phone_number_id"] == "12345"
+  end
+
+  test "a present WhatsApp access token is kept" do
+    params = %{
+      "transport_config" => %{
+        "_union_type" => "whatsapp",
+        "adapter" => %{
+          "_union_type" => "meta_cloud",
+          "phone_number_id" => "12345",
+          "access_token" => "EAAG-secret"
+        }
+      }
+    }
+
+    tc = Helpers.strip_blank_secrets(params)["transport_config"]
+
+    assert tc["adapter"]["access_token"] == "EAAG-secret"
+  end
 end

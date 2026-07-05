@@ -12,6 +12,9 @@ defmodule AshIntegration.Outbound.Wire.TransportDispatchTest do
       assert Transport.module_for(:http) == AshIntegration.Outbound.Wire.Transports.Http
       assert Transport.module_for(:kafka) == AshIntegration.Outbound.Wire.Transports.Kafka
       assert Transport.module_for(:email) == AshIntegration.Outbound.Wire.Transports.Email
+
+      assert Transport.module_for(:whatsapp) ==
+               AshIntegration.Outbound.Wire.Transports.WhatsApp
     end
   end
 

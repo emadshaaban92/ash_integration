@@ -161,6 +161,13 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
     maybe_put(%{"_union_type" => "kafka"}, "topic", route["topic"])
   end
 
+  defp route_config_params("whatsapp", route) do
+    %{"_union_type" => "whatsapp"}
+    |> maybe_put("to", route["to"])
+    |> maybe_put("template_name", route["template_name"])
+    |> maybe_put("language", route["language"])
+  end
+
   defp route_config_params(_transport, _route), do: nil
 
   defp maybe_put(map, _key, value) when value in [nil, ""], do: map
@@ -175,6 +182,15 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
   end
 
   defp route_to_strings(%Ash.Union{type: :kafka, value: route}), do: %{"topic" => route.topic}
+
+  defp route_to_strings(%Ash.Union{type: :whatsapp, value: route}) do
+    %{
+      "to" => route.to,
+      "template_name" => route.template_name,
+      "language" => route.language
+    }
+  end
+
   defp route_to_strings(_), do: %{}
 
   # The transport type of the currently-selected connection, so the form shows the
@@ -289,6 +305,39 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
                   class="input input-bordered w-full"
                   phx-debounce="blur"
                 />
+              <% "whatsapp" -> %>
+                <label class="label">Default recipient (optional)</label>
+                <input
+                  type="text"
+                  name="form[route][to]"
+                  value={@route["to"]}
+                  placeholder="E.164 digits, e.g. 15551234567 — usually set by the transform"
+                  class="input input-bordered w-full"
+                  phx-debounce="blur"
+                />
+                <label class="label mt-2">Default template name</label>
+                <input
+                  type="text"
+                  name="form[route][template_name]"
+                  value={@route["template_name"]}
+                  placeholder="order_shipped"
+                  class="input input-bordered w-full"
+                  phx-debounce="blur"
+                />
+                <label class="label mt-2">Template language</label>
+                <input
+                  type="text"
+                  name="form[route][language]"
+                  value={@route["language"]}
+                  placeholder="en_US"
+                  class="input input-bordered w-full"
+                  phx-debounce="blur"
+                />
+                <p class="text-xs text-base-content/50 mt-1">
+                  Templates are created and approved in Meta Business Manager; this only references
+                  one by name. The transform typically sets the recipient and fills the template
+                  parameters (<code class="text-xs">defaults.template.body_params</code>) per event.
+                </p>
               <% _ -> %>
                 <p class="text-xs text-base-content/60">
                   Pick a connection above to configure its delivery route.

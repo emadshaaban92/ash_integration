@@ -7,8 +7,10 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   whose `defaults` argument is PRE-SEEDED (from the connection + subscription
   route + event) with the full delivery shape for the transport:
 
-      HTTP  → defaults = %{ method, path, url, headers, body }
-      Kafka → defaults = %{ topic, key, headers, value, timestamp }
+      HTTP     → defaults = %{ method, path, url, headers, body }
+      Kafka    → defaults = %{ topic, key, headers, value, timestamp }
+      Email    → defaults = %{ from, to, cc, subject, headers }
+      WhatsApp → defaults = %{ to, type, text | template }
 
   The function returns the descriptor to deliver (a no-op exposing no `transform`
   sends the pre-seeded defaults; the function only expresses overrides). Returning
@@ -159,6 +161,30 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
     })
   end
 
+  defp preseed(:whatsapp, _config, subscription, _envelope, _created_at) do
+    route = whatsapp_route(subscription.route_config)
+
+    # No wire headers: the WhatsApp Cloud API carries no custom headers in the
+    # message body, and the auth header is the live secret carve-out. A route with
+    # a default template name seeds `type: "template"` and the template
+    # name/language; the transform usually fills `to` and the template params (see
+    # `finalize(:whatsapp, …)`'s `body_params` shorthand) from the event.
+    template =
+      case route.template_name do
+        name when is_binary(name) and name != "" ->
+          drop_nils(%{"name" => name, "language" => route.language})
+
+        _ ->
+          nil
+      end
+
+    drop_nils(%{
+      "to" => route.to,
+      "type" => template && "template",
+      "template" => template
+    })
+  end
+
   defp preseed(:email, config, subscription, envelope, _created_at) do
     route = email_route(subscription.route_config)
 
@@ -241,6 +267,20 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
          "text" => text,
          "headers" => headers
        })}
+    end
+  end
+
+  # Build the **semantic** WhatsApp descriptor (transform-shaped, like HTTP stores
+  # `body` as a term) — the transport turns it into the Graph JSON. A `template`
+  # message carries `name` + `language` + a `components` array; the transform can
+  # supply that array directly (the raw escape hatch for headers/buttons/media) or,
+  # more ergonomically, a `body_params` list that we expand into a single `body`
+  # component here. A `text` (session) message carries a plain body.
+  defp finalize(:whatsapp, _config, result, _created_at) do
+    with {:ok, to} <- normalize_phone(result["to"]),
+         {:ok, type} <- normalize_whatsapp_type(result["type"], result),
+         {:ok, payload} <- normalize_whatsapp_payload(type, result) do
+      {:ok, Map.merge(%{"to" => to, "type" => type}, payload)}
     end
   end
 
@@ -458,6 +498,117 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
   # Subjects may legitimately contain a tab; still reject CR/LF and other controls.
   defp control_char_no_tab?(string), do: String.match?(string, ~r/[\x00-\x08\x0a-\x1f\x7f]/)
 
+  # ── WhatsApp normalization (E.164 recipient, template/text, header-safe) ─────
+
+  # The recipient must resolve to E.164 digits. A leading `+` is stripped (Meta
+  # wants bare digits); anything else non-numeric — control chars included — parks
+  # the delivery rather than reaching the wire. A number the transform set from
+  # untyped event data is coerced to a string first.
+  defp normalize_phone(value) when is_integer(value),
+    do: normalize_phone(Integer.to_string(value))
+
+  defp normalize_phone(value) when is_binary(value) do
+    digits = value |> String.trim() |> String.trim_leading("+")
+
+    cond do
+      digits == "" ->
+        {:error, "whatsapp delivery requires a recipient (set result.to)"}
+
+      String.match?(digits, ~r/\A[0-9]{5,15}\z/) ->
+        {:ok, digits}
+
+      true ->
+        {:error,
+         "the transform's to must be an E.164 phone number (digits only), got #{inspect(value)}"}
+    end
+  end
+
+  defp normalize_phone(nil),
+    do:
+      {:error, "whatsapp delivery requires a recipient (set result.to on the route or transform)"}
+
+  defp normalize_phone(other),
+    do: {:error, "the transform's to must be a phone number string, got #{inspect(other)}"}
+
+  # An explicit `type` wins; otherwise infer from what the transform supplied (a
+  # `template` table or `text` body) so the ergonomic path doesn't force a
+  # redundant `type`. With neither, park with a clear error.
+  defp normalize_whatsapp_type(type, _result) when type in ["text", "template"], do: {:ok, type}
+
+  defp normalize_whatsapp_type(nil, result) do
+    cond do
+      is_map(result["template"]) -> {:ok, "template"}
+      is_binary(result["text"]) -> {:ok, "text"}
+      true -> {:error, "whatsapp delivery requires a type (\"text\" or \"template\")"}
+    end
+  end
+
+  defp normalize_whatsapp_type(other, _result),
+    do:
+      {:error,
+       "invalid whatsapp message type: #{inspect(other)} (expected \"text\" or \"template\")"}
+
+  defp normalize_whatsapp_payload("text", result) do
+    case result["text"] do
+      text when is_binary(text) ->
+        if String.trim(text) == "",
+          do: {:error, "whatsapp text delivery requires a non-empty text body"},
+          else: {:ok, %{"text" => text}}
+
+      nil ->
+        {:error, "whatsapp text delivery requires a text body (set result.text)"}
+
+      other ->
+        {:error, "the transform's text must be a string, got #{inspect(other)}"}
+    end
+  end
+
+  defp normalize_whatsapp_payload("template", result) do
+    template = result["template"] || %{}
+
+    with :ok <- require_map(template, "template"),
+         {:ok, name} <- require_template_field(template["name"], "name"),
+         {:ok, language} <- require_template_field(template["language"], "language"),
+         {:ok, components} <- normalize_components(template) do
+      {:ok,
+       %{
+         "template" =>
+           drop_nils(%{"name" => name, "language" => language, "components" => components})
+       }}
+    end
+  end
+
+  defp require_map(value, _field) when is_map(value), do: :ok
+
+  defp require_map(_value, field),
+    do: {:error, "the transform's #{field} must be a table, got a non-table value"}
+
+  defp require_template_field(value, _field) when is_binary(value) and value != "",
+    do: {:ok, value}
+
+  defp require_template_field(_value, field),
+    do: {:error, "whatsapp template delivery requires a #{field} (set result.template.#{field})"}
+
+  # `components` (a raw Graph array) is the escape hatch for header/button/media
+  # components and passes through untouched. Otherwise the ergonomic `body_params`
+  # list expands into a single `body` component of text parameters. Neither → a
+  # parameter-free template (no components).
+  defp normalize_components(%{"components" => components}) when is_list(components),
+    do: {:ok, components}
+
+  defp normalize_components(%{"components" => other}) when not is_nil(other),
+    do: {:error, "the transform's template.components must be a list, got #{inspect(other)}"}
+
+  defp normalize_components(%{"body_params" => params}) when is_list(params) do
+    parameters = Enum.map(params, fn param -> %{"type" => "text", "text" => to_string(param)} end)
+    {:ok, [%{"type" => "body", "parameters" => parameters}]}
+  end
+
+  defp normalize_components(%{"body_params" => other}) when not is_nil(other),
+    do: {:error, "the transform's template.body_params must be a list, got #{inspect(other)}"}
+
+  defp normalize_components(_template), do: {:ok, nil}
+
   # Store the body/value as the decoded TERM (encoding happens once at delivery).
   # An empty or unset body (nil, or an empty map/list — which Lua can't tell
   # apart) is normalized to `nil` so the stored descriptor reads cleanly
@@ -475,6 +626,9 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
 
   defp email_route(%Ash.Union{type: :email, value: route}), do: route
   defp email_route(_), do: %{to: nil, cc: nil, subject: nil}
+
+  defp whatsapp_route(%Ash.Union{type: :whatsapp, value: route}), do: route
+  defp whatsapp_route(_), do: %{to: nil, template_name: nil, language: nil}
 
   defp drop_nils(map), do: :maps.filter(fn _key, value -> not is_nil(value) end, map)
 end

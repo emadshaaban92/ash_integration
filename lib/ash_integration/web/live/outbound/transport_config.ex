@@ -423,6 +423,68 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
     """
   end
 
+  def transport_config(%{selected_transport: "whatsapp"} = assigns) do
+    ~H"""
+    <div class="card card-border border-base-300 p-4 mt-4">
+      <h4 class="font-semibold mb-3">WhatsApp Configuration</h4>
+      <p class="text-sm text-base-content/60 mb-3">
+        The WhatsApp Business phone number and access token live here (Meta's
+        WhatsApp Business Cloud API). Each subscription's transform renders the
+        recipient and template parameters per event. System notifications are
+        almost always sent as pre-approved templates — free-form text only reaches
+        a user inside the 24-hour customer-service window.
+      </p>
+
+      <.inputs_for :let={adapter} field={@tc[:adapter]}>
+        <.input
+          field={adapter[:_union_type]}
+          phx-change="adapter-type-changed"
+          phx-target={@myself}
+          type="select"
+          label="Provider"
+          options={[{"Meta Cloud API", "meta_cloud"}]}
+        />
+        <%= if adapter.params["_union_type"] in [nil, "meta_cloud"] do %>
+          <.input
+            field={adapter[:phone_number_id]}
+            type="text"
+            label="Phone Number ID"
+            placeholder="123456789012345"
+            required
+            force_errors={@submitted?}
+            phx-debounce="blur"
+          />
+          <div class="flex gap-2">
+            <.input
+              field={adapter[:api_version]}
+              type="text"
+              label="API Version"
+              placeholder="v21.0"
+              phx-debounce="blur"
+            />
+            <.input
+              field={adapter[:business_account_id]}
+              type="text"
+              label="Business Account ID (optional)"
+              phx-debounce="blur"
+            />
+          </div>
+          <.input
+            field={adapter[:access_token]}
+            type="password"
+            autocomplete="one-time-code"
+            label="Access Token"
+            required={@action == :new}
+            force_errors={@submitted?}
+            placeholder={if @has_secrets[:access_token], do: "Leave blank to keep current"}
+            phx-debounce="blur"
+          />
+        <% end %>
+      </.inputs_for>
+    </div>
+    """
+  end
+
   def transport_config(assigns) do
     ~H"""
     <div></div>
