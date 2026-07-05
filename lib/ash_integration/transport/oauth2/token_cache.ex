@@ -84,6 +84,11 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
       {:oauth2_token, ^key, result} -> finalize(result)
     after
       @wait_timeout_ms ->
+        Logger.warning(
+          "OAuth2 TokenCache: timed out after #{@wait_timeout_ms}ms waiting for an " <>
+            "in-flight token fetch; failing this delivery (retryable)"
+        )
+
         {:error,
          %{
            failure_class: :transport,
@@ -163,7 +168,7 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   end
 
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     # A leader died before reporting its result — fail its waiters (retryable)
     # and clear the key so the next request can lead a fresh fetch.
     case Map.pop(state.monitors, ref) do
@@ -171,6 +176,11 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
         {:noreply, state}
 
       {key, monitors} ->
+        Logger.warning(
+          "OAuth2 TokenCache: token-fetch leader exited before completing " <>
+            "(#{inspect(reason)}); failing its waiters (retryable)"
+        )
+
         error =
           {:error,
            %{
@@ -229,8 +239,15 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
 
   defp store(key, token, expires_in) do
     now = now()
-    expires_at = now + expires_in * 1000
-    refresh_at = max(now, expires_at - @refresh_skew_ms)
+    ttl_ms = expires_in * 1000
+    expires_at = now + ttl_ms
+    # Refresh a skew before expiry — but never let the skew exceed HALF the token's
+    # lifetime. Otherwise a short-lived token (`expires_in <= skew`, including the
+    # 60s default the provider uses when the endpoint omits `expires_in`) would put
+    # `refresh_at` at or behind `now` and never be cached at all: every delivery
+    # would re-fetch. Capping at half the lifetime guarantees a positive cache window.
+    skew = min(@refresh_skew_ms, div(ttl_ms, 2))
+    refresh_at = expires_at - skew
     :ets.insert(@table, {key, token, refresh_at, expires_at})
   end
 

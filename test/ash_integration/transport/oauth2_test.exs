@@ -142,12 +142,13 @@ defmodule AshIntegration.Transport.OAuth2Test do
       assert count(counter) == 1
     end
 
-    test "refetches a token that is already within the refresh skew" do
+    test "caches a short-lived token briefly instead of refetching every call" do
       counter = start_counter()
 
-      # expires_in (30s) is shorter than the refresh skew (60s), so the token is
-      # never considered fresh — every call refetches rather than serving a token
-      # about to expire.
+      # expires_in (30s) is shorter than the full 60s refresh skew. The skew is
+      # capped at HALF the token's lifetime, so the token is still cached briefly
+      # (~15s) and reused across rapid deliveries rather than hammering the token
+      # endpoint on every send — while still refreshing well before expiry.
       stub_token(fn conn ->
         bump(counter)
         token_response(conn, %{"expires_in" => 30})
@@ -157,7 +158,7 @@ defmodule AshIntegration.Transport.OAuth2Test do
       assert {:ok, _} = OAuth2.get_token(d)
       assert {:ok, _} = OAuth2.get_token(d)
 
-      assert count(counter) == 2
+      assert count(counter) == 1
     end
 
     test "a rotated client_secret invalidates the cached token" do
