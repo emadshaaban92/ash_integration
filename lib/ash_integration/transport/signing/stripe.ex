@@ -36,6 +36,7 @@ defmodule AshIntegration.Transport.Signing.Stripe do
 
   validations do
     validate {AshIntegration.Transport.Validations.RequireEncryptedArgument, field: :secret}
+    validate {AshIntegration.Transport.Validations.HeaderName, field: :header_name}
   end
 
   actions do

@@ -13,11 +13,16 @@ defmodule AshIntegration.Transport.Validations.RequireEncryptedArgument do
     field = opts[:field]
     encrypted_attr = String.to_existing_atom("encrypted_#{field}")
 
+    # `fetch_argument` returns `{:ok, nil}` for an argument explicitly provided as
+    # nil — which is NOT a real secret. Guarding on `not is_nil(value)` makes both
+    # an explicit nil and an omitted argument fall through to the encrypted-attribute
+    # check, so a create with `%{value: nil}` is rejected instead of saving a
+    # secret-less credential (a "Bearer " with no token).
     case Ash.Changeset.fetch_argument(changeset, field) do
-      {:ok, _value} ->
+      {:ok, value} when not is_nil(value) ->
         :ok
 
-      :error ->
+      _ ->
         if Ash.Changeset.get_attribute(changeset, encrypted_attr) do
           :ok
         else

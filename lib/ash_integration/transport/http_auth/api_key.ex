@@ -27,6 +27,7 @@ defmodule AshIntegration.Transport.HttpAuth.ApiKey do
 
   validations do
     validate {AshIntegration.Transport.Validations.RequireEncryptedArgument, field: :value}
+    validate {AshIntegration.Transport.Validations.HeaderName, field: :header_name}
   end
 
   actions do

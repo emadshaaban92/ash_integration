@@ -60,7 +60,14 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   end
 
   defp coordinate(key, descriptor) do
-    case GenServer.call(__MODULE__, {:acquire, key}, wait_timeout_ms()) do
+    # A unique per-request ref tags the leader's reply so a *stale* reply — one
+    # deposited into this (long-lived Broadway worker) process's mailbox after an
+    # earlier wait on the same key timed out — can never be mistaken for the result
+    # of THIS wait. Matching on the shared `key` would let an hours-old token/error
+    # match instantly; a fresh ref each request rules that out.
+    ref = make_ref()
+
+    case GenServer.call(__MODULE__, {:acquire, key, ref}, wait_timeout_ms()) do
       {:hit, token} ->
         {:ok, token}
 
@@ -70,15 +77,15 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
         finalize(result)
 
       :wait ->
-        await_leader(key)
+        await_leader(ref)
     end
   end
 
-  defp await_leader(key) do
+  defp await_leader(ref) do
     wait_timeout_ms = wait_timeout_ms()
 
     receive do
-      {:oauth2_token, ^key, result} -> finalize(result)
+      {:oauth2_token, ^ref, result} -> finalize(result)
     after
       wait_timeout_ms ->
         Logger.warning(
@@ -127,7 +134,7 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   end
 
   @impl true
-  def handle_call({:acquire, key}, {caller_pid, _tag}, state) do
+  def handle_call({:acquire, key, req_ref}, {caller_pid, _tag}, state) do
     case cached(key) do
       {:ok, token} ->
         # Filled by a leader while this caller was en route to the GenServer.
@@ -135,7 +142,10 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
 
       :miss ->
         if Map.has_key?(state.inflight, key) do
-          state = update_in(state.inflight[key].waiters, &[caller_pid | &1])
+          # Remember each waiter WITH its per-request ref, so the completion reply is
+          # addressed to this specific wait and a timed-out earlier wait's stale
+          # message can't satisfy it.
+          state = update_in(state.inflight[key].waiters, &[{caller_pid, req_ref} | &1])
           {:reply, :wait, state}
         else
           ref = Process.monitor(caller_pid)
@@ -229,7 +239,7 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
         state
 
       {%{ref: ref, waiters: waiters}, inflight} ->
-        for pid <- waiters, do: send(pid, {:oauth2_token, key, result})
+        for {pid, req_ref} <- waiters, do: send(pid, {:oauth2_token, req_ref, result})
         %{state | inflight: inflight, monitors: Map.delete(state.monitors, ref)}
     end
   end

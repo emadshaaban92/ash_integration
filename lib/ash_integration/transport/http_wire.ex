@@ -10,7 +10,17 @@ defmodule AshIntegration.Transport.HttpWire do
   # per-status vs per-error-code response classification stays in each transport
   # (HTTP keys on the status; WhatsApp keys on `error.code`).
 
+  require Logger
+
   alias AshIntegration.Transport.Utils
+
+  # Options the transport pins for SSRF safety and MUST NOT be overridable by the
+  # operator's `req_options`. `Req` is last-wins and `req_options` is appended after
+  # the transport's own `redirect: false`/`retry: false`, so an operator setting
+  # `req_options: [redirect: true]` would silently re-enable redirect following and
+  # let a 3xx to an internal address bypass the egress IP pin. Strip them (with a
+  # warning) rather than let them win.
+  @pinned_security_options [:redirect, :retry]
 
   @doc """
   Issue `request_options` through `Req`, folding in the operator's configured
@@ -26,8 +36,25 @@ defmodule AshIntegration.Transport.HttpWire do
     req_options =
       Application.get_env(:ash_integration, :req_options, [])
       |> put_test_owner(owner)
+      |> strip_pinned_options()
 
     Req.request(request_options ++ merge_connect_options(req_options, connect_options))
+  end
+
+  defp strip_pinned_options(req_options) do
+    case Keyword.take(req_options, @pinned_security_options) do
+      [] ->
+        req_options
+
+      overridden ->
+        Logger.warning(
+          "AshIntegration: ignoring req_options #{inspect(Keyword.keys(overridden))} — " <>
+            "redirect/retry are pinned by the transport (following a redirect would " <>
+            "bypass the egress IP pin / SSRF protection)"
+        )
+
+        Keyword.drop(req_options, @pinned_security_options)
+    end
   end
 
   defp put_test_owner(req_options, owner) do

@@ -109,6 +109,58 @@ defmodule AshIntegration.Transport.OAuth2Test do
              end)
     end
 
+    test "basic auth form-urlencodes the credentials before Base64 (RFC 6749 §2.3.1)" do
+      test_pid = self()
+
+      stub_token(fn conn ->
+        send(test_pid, {:headers, conn.req_headers})
+        token_response(conn)
+      end)
+
+      # A client id/secret carrying ':' and '%' must be form-urlencoded before being
+      # joined and Base64'd, or the ':' would corrupt the userinfo split and '%' would
+      # be read as a stray percent-escape by a strict IdP.
+      d = descriptor(%{client_id: "id:1", client_secret: "s3:cr%t", auth_style: :basic})
+      assert {:ok, _} = OAuth2.get_token(d)
+
+      assert_received {:headers, headers}
+      expected = "Basic " <> Base.encode64("id%3A1:s3%3Acr%25t")
+
+      assert Enum.any?(headers, fn {k, v} ->
+               String.downcase(k) == "authorization" and v == expected
+             end)
+    end
+
+    test "drops reserved token params an operator smuggled into extra_params" do
+      test_pid = self()
+
+      stub_token(fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:raw, raw})
+        token_response(conn)
+      end)
+
+      # `grant_type`/`scope` are owned by the grant. If extra_params could inject them
+      # the body would carry the param twice (undefined server behaviour); they must be
+      # dropped while a genuine extra param (`resource`) still passes through.
+      d =
+        descriptor(%{
+          scopes: "read",
+          extra_params: %{"grant_type" => "password", "scope" => "evil", "resource" => "r1"}
+        })
+
+      assert {:ok, _} = OAuth2.get_token(d)
+
+      assert_received {:raw, raw}
+      params = URI.decode_query(raw)
+      assert params["grant_type"] == "client_credentials"
+      assert params["scope"] == "read"
+      assert params["resource"] == "r1"
+      # The smuggled values never reach the wire (no duplicate keys).
+      refute raw =~ "password"
+      refute raw =~ "evil"
+    end
+
     test "includes audience and arbitrary extra params" do
       test_pid = self()
 
@@ -298,6 +350,111 @@ defmodule AshIntegration.Transport.OAuth2Test do
                OAuth2.get_token(descriptor(%{token_url: "http://127.0.0.1/token"}))
     after
       Application.put_env(:ash_integration, :egress, block_private?: false)
+    end
+  end
+
+  describe "waiter ref safety (stale single-flight replies)" do
+    test "a timed-out waiter is not handed a stale reply on its next wait" do
+      # Short waiter timeout so the round-1 waiter gives up while the leader is still
+      # blocked mid-fetch — but stays in the leader's waiters list, so the leader's
+      # eventual reply lands (stale) in the waiter's long-lived mailbox.
+      prev = Application.get_env(:ash_integration, :oauth2_wait_timeout_ms)
+      Application.put_env(:ash_integration, :oauth2_wait_timeout_ms, 150)
+      on_exit(fn -> restore(:oauth2_wait_timeout_ms, prev) end)
+
+      test_pid = self()
+      d = descriptor()
+      fetches = start_counter()
+
+      stub_token(fn conn ->
+        bump(fetches)
+        n = count(fetches)
+        send(test_pid, {:fetch_started, n})
+
+        receive do
+          {:release, ^n} -> :ok
+        end
+
+        if n == 1 do
+          # Round-1 leader completes with an ERROR — nothing is cached, so round 2
+          # coordinates a fresh fetch instead of hitting the cache.
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"error" => "stale_round_1"})
+        else
+          token_response(conn, %{"access_token" => "fresh-tok"})
+        end
+      end)
+
+      # ── round 1: leader blocks; the long-lived worker waits, then times out ──
+      leader1 = spawn_caller(test_pid, d, :leader1)
+      Req.Test.allow(@stub, test_pid, leader1)
+      send(leader1, :go)
+      assert_receive {:fetch_started, 1}, 1_000
+
+      worker = spawn_worker(test_pid, d)
+      send(worker, :go)
+
+      # Times out after ~150ms → retryable transport error, but stays a listed waiter.
+      assert_receive {:worker_result, {:error, %{failure_class: :transport, retryable: true}}},
+                     2_000
+
+      # Release round-1 leader → it replies to the (no-longer-listening) worker,
+      # depositing a STALE reply in the worker's mailbox.
+      send(leader1, {:release, 1})
+      assert_receive {:leader1_result, {:error, _}}, 2_000
+
+      # ── round 2: a fresh leader blocks; the SAME worker waits again ──
+      leader2 = spawn_caller(test_pid, d, :leader2)
+      Req.Test.allow(@stub, test_pid, leader2)
+      send(leader2, :go)
+      assert_receive {:fetch_started, 2}, 1_000
+
+      send(worker, :go)
+      assert_receive :worker_round2_started, 1_000
+      # Only release the fresh leader once the worker is genuinely blocked awaiting it,
+      # so its wait — not a cache hit — is what must ignore the stale reply.
+      wait_until_blocked(worker)
+      send(leader2, {:release, 2})
+
+      assert_receive {:leader2_result, {:ok, "fresh-tok"}}, 2_000
+      # The worker must receive the FRESH token, not the round-1 stale error still
+      # sitting in its mailbox (the bug: matching on the shared key grabs the stale one).
+      assert_receive {:worker_result, {:ok, "fresh-tok"}}, 2_000
+    end
+  end
+
+  # A caller that fetches once when told `:go`, reporting its result tagged with `tag`.
+  defp spawn_caller(test_pid, descriptor, tag) do
+    result_tag = :"#{tag}_result"
+
+    spawn(fn ->
+      receive do: (:go -> :ok)
+      send(test_pid, {result_tag, OAuth2.get_token(descriptor)})
+    end)
+  end
+
+  # The long-lived "Broadway worker": waits on the same key twice (a `:go` before each),
+  # signalling before its second fetch so the test can release the leader only once the
+  # worker is genuinely blocked.
+  defp spawn_worker(test_pid, descriptor) do
+    spawn(fn ->
+      receive do: (:go -> :ok)
+      send(test_pid, {:worker_result, OAuth2.get_token(descriptor)})
+
+      receive do: (:go -> :ok)
+      send(test_pid, :worker_round2_started)
+      send(test_pid, {:worker_result, OAuth2.get_token(descriptor)})
+    end)
+  end
+
+  # Block until `pid` is parked in a receive (bounded so a regression can't hang the
+  # suite — the final assertions catch the bug regardless).
+  defp wait_until_blocked(pid), do: wait_until_blocked(pid, 200)
+  defp wait_until_blocked(_pid, 0), do: :ok
+
+  defp wait_until_blocked(pid, tries) do
+    case Process.info(pid, :status) do
+      {:status, :waiting} -> :ok
+      _ -> Process.sleep(5) && wait_until_blocked(pid, tries - 1)
     end
   end
 
