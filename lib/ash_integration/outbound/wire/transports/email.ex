@@ -307,31 +307,41 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   @doc false
   # Map a Swoosh/gen_smtp/MsGraph failure onto the two-level suspension contract.
   # gen_smtp nests its reason inside `:retries_exceeded`/`:network_failure`/
-  # `:no_more_hosts`, so unwrap those first.
+  # `:no_more_hosts`/`:send`, so unwrap those first.
   #
   #   * `:permanent_failure` (5xx SMTP — bad recipient, rejected content, an
   #     `:auth_failed` rejection) → `:response`, non-retryable: the target rejected
   #     THIS payload/credential, suspend the subscription.
   #   * `:temporary_failure` (4xx SMTP — greylisting, rate limit) → `:response`,
   #     retryable: fine to try again later.
-  #   * everything connectivity-shaped (refused, timeout, DNS, a `:no_more_hosts`
-  #     with a non-permanent inner reason) → `:transport`, retryable: couldn't
-  #     reach the relay, suspend the connection.
+  #   * everything connectivity-shaped (refused, timeout, DNS, a `:no_more_hosts`/
+  #     `:send` with a non-permanent inner reason) → `:transport`, retryable:
+  #     couldn't reach the relay, suspend the connection.
   #   * a Microsoft Graph `{status, body}` rejection → classified on the HTTP
   #     status (see `graph_error/2`).
   #   * unknown reasons default to `:transport`/retryable, mirroring the HTTP
   #     transport's treatment of an unrecognized network error.
   #
-  # `:no_more_hosts` carries the actual failure as its inner reason — gen_smtp
-  # returns `{:error, :no_more_hosts, {:permanent_failure, host, msg}}` (Swoosh
-  # re-wraps as `{:error, {:no_more_hosts, {:permanent_failure, host, msg}}}`) for
-  # a hard 5xx rejection or an auth failure. Unwrap it like `:retries_exceeded`
-  # rather than blanket-classifying `:no_more_hosts` as retryable transport, which
-  # would retry a permanent rejection forever and suspend the connection instead
-  # of the subscription.
+  # gen_smtp reports permanent/temporary failures under two tags, from two phases,
+  # and BOTH carry the actual failure as their inner reason:
+  #
+  #   * `:no_more_hosts` — a CONNECTION-setup failure (greeting/EHLO/STARTTLS/AUTH),
+  #     e.g. `{:error, :no_more_hosts, {:permanent_failure, host, msg}}`.
+  #   * `:send` — a MESSAGE-phase failure (MAIL FROM / RCPT TO / DATA), e.g.
+  #     `{:error, :send, {:permanent_failure, host, "550 no such user"}}`. This is
+  #     where the common rejections live — a bad recipient or rejected content is a
+  #     RCPT TO/DATA 5xx, so it arrives under `:send`, not `:no_more_hosts`.
+  #
+  # Swoosh re-wraps the gen_smtp 3-tuple into a 2-tuple (`{:error, type, message} ->
+  # {:error, {type, message}}`), so `classify_error/1` sees `{:no_more_hosts, inner}`
+  # / `{:send, inner}`. Unwrap both (like `:retries_exceeded`) so a permanent
+  # rejection reaches `:response`/non-retryable rather than the retryable-transport
+  # catch-all, which would retry it forever and suspend the connection instead of
+  # the subscription.
   def classify_error({:retries_exceeded, inner}), do: classify_error(inner)
   def classify_error({:network_failure, _host, inner}), do: classify_error(inner)
   def classify_error({:no_more_hosts, inner}), do: classify_error(inner)
+  def classify_error({:send, inner}), do: classify_error(inner)
   def classify_error({:error, reason}), do: classify_error(reason)
 
   def classify_error({:permanent_failure, _host, message}),

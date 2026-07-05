@@ -259,6 +259,34 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
                )
     end
 
+    test "a :send wrapping a permanent_failure is a non-retryable response (the common RCPT/DATA 5xx path)" do
+      # A bad recipient / rejected content fails during MAIL FROM / RCPT TO / DATA,
+      # so gen_smtp returns it as `{:error, :send, {:permanent_failure, host, msg}}`
+      # (Swoosh re-wraps → `{:send, {:permanent_failure, …}}`) — the `:send` tag, NOT
+      # `:no_more_hosts` (which is connection-setup only). It must be unwrapped too,
+      # or the most common permanent rejection stays retryable transport.
+      assert %{failure_class: :response, retryable: false, error_message: msg} =
+               Email.classify_error(
+                 {:send, {:permanent_failure, "mx.acme.com", "550 no such user"}}
+               )
+
+      assert msg =~ "550 no such user"
+    end
+
+    test "a :send wrapping a temporary_failure is a retryable response" do
+      assert %{failure_class: :response, retryable: true} =
+               Email.classify_error(
+                 {:send, {:temporary_failure, "mx.acme.com", "451 greylisted"}}
+               )
+    end
+
+    test "a :send wrapping a non-failure inner reason still classifies as retryable transport" do
+      # Guards the fall-through direction: an unrecognized inner reason under `:send`
+      # unwraps and lands on the retryable-transport catch-all, not a response error.
+      assert %{failure_class: :transport, retryable: true} =
+               Email.classify_error({:send, :timeout})
+    end
+
     test "a connection-level failure suspends the connection (transport, retryable)" do
       assert %{failure_class: :transport, retryable: true} =
                Email.classify_error(:timeout)
