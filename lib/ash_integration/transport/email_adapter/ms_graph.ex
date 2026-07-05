@@ -33,6 +33,13 @@ defmodule AshIntegration.Transport.EmailAdapter.MsGraph do
     end
   end
 
+  validations do
+    # The `user_id` is interpolated into the Graph `/users/{id}/sendMail` URL, so
+    # reject anything that isn't a plausible mailbox id/UPN — in particular path/
+    # query metacharacters (`/ ? #`), whitespace, and control chars.
+    validate {AshIntegration.Transport.Validations.MailboxAddress, field: :user_id}
+  end
+
   actions do
     default_accept :*
     defaults [:read, :destroy, create: :*, update: :*]

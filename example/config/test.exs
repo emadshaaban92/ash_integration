@@ -40,6 +40,12 @@ config :ash_integration,
 config :ash_integration,
   oauth2_req_options: [plug: {Req.Test, AshIntegration.Transport.OAuth2}]
 
+# The Microsoft Graph SEND path goes through Swoosh's Req ApiClient; route it
+# through Req.Test too (owned by the email transport) so tests can assert the
+# final request path without a live Graph endpoint.
+config :ash_integration,
+  graph_req_options: [plug: {Req.Test, AshIntegration.Outbound.Wire.Transports.Email}]
+
 # The SSRF egress guard resolves + checks delivery URLs. The suite delivers to
 # loopback (`localhost:9999`, mocked by Req.Test), which the guard blocks by
 # default — so turn it off here and exercise it explicitly in egress-specific
