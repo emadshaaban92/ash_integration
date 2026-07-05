@@ -191,6 +191,23 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     end
   end
 
+  def ensure_whatsapp_adapter_subform(form) do
+    tc = form.forms[:transport_config]
+
+    cond do
+      is_nil(tc) ->
+        form
+
+      is_nil(tc.forms[:adapter]) ->
+        AshPhoenix.Form.add_form(form, "form[transport_config][adapter]",
+          params: %{"_union_type" => "meta_cloud"}
+        )
+
+      true ->
+        form
+    end
+  end
+
   # Signing applies to the HTTP and Kafka transports, so this is ensured for both.
   # Email carries no payload-signing scheme (nothing on the receiving end verifies
   # it), so the connection form skips it for email.
@@ -235,8 +252,8 @@ defmodule AshIntegration.Web.Outbound.Helpers do
             |> maybe_drop_blank("client_cert_pem")
             |> maybe_drop_blank("client_key_pem")
           end)
-          # `adapter` is Email-only; update_if_present leaves http/kafka params
-          # untouched since they carry no `adapter` key.
+          # `adapter` is Email-only or WhatsApp-only; update_if_present leaves
+          # http/kafka params untouched since they carry no `adapter` key.
           |> update_if_present("adapter", &strip_adapter_secrets/1)
 
         put_in(params, ["transport_config"], tc)
@@ -246,11 +263,14 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     end
   end
 
-  # Drop the blank SMTP password (smtp variant) and the blank MsGraph OAuth2 client
-  # secret, which is nested one level deeper under `adapter[oauth2]`.
+  # Drop each adapter's blank secret: the SMTP `password` (smtp), the WhatsApp Meta
+  # Cloud `access_token` (meta_cloud), and the MsGraph OAuth2 `client_secret` nested
+  # one level deeper under `adapter[oauth2]` (ms_graph). Dropping a blank of a key
+  # the active adapter lacks is a harmless no-op.
   defp strip_adapter_secrets(adapter) when is_map(adapter) do
     adapter
     |> maybe_drop_blank("password")
+    |> maybe_drop_blank("access_token")
     |> update_if_present("oauth2", &maybe_drop_blank(&1, "client_secret"))
   end
 
@@ -288,6 +308,9 @@ defmodule AshIntegration.Web.Outbound.Helpers do
           auth: false
         }
 
+      %Ash.Union{type: :whatsapp, value: tc} ->
+        %{access_token: whatsapp_access_token?(tc.adapter), auth: false}
+
       _ ->
         %{signing: false, auth: false}
     end
@@ -321,6 +344,11 @@ defmodule AshIntegration.Web.Outbound.Helpers do
     do: mg.oauth2 != nil and mg.oauth2.encrypted_client_secret != nil
 
   defp email_ms_graph_secret?(_), do: false
+
+  defp whatsapp_access_token?(%Ash.Union{type: :meta_cloud, value: mc}),
+    do: mc.encrypted_access_token != nil
+
+  defp whatsapp_access_token?(_), do: false
 
   def inject_headers_map(params) do
     params

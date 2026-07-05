@@ -117,6 +117,22 @@ defmodule Example.Outbound.ConnectionFormLiveTest do
     assert html =~ ~s(name="form[transport_config][adapter][oauth2][client_secret]")
   end
 
+  test "mounts the edit form for a WhatsApp connection with its Meta Cloud adapter subform", %{
+    conn: conn,
+    user: user
+  } do
+    whatsapp = create_whatsapp_connection!(user)
+
+    {:ok, _view, html} = live(conn, edit_path(whatsapp.id))
+
+    # WhatsApp gets the adapter subform, not auth/security.
+    assert html =~ ~s(name="form[transport_config][adapter][_union_type]")
+    refute html =~ ~s(name="form[transport_config][auth][_union_type]")
+    refute html =~ ~s(name="form[transport_config][security][_union_type]")
+    # WhatsApp has no payload-signing scheme, so that card is not rendered.
+    refute html =~ ~s(name="form[transport_config][signing][_union_type]")
+  end
+
   # ── helpers ───────────────────────────────────────────────────────────────
 
   defp edit_path(id), do: "/integrations/connections/edit/#{id}"
@@ -232,6 +248,28 @@ defmodule Example.Outbound.ConnectionFormLiveTest do
           type: :email,
           from: "notifications@acme.com",
           adapter: %{type: "smtp", relay: "smtp.acme.com", port: 587}
+        }
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
+  end
+
+  defp create_whatsapp_connection!(owner) do
+    Connection
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        name: "WhatsApp-#{System.unique_integer([:positive])}",
+        owner_id: owner.id,
+        transport_config: %{
+          type: :whatsapp,
+          adapter: %{
+            type: "meta_cloud",
+            phone_number_id: "123456789012345",
+            api_version: "v21.0",
+            access_token: "EAAG-token"
+          }
         }
       },
       authorize?: false

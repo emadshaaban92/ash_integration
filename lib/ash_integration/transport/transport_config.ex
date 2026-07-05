@@ -17,6 +17,11 @@ defmodule AshIntegration.Transport.TransportConfig do
           type: AshIntegration.Transport.EmailConfig,
           tag: :type,
           tag_value: :email
+        ],
+        whatsapp: [
+          type: AshIntegration.Transport.WhatsAppConfig,
+          tag: :type,
+          tag_value: :whatsapp
         ]
       ],
       storage: :map_with_tag

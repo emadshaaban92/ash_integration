@@ -8,7 +8,7 @@ Declare named, versioned **event types** that your resource actions contribute t
 
 - **Event-first DSL** — add `outbound_events` to any Ash resource to declare which actions contribute to which **event types** (`product.created`, `stock.changed`)
 - **Subscriptions over shared connections** — a connection holds the transport, auth, and ordering domain; subscriptions hang off it, one per `(event_type, version)`
-- **Multi-transport** — deliver via [HTTP](guides/http-transport.md), [Kafka](guides/kafka-transport.md), or [Email/SMTP](guides/email-transport.md)
+- **Multi-transport** — deliver via [HTTP](guides/http-transport.md), [Kafka](guides/kafka-transport.md), [Email/SMTP](guides/email-transport.md), or [WhatsApp](guides/whatsapp-transport.md)
 - **Schema versioning** — pin subscriptions to specific payload versions for safe consumer upgrades
 - **Lua transform scripts** — sandboxed Lua execution to reshape event data before delivery
 - **Payload signing** — an explicit per-connection signing scheme (`none`/`stripe`/`custom`) across all transports: a native Stripe-style HMAC built-in, plus sandboxed custom signing scripts for novel schemes (canonical request strings, embedded body signatures)
@@ -38,7 +38,7 @@ end
 
 ### Optional transport dependencies
 
-HTTP transport works out of the box. To enable the Kafka or Email transport, add its dependencies:
+The HTTP and WhatsApp transports work out of the box (both are plain authenticated HTTPS via Req). To enable the Kafka or Email transport, add its dependencies:
 
 ```elixir
 # Kafka transport — requires the brod Erlang Kafka client
@@ -446,11 +446,12 @@ listed in `:source_domains` so it's discovered at boot.
 
 ## Transports
 
-AshIntegration supports three transport types, configured per connection. Each has its own settings, security options, and behavior:
+AshIntegration supports four transport types, configured per connection. Each has its own settings, security options, and behavior:
 
 - **[HTTP Transport](guides/http-transport.md)** — JSON payloads over HTTP with Bearer, API Key, Basic Auth, or OAuth2 client-credentials
 - **[Kafka Transport](guides/kafka-transport.md)** — Kafka messages with SASL/TLS security and event-key partitioning
 - **[Email Transport](guides/email-transport.md)** — email over SMTP (built on Swoosh) or Microsoft Graph app-only OAuth2, with credentials encrypted at rest
+- **[WhatsApp Transport](guides/whatsapp-transport.md)** — WhatsApp messages over Meta's WhatsApp Business Cloud API, with pre-approved templates and the access token encrypted at rest
 
 Outbound OAuth2 uses the two-legged, machine-to-machine **client-credentials** grant only (no authorization-code/consent flow, no refresh tokens). Tokens are fetched live at delivery, cached until just before expiry, and single-flighted so many concurrent deliveries share one fetch. The `client_secret` lives on the connection, encrypted at rest, and is shared by the HTTP and Email OAuth2 paths.
 

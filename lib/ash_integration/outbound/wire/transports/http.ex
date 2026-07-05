@@ -12,6 +12,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
 
   @behaviour AshIntegration.Outbound.Wire.Transport
 
+  alias AshIntegration.Transport.HttpWire
   alias AshIntegration.Transport.Signing
   alias AshIntegration.Transport.Utils
 
@@ -86,15 +87,15 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
         do_send(event, config, final_body, applied.headers, auth, url, connect_options)
 
       {:error, _category, reason} ->
-        egress_error(reason)
+        HttpWire.egress_error(reason)
     end
   end
 
   defp do_send(event, config, body, sig_headers, auth, url, connect_options) do
     delivery = event.delivery
-    req_options = Application.get_env(:ash_integration, :req_options, [])
 
-    case Req.request(
+    case HttpWire.request(
+           __MODULE__,
            [
              method: method(delivery["method"]),
              url: url,
@@ -105,13 +106,14 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
              # Never follow redirects: a 3xx to an internal address would re-resolve
              # and bypass the pin. A redirect from a webhook target is a misconfig.
              redirect: false
-           ] ++ merge_connect_options(req_options, connect_options)
+           ],
+           connect_options
          ) do
       {:ok, %Req.Response{status: status, body: resp}} when status in 200..299 ->
         {:ok, %{response_status: status, response_body: Utils.body_to_string(resp)}}
 
       {:ok, %Req.Response{status: status, body: body} = resp} ->
-        retryable = retryable_status?(status)
+        retryable = HttpWire.retryable_status?(status)
 
         {:error,
          %{
@@ -121,67 +123,14 @@ defmodule AshIntegration.Outbound.Wire.Transports.Http do
            response_status: status,
            response_body: Utils.body_to_string(body)
          }
-         |> put_retry_after(retryable, resp)}
+         |> HttpWire.put_retry_after(retryable, resp)}
 
       {:error, %Req.TransportError{reason: reason}} ->
-        transport_error(reason)
+        HttpWire.transport_error(reason)
 
       {:error, reason} ->
-        transport_error(reason)
+        HttpWire.transport_error(reason)
     end
-  end
-
-  defp transport_error(reason) do
-    {:error,
-     %{
-       failure_class: :transport,
-       error_message: "Network error: #{Utils.scrub_reason(reason)}",
-       retryable: true
-     }}
-  end
-
-  # On a RETRYABLE rejection (429/503/…), surface the server's own pacing —
-  # `Retry-After: <delay-seconds>` — as `retry_after_ms`, which the relay hands to
-  # `Dispatcher.backoff_until/2` to override the exponential backoff (clamped there
-  # to `backoff_max_ms`, so a hostile/buggy header can't park a lane indefinitely).
-  # Only the integer-seconds form is parsed; the rare HTTP-date form (and any
-  # unparsable value) is ignored and the ordinary exponential backoff paces the
-  # retry. A non-retryable rejection never carries it — there is no next attempt.
-  defp put_retry_after(metadata, false, _resp), do: metadata
-
-  defp put_retry_after(metadata, true, resp) do
-    with [value | _] <- Req.Response.get_header(resp, "retry-after"),
-         {seconds, ""} when seconds >= 0 <- Integer.parse(String.trim(value)) do
-      Map.put(metadata, :retry_after_ms, seconds * 1000)
-    else
-      _ -> metadata
-    end
-  end
-
-  # Which non-2xx statuses are worth retrying. A 5xx is a server-side hiccup; 408
-  # (Request Timeout) and 429 (Too Many Requests) are the only two 4xx codes that
-  # explicitly mean "the request was fine, try again later" — a transient, load- or
-  # timing-driven rejection, not a verdict on this payload. Every OTHER 4xx
-  # (400/401/403/404/409/422 …) and every 3xx is deterministic: the target will
-  # reject this exact payload no matter how healthy it is, so it is non-retryable.
-  # This flag is what the delivery relay's permanent-failure discriminator keys on
-  # (`retryable: false` + `:response` ⇒ terminal at once), so misclassifying a
-  # transient 429/408 as non-retryable would wrongly take a recoverable delivery
-  # terminal on the first hit.
-  defp retryable_status?(status), do: status >= 500 or status in [408, 429]
-
-  # A blocked egress target won't fix itself on retry — surface it as a
-  # non-retryable transport failure rather than looping.
-  defp egress_error(reason) do
-    {:error, %{failure_class: :transport, error_message: reason, retryable: false}}
-  end
-
-  # Fold the pin's `connect_options` into any operator-set `req_options`, pin wins.
-  defp merge_connect_options(req_options, []), do: req_options
-
-  defp merge_connect_options(req_options, connect_options) do
-    {existing, rest} = Keyword.pop(req_options, :connect_options, [])
-    [{:connect_options, Keyword.merge(existing, connect_options)} | rest]
   end
 
   # Both secret-derived header groups are injected LIVE here (never in the event
