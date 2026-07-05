@@ -263,6 +263,16 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   # retryable `:transport` failure so it produces a delivery log instead — closing the
   # raise gap the moduledoc's two-level mapping promises. Exposed for testing the
   # raise-classification seam without a live SMTP server.
+  #
+  # Tradeoff worth knowing: a content/encoder raise (a permanent build error) would
+  # ideally PARK — operator fixes the payload, one lane blocked — but park is a
+  # resolve/dispatch-time concept with no channel on the transport return contract
+  # (`:transport | :response`, retryable-or-not), so `:transport`/retryable is the
+  # least-wrong option and matches how the HTTP transport treats unknown errors. The
+  # consequence: a persistently raising adapter retries and counts toward the
+  # connection-level auto-suspension threshold, suspending the whole connection rather
+  # than isolating the one delivery. That's still a strict improvement over the silent
+  # infinite crash this replaced.
   def send_email(adapter, email, adapter_config) do
     case adapter.deliver(email, adapter_config) do
       {:ok, receipt} ->
