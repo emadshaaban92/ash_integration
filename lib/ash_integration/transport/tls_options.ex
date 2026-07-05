@@ -46,6 +46,17 @@ defmodule AshIntegration.Transport.TlsOptions do
     end
   end
 
+  @doc false
+  # Validate a `cacert_pem` value the way `build/1` will consume it: nil/blank is
+  # fine ("not set"), a non-blank value must decode to at least one PEM
+  # certificate. Shared by the runtime builder and the save-time Ash validation
+  # (`Validations.CacertPem`) so the accept criteria and the error message can't
+  # drift between save time and delivery time. Returns `:ok` or `{:error, message}`.
+  @spec validate_cacert_pem(term()) :: :ok | {:error, String.t()}
+  def validate_cacert_pem(pem) do
+    with {:ok, _ders} <- cacert_ders(pem), do: :ok
+  end
+
   defp base_opts do
     [
       verify: :verify_peer,
@@ -59,7 +70,7 @@ defmodule AshIntegration.Transport.TlsOptions do
   # A private-CA cert (when pasted) AUGMENTS the OS trust store, so a connection
   # that reaches both public-CA and private-CA endpoints keeps verifying both.
   defp put_trust_store(ssl_opts, opts) do
-    case cacert_ders(opts) do
+    case cacert_ders(Map.get(opts, :cacert_pem)) do
       {:ok, []} -> {:ok, Keyword.put(ssl_opts, :cacerts, :public_key.cacerts_get())}
       {:ok, ders} -> {:ok, Keyword.put(ssl_opts, :cacerts, :public_key.cacerts_get() ++ ders)}
       {:error, message} -> {:error, message}
@@ -68,18 +79,14 @@ defmodule AshIntegration.Transport.TlsOptions do
 
   # nil/blank → `{:ok, []}` (not set → OS roots only). Non-blank → decode the PEM
   # and keep the DER of every unencrypted `:Certificate` entry.
-  defp cacert_ders(opts) do
-    case Map.get(opts, :cacert_pem) do
-      pem when is_binary(pem) ->
-        case String.trim(pem) do
-          "" -> {:ok, []}
-          trimmed -> decode_certificates(trimmed)
-        end
-
-      _ ->
-        {:ok, []}
+  defp cacert_ders(pem) when is_binary(pem) do
+    case String.trim(pem) do
+      "" -> {:ok, []}
+      trimmed -> decode_certificates(trimmed)
     end
   end
+
+  defp cacert_ders(_pem), do: {:ok, []}
 
   defp decode_certificates(pem) do
     case certificate_ders(pem) do

@@ -103,4 +103,31 @@ defmodule AshIntegration.Outbound.Wire.Transports.KafkaTlsTest do
       assert opts == [verify: :verify_none]
     end
   end
+
+  # A bad `cacert_pem` is rejected AT SAVE TIME (not only at delivery), so a bad
+  # paste can't sit on a connection and park events on the first send.
+  describe "cacert_pem save-time validation" do
+    alias AshIntegration.Transport.KafkaSecurity.Tls
+
+    test "an undecodable cacert_pem is rejected on create" do
+      assert {:error, %Ash.Error.Invalid{} = error} =
+               Tls
+               |> Ash.Changeset.for_create(:create, %{cacert_pem: "not a certificate"})
+               |> Ash.create()
+
+      assert Exception.message(error) =~ "cacert_pem"
+    end
+
+    test "a valid cacert_pem is accepted on create" do
+      assert {:ok, %Tls{}} =
+               Tls
+               |> Ash.Changeset.for_create(:create, %{cacert_pem: @ca_pem})
+               |> Ash.create()
+    end
+
+    test "a blank cacert_pem is accepted on create" do
+      assert {:ok, %Tls{}} =
+               Tls |> Ash.Changeset.for_create(:create, %{cacert_pem: "  \n "}) |> Ash.create()
+    end
+  end
 end

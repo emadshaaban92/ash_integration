@@ -107,6 +107,13 @@ security: %{type: "tls", verify: :verify_none}
 There is no global switch that disables verification everywhere; the opt-out
 lives on the connection so its blast radius is that single endpoint.
 
+> **Hostname check.** Because the default verifies the hostname, a broker reached
+> by IP address, or by a name not listed in the certificate's SAN, fails the
+> handshake. This is inherent to real verification — fix it at the source (issue
+> the cert with the right SANs), override the presented name with `sni`, or, for
+> a broker that genuinely can't present a matching cert, opt that one connection
+> out with `verify: :verify_none`.
+
 **Trusting a private CA.** When the broker's certificate is signed by an
 internal CA (rather than a public one in the OS trust store), keep verification
 on and paste the CA's PEM certificate directly onto the connection via

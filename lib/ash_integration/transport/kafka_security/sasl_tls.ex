@@ -62,6 +62,7 @@ defmodule AshIntegration.Transport.KafkaSecurity.SaslTls do
 
   validations do
     validate {AshIntegration.Transport.Validations.RequireEncryptedArgument, field: :password}
+    validate AshIntegration.Transport.Validations.CacertPem
   end
 
   actions do

@@ -29,9 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     server-name override) on the Kafka TLS variants. `cacert_pem` is an **inline
     PEM certificate** stored on the connection record (so a connection is
     self-contained and works across a multi-node cluster with no side-channel
-    file); when set it **augments** the OS trust store rather than replacing it,
-    and an undecodable value is rejected at delivery as a non-retryable transport
-    error.
+    file); when set it **augments** the OS trust store rather than replacing it.
+    An undecodable value is rejected at save time with a field error (and, as a
+    delivery-time backstop, classified as a non-retryable transport error).
   - SMTP `tls: :if_available` is unchanged (internal plaintext relays still work),
     but a delivery using it against a non-internal relay now logs a one-time
     warning: STARTTLS can be stripped by an active attacker, so `tls: :always` is

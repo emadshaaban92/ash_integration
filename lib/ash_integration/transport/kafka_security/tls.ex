@@ -33,6 +33,10 @@ defmodule AshIntegration.Transport.KafkaSecurity.Tls do
     end
   end
 
+  validations do
+    validate AshIntegration.Transport.Validations.CacertPem
+  end
+
   actions do
     default_accept :*
     defaults [:read, :destroy, create: :*, update: :*]

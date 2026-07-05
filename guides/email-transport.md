@@ -105,6 +105,12 @@ adapter: %{type: "smtp", relay: "internal-relay.corp", verify: :verify_none, ...
 
 There is no global switch that disables verification everywhere.
 
+> **Hostname check.** Because the default verifies the hostname, a relay reached
+> by IP address, or by a name not listed in the certificate's SAN, fails the
+> handshake. This is inherent to real verification — fix it at the source (issue
+> the cert with the right SANs) or, for a relay that genuinely can't present a
+> matching cert, opt that one connection out with `verify: :verify_none`.
+
 **Trusting a private CA.** When the relay's certificate is signed by an internal
 CA, keep verification on and paste the CA's PEM certificate directly onto the
 connection via `cacert_pem`. It is stored on the connection record itself — no

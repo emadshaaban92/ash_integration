@@ -182,18 +182,25 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
       assert Keyword.get(tls_options, :cacerts) == :public_key.cacerts_get()
     end
 
-    test "an undecodable cacert_pem is a non-retryable TLS configuration error" do
+    test "an undecodable cacert_pem is a non-retryable TLS configuration error (delivery backstop)" do
+      # Save-time validation blocks a bad paste; simulate a value that bypassed it
+      # (legacy/corrupted data) by overriding the field on an otherwise-valid record.
+      union = %Ash.Union{type: :smtp, value: %{smtp(cacert_pem: @ca_pem) | cacert_pem: "bad"}}
+
       assert {:error, %{failure_class: :transport, retryable: false, error_message: msg}} =
-               Email.adapter_config(adapter_union(cacert_pem: "not a certificate"))
+               Email.adapter_config(union)
 
       assert msg =~ "SMTP TLS configuration error"
       assert msg =~ "cacert_pem"
     end
 
     test "verify_none ignores a bad cacert_pem (nothing is verified)" do
-      assert {:ok, _adapter, config} =
-               Email.adapter_config(adapter_union(verify: :verify_none, cacert_pem: "garbage"))
+      union = %Ash.Union{
+        type: :smtp,
+        value: %{smtp(verify: :verify_none, cacert_pem: @ca_pem) | cacert_pem: "bad"}
+      }
 
+      assert {:ok, _adapter, config} = Email.adapter_config(union)
       assert Keyword.fetch!(config, :tls_options) == [verify: :verify_none]
     end
 
@@ -204,6 +211,34 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
       assert Keyword.get(config, :ssl) == true
       assert Keyword.get(config, :tls) == :never
       assert Keyword.get(config, :auth) == :always
+    end
+  end
+
+  # A bad `cacert_pem` is rejected AT SAVE TIME (not only at delivery), so a bad
+  # paste can't sit on a connection and park events on the first send.
+  describe "cacert_pem save-time validation" do
+    test "an undecodable cacert_pem is rejected on create" do
+      assert {:error, %Ash.Error.Invalid{} = error} =
+               Smtp
+               |> Ash.Changeset.for_create(:create, %{
+                 relay: "smtp.acme.com",
+                 port: 587,
+                 cacert_pem: "not a certificate"
+               })
+               |> Ash.create()
+
+      assert Exception.message(error) =~ "cacert_pem"
+    end
+
+    test "a valid cacert_pem is accepted on create" do
+      assert {:ok, %Smtp{}} =
+               Smtp
+               |> Ash.Changeset.for_create(:create, %{
+                 relay: "smtp.acme.com",
+                 port: 587,
+                 cacert_pem: @ca_pem
+               })
+               |> Ash.create()
     end
   end
 
