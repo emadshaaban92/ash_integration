@@ -114,7 +114,8 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
   # both the implicit-SSL (`ssl: true`) and STARTTLS-upgrade paths unless the
   # operator sets `verify: :verify_none` on this one connection.
   def adapter_config(%Ash.Union{type: :smtp, value: smtp}) do
-    with {:ok, loaded} <- Utils.load_secret(smtp, [:password], "SMTP password") do
+    with {:ok, loaded} <- Utils.load_secret(smtp, [:password], "SMTP password"),
+         {:ok, tls_options} <- tls_options(smtp) do
       warn_starttls_downgrade(smtp)
 
       config =
@@ -126,12 +127,30 @@ defmodule AshIntegration.Outbound.Wire.Transports.Email do
           ssl: smtp.ssl,
           tls: smtp.tls,
           auth: smtp.auth,
-          tls_options: TlsOptions.build(smtp),
+          tls_options: tls_options,
           retries: 1
         ]
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
       {:ok, Swoosh.Adapters.SMTP, config}
+    end
+  end
+
+  # A bad `cacert_pem` is an operator misconfiguration on this connection —
+  # classify it as a non-retryable transport failure rather than crashing the
+  # batcher (mirrors `load_secret`'s treatment of a decrypt failure).
+  defp tls_options(smtp) do
+    case TlsOptions.build(smtp) do
+      {:ok, opts} ->
+        {:ok, opts}
+
+      {:error, message} ->
+        {:error,
+         %{
+           failure_class: :transport,
+           error_message: "SMTP TLS configuration error: #{message}",
+           retryable: false
+         }}
     end
   end
 

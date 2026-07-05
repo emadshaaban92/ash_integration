@@ -6,6 +6,36 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
   alias AshIntegration.Outbound.Wire.Transports.Email
   alias AshIntegration.Transport.EmailAdapter.Smtp
 
+  # A self-signed CA used to exercise inline-PEM trust augmentation. Its DER is
+  # what a valid `cacert_pem` should append to the OS roots.
+  @ca_pem """
+  -----BEGIN CERTIFICATE-----
+  MIIDFTCCAf2gAwIBAgIUZO4GSuJ1OcLi4oOWOViF4Es0TRIwDQYJKoZIhvcNAQEL
+  BQAwGjEYMBYGA1UEAwwPVGVzdCBQcml2YXRlIENBMB4XDTI2MDcwNTE3NDYwMFoX
+  DTM2MDcwMjE3NDYwMFowGjEYMBYGA1UEAwwPVGVzdCBQcml2YXRlIENBMIIBIjAN
+  BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtPXaYcbaLzCQhg/O3bMfVSHJGlOg
+  /dDjJNLHq9MsuZVTPtDACOO5IZzyanBUV28Y9+vOu9raFMAogmiqZIs3rnw9wFs6
+  Xg7A3cu41Au6OPbV73a5Wh1SIwXEJfosBB4cyvmy8Asr3rgR7v8ffl/3NeDwJ1cB
+  DufNsaOpcsNXc+5TtXTuJNi2a4cr0b5oRRDnwyh/jy248cgGMtRYhV1kEYKzBseZ
+  ldizq48o+nxRsnb7EPIqv7fXeJJVjJEXkWev7I1c8L5glUaqaiSNSxZZ+ZBHaL1n
+  OKOtp6skKxn32NV5qzy5N1easQfOh/VAz92lGMlZSFxJJP7nKRYxCxA0hwIDAQAB
+  o1MwUTAdBgNVHQ4EFgQUXCGO9s8i00JYyPI6zw8g3t1Hm/4wHwYDVR0jBBgwFoAU
+  XCGO9s8i00JYyPI6zw8g3t1Hm/4wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0B
+  AQsFAAOCAQEAAXicmRZhhjioE8jDO3ygQ9yvCf78UEwM4fT7C6JtXvLevlh3XY2B
+  mg3CZrE3xviD79iylEjKOfMYpGYJaCWV0Bn0O9MUJz77YAiUPq2N1sgIgXH67PvI
+  4ZKwVFyjmrzyeWCdHLxAwdZwwLPPRFE4jL0v9yirxlzjvdQq2cvPPnqNvWBmRr5P
+  0CAVjczm3TUCegoPsZa7bUgGrj5MIG/9gHeJl1kbnjmSmC/EuMkMM8JcoeRZRs4n
+  yGriKWtsN7nAZMvyDzlEZqWs+UcC3RJ1jIQOk0E8Hps0Lj+SYXsNrYUK43Wluw7N
+  5xu4cd8JRg18EA8ecDj3lXYBqxsS/Xnufg==
+  -----END CERTIFICATE-----
+  """
+
+  defp ca_ders do
+    @ca_pem
+    |> :public_key.pem_decode()
+    |> Enum.map(fn {:Certificate, der, :not_encrypted} -> der end)
+  end
+
   # The descriptor is already normalized/validated by the resolver, so these
   # exercise the pure replay mapping (delivery descriptor → Swoosh.Email) and the
   # failure classification — no SMTP server needed, mirroring the Kafka transport's
@@ -126,8 +156,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
       assert Keyword.get(tls_options, :depth) == 3
       assert [match_fun: match_fun] = Keyword.get(tls_options, :customize_hostname_check)
       assert is_function(match_fun)
-      assert is_list(Keyword.get(tls_options, :cacerts))
-      refute Keyword.has_key?(tls_options, :cacertfile)
+      assert Keyword.get(tls_options, :cacerts) == :public_key.cacerts_get()
     end
 
     test "verify_none yields only the chosen opt-out when explicitly selected" do
@@ -137,13 +166,35 @@ defmodule AshIntegration.Outbound.Wire.Transports.EmailTest do
       assert Keyword.fetch!(config, :tls_options) == [verify: :verify_none]
     end
 
-    test "cacertfile replaces the OS trust store when set" do
+    test "a valid cacert_pem AUGMENTS the OS trust store (roots ++ pasted DER)" do
       assert {:ok, _adapter, config} =
-               Email.adapter_config(adapter_union(cacertfile: "/etc/ssl/internal-ca.pem"))
+               Email.adapter_config(adapter_union(cacert_pem: @ca_pem))
 
       tls_options = Keyword.fetch!(config, :tls_options)
-      assert Keyword.get(tls_options, :cacertfile) == ~c"/etc/ssl/internal-ca.pem"
-      refute Keyword.has_key?(tls_options, :cacerts)
+      assert Keyword.get(tls_options, :cacerts) == :public_key.cacerts_get() ++ ca_ders()
+    end
+
+    test "a blank cacert_pem falls back to OS roots only" do
+      assert {:ok, _adapter, config} =
+               Email.adapter_config(adapter_union(cacert_pem: "   \n  "))
+
+      tls_options = Keyword.fetch!(config, :tls_options)
+      assert Keyword.get(tls_options, :cacerts) == :public_key.cacerts_get()
+    end
+
+    test "an undecodable cacert_pem is a non-retryable TLS configuration error" do
+      assert {:error, %{failure_class: :transport, retryable: false, error_message: msg}} =
+               Email.adapter_config(adapter_union(cacert_pem: "not a certificate"))
+
+      assert msg =~ "SMTP TLS configuration error"
+      assert msg =~ "cacert_pem"
+    end
+
+    test "verify_none ignores a bad cacert_pem (nothing is verified)" do
+      assert {:ok, _adapter, config} =
+               Email.adapter_config(adapter_union(verify: :verify_none, cacert_pem: "garbage"))
+
+      assert Keyword.fetch!(config, :tls_options) == [verify: :verify_none]
     end
 
     test "ssl/tls/auth pass through unchanged" do

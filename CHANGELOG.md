@@ -21,12 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     upgrade, because verification is now enforced. Operators of such internal
     endpoints must set **`verify: :verify_none` on those specific connections**
     (Kafka `security` variant or SMTP `adapter`) to restore the previous
-    behavior, or provide a private-CA bundle via `cacertfile`. The opt-out is
+    behavior, or trust the endpoint's private CA via `cacert_pem`. The opt-out is
     per-connection and stored/visible — there is deliberately **no global flag**
     to disable verification everywhere.
   - New per-connection fields: `verify` (`:verify_peer` default | `:verify_none`)
-    and `cacertfile` on Kafka `:tls`/`:sasl_tls` and SMTP; plus `sni` (handshake
-    server-name override) on the Kafka TLS variants.
+    and `cacert_pem` on Kafka `:tls`/`:sasl_tls` and SMTP; plus `sni` (handshake
+    server-name override) on the Kafka TLS variants. `cacert_pem` is an **inline
+    PEM certificate** stored on the connection record (so a connection is
+    self-contained and works across a multi-node cluster with no side-channel
+    file); when set it **augments** the OS trust store rather than replacing it,
+    and an undecodable value is rejected at delivery as a non-retryable transport
+    error.
   - SMTP `tls: :if_available` is unchanged (internal plaintext relays still work),
     but a delivery using it against a non-internal relay now logs a one-time
     warning: STARTTLS can be stripped by an active attacker, so `tls: :always` is

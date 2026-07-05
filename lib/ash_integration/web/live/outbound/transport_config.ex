@@ -307,12 +307,17 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             brokers without a valid cert.
           </p>
           <.input
-            field={sec[:cacertfile]}
-            type="text"
-            label="CA bundle path (optional)"
-            placeholder="/etc/ssl/internal-ca.pem"
+            field={sec[:cacert_pem]}
+            type="textarea"
+            label="Private CA certificate (PEM, optional)"
+            rows="6"
+            placeholder="-----BEGIN CERTIFICATE-----"
             phx-debounce="blur"
           />
+          <p class="text-xs text-base-content/60 -mt-1 mb-2">
+            Paste a private/self-signed CA certificate to trust it in addition to
+            the public trust store. Only needed for private/self-signed CAs.
+          </p>
           <.input
             field={sec[:sni]}
             type="text"
@@ -454,12 +459,17 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             relays without a valid cert.
           </p>
           <.input
-            field={adapter[:cacertfile]}
-            type="text"
-            label="CA bundle path (optional)"
-            placeholder="/etc/ssl/internal-ca.pem"
+            field={adapter[:cacert_pem]}
+            type="textarea"
+            label="Private CA certificate (PEM, optional)"
+            rows="6"
+            placeholder="-----BEGIN CERTIFICATE-----"
             phx-debounce="blur"
           />
+          <p class="text-xs text-base-content/60 -mt-1 mb-2">
+            Paste a private/self-signed CA certificate to trust it in addition to
+            the public trust store. Only needed for private/self-signed CAs.
+          </p>
         <% end %>
       </.inputs_for>
     </div>

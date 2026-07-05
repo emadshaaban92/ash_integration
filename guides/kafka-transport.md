@@ -89,11 +89,11 @@ needed.
 
 The `:tls` and `:sasl_tls` variants accept three verification fields:
 
-| Field        | Default        | Purpose                                                        |
-| ------------ | -------------- | ------------------------------------------------------------- |
-| `verify`     | `:verify_peer` | `:verify_peer` checks chain + hostname; `:verify_none` disables checking |
-| `cacertfile` | `nil`          | Path to a private-CA bundle; **replaces** the OS trust store when set |
-| `sni`        | `nil`          | Server-name override for the handshake (broker fronts a different cert CN) |
+| Field         | Default        | Purpose                                                        |
+| ------------- | -------------- | ------------------------------------------------------------- |
+| `verify`      | `:verify_peer` | `:verify_peer` checks chain + hostname; `:verify_none` disables checking |
+| `cacert_pem`  | `nil`          | Inline PEM certificate for a private CA; **augments** the OS trust store when set |
+| `sni`         | `nil`          | Server-name override for the handshake (broker fronts a different cert CN) |
 
 **Opting a specific internal connection out.** An internal/firewalled broker
 with a self-signed or absent certificate can turn verification off — but only
@@ -107,16 +107,22 @@ security: %{type: "tls", verify: :verify_none}
 There is no global switch that disables verification everywhere; the opt-out
 lives on the connection so its blast radius is that single endpoint.
 
-**Pointing at a private CA.** When the broker's certificate is signed by an
+**Trusting a private CA.** When the broker's certificate is signed by an
 internal CA (rather than a public one in the OS trust store), keep verification
-on and point at the CA bundle:
+on and paste the CA's PEM certificate directly onto the connection via
+`cacert_pem`. It is stored on the connection record itself — no side-channel
+file to place on every node — and **augments** the OS trust store, so the same
+connection can still reach public-CA endpoints:
 
 ```elixir
 security: %{type: "sasl_tls",
             mechanism: :scram_sha_256, username: "user", password: "secret",
-            cacertfile: "/etc/ssl/internal-ca.pem",
+            cacert_pem: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
             sni: "broker.internal"}
 ```
+
+A `cacert_pem` that contains no decodable certificate is rejected at delivery as
+a non-retryable transport error rather than silently trusting nothing.
 
 ## Partitioning
 

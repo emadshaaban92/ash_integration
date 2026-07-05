@@ -65,7 +65,7 @@ connection's `transport_config.type` to `:email`:
     tls: :if_available,            # STARTTLS: :if_available (default), :always, :never
     auth: :if_available,           # SMTP AUTH: :if_available (default), :always, :never
     verify: :verify_peer,          # Certificate verification (default; see TLS below)
-    cacertfile: nil                # Optional private-CA bundle path
+    cacert_pem: nil                # Optional inline PEM cert for a private CA
   },
   headers: %{                      # Optional static email headers
     "x-source" => "my-app"
@@ -93,7 +93,7 @@ Two fields tune verification:
 | Field        | Default        | Purpose                                                        |
 | ------------ | -------------- | ------------------------------------------------------------- |
 | `verify`     | `:verify_peer` | `:verify_peer` checks chain + hostname; `:verify_none` disables checking |
-| `cacertfile` | `nil`          | Path to a private-CA bundle; **replaces** the OS trust store when set |
+| `cacert_pem` | `nil`          | Inline PEM certificate for a private CA; **augments** the OS trust store when set |
 
 **Opting a specific internal relay out.** An internal relay with a self-signed
 or absent certificate can turn verification off — but only for that one
@@ -105,12 +105,23 @@ adapter: %{type: "smtp", relay: "internal-relay.corp", verify: :verify_none, ...
 
 There is no global switch that disables verification everywhere.
 
-**Pointing at a private CA.** When the relay's certificate is signed by an
-internal CA, keep verification on and point at the CA bundle:
+**Trusting a private CA.** When the relay's certificate is signed by an internal
+CA, keep verification on and paste the CA's PEM certificate directly onto the
+connection via `cacert_pem`. It is stored on the connection record itself — no
+side-channel file to place on every node — and **augments** the OS trust store,
+so the same connection can still reach public-CA relays:
 
 ```elixir
-adapter: %{type: "smtp", relay: "mail.corp", cacertfile: "/etc/ssl/internal-ca.pem", ...}
+adapter: %{
+  type: "smtp",
+  relay: "mail.corp",
+  cacert_pem: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+  ...
+}
 ```
+
+A `cacert_pem` that contains no decodable certificate is rejected at delivery as
+a non-retryable transport error rather than silently trusting nothing.
 
 ### STARTTLS downgrade caveat (`tls: :if_available`)
 

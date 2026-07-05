@@ -14,11 +14,15 @@ defmodule AshIntegration.Transport.KafkaSecurity.Tls do
       constraints one_of: [:verify_peer, :verify_none]
     end
 
-    # Optional path to a private-CA bundle. When set it REPLACES the OS trust
-    # store, so verification pins to exactly the CA that signed the broker cert.
-    attribute :cacertfile, :string do
+    # Optional inline PEM certificate for a private/self-signed CA. Stored on the
+    # connection record itself (a CA cert is not secret, but this is marked
+    # sensitive to keep it out of logs/inspect), so a connection is
+    # self-contained — no side-channel file on every node. When set it AUGMENTS
+    # the OS trust store, so a mix of public-CA and private-CA endpoints verifies.
+    attribute :cacert_pem, :string do
       allow_nil? true
       public? true
+      sensitive? true
     end
 
     # Optional server-name override for the TLS handshake — some internal brokers
