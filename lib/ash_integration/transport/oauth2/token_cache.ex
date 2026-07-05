@@ -37,6 +37,13 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   # How long a waiter blocks for the leader's fetch result before giving up.
   @wait_timeout_ms Application.compile_env(:ash_integration, :oauth2_wait_timeout_ms, 30_000)
 
+  # Ceiling on a token's effective lifetime, regardless of the server-reported
+  # `expires_in`. A buggy or hostile IdP returning a huge `expires_in` would
+  # otherwise pin a token far past real server-side revocation AND defeat the idle
+  # sweeper for that key (its `expires_at` would never fall below the sweep
+  # cutoff). Clamp the TTL so a stale/over-long token is re-fetched within a day.
+  @max_token_ttl_ms :timer.hours(24)
+
   # ── Public API ──────────────────────────────────────────────────────────────
 
   def start_link(opts \\ []) do
@@ -239,7 +246,10 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
 
   defp store(key, token, expires_in) do
     now = now()
-    ttl_ms = expires_in * 1000
+    # Clamp the server-reported lifetime to a sane ceiling (see @max_token_ttl_ms)
+    # before deriving expires_at/refresh_at, so a bogus giant `expires_in` can't
+    # pin a token indefinitely or starve the idle sweeper.
+    ttl_ms = min(expires_in * 1000, @max_token_ttl_ms)
     expires_at = now + ttl_ms
     # Refresh a skew before expiry — but never let the skew exceed HALF the token's
     # lifetime. Otherwise a short-lived token (`expires_in <= skew`, including the

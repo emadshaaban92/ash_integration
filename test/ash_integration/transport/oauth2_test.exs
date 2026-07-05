@@ -161,6 +161,28 @@ defmodule AshIntegration.Transport.OAuth2Test do
       assert count(counter) == 1
     end
 
+    test "clamps a bogus giant expires_in to the max token TTL" do
+      # A buggy/hostile IdP claims the token lives for a century. It must not be
+      # pinned that long (it would outlive real revocation and defeat the idle
+      # sweeper); the effective TTL is capped at 24h.
+      stub_token(fn conn ->
+        token_response(conn, %{"expires_in" => 60 * 60 * 24 * 365 * 100})
+      end)
+
+      d = descriptor()
+      assert {:ok, _} = OAuth2.get_token(d)
+
+      key = OAuth2.cache_key(d)
+      assert [{^key, _token, _refresh_at, expires_at}] = :ets.lookup(TokenCache, key)
+
+      max_ttl = :timer.hours(24)
+      now = System.monotonic_time(:millisecond)
+      # Capped at the ceiling, not the century the server claimed...
+      assert expires_at - now <= max_ttl
+      # ...but still cached right up to that ceiling (not accidentally clamped short).
+      assert expires_at - now > max_ttl - :timer.minutes(1)
+    end
+
     test "a rotated client_secret invalidates the cached token" do
       counter = start_counter()
 

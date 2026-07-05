@@ -77,7 +77,10 @@ connection's `transport_config.type` to `:email`:
 ```
 
 `from` accepts a bare address (`bot@acme.com`) or a display-name form
-(`Acme <bot@acme.com>`), which is split into a proper `From` header.
+(`Acme <bot@acme.com>`), which is split into a proper `From` header. The address
+part must be a plausible mailbox — spaces, control characters, and the URL
+metacharacters `/`, `?`, and `#` are rejected, since the address can flow into the
+Microsoft Graph `sendMail` URL.
 
 The SMTP `password` is encrypted at rest exactly like an HTTP bearer token or a
 Kafka SASL password, and is decrypted **live at delivery** — never stored in the
@@ -132,6 +135,8 @@ token provider exactly as for HTTP (see the HTTP transport guide's OAuth2
 section). The `client_secret` is encrypted at rest and never logged. If
 `user_id` is set, the send targets `/users/{user_id}/sendMail` (a specific
 user/shared mailbox); otherwise the mailbox is derived from the `from` address.
+Either way the mailbox is validated (no spaces, control chars, or `/ ? #`) and
+percent-encoded into the request path, so it can never rewrite the Graph endpoint.
 
 > Requires `config :swoosh, :api_client, Swoosh.ApiClient.Req` (see
 > Prerequisites) — the Graph adapter sends over HTTP.

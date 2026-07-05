@@ -42,6 +42,14 @@ defmodule AshIntegration.Transport.EmailConfig do
     end
   end
 
+  validations do
+    # The `from` address (or the address inside a "Display Name <addr>" form) can
+    # flow into the Graph sendMail URL, so reject path/query metacharacters and
+    # control chars here as well as at the send boundary.
+    validate {AshIntegration.Transport.Validations.MailboxAddress,
+              field: :from, allow_display_name?: true}
+  end
+
   changes do
     # Store header names lowercase so they can't collide case-insensitively with
     # the library's wire headers or a transform override at delivery.
