@@ -77,17 +77,27 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
         finalize(result)
 
       :wait ->
-        await_leader(ref)
+        await_leader(key, ref)
     end
   end
 
-  defp await_leader(ref) do
+  defp await_leader(key, ref) do
     wait_timeout_ms = wait_timeout_ms()
 
     receive do
       {:oauth2_token, ^ref, result} -> finalize(result)
     after
       wait_timeout_ms ->
+        # Deregister this waiter so the leader doesn't later `send` its reply into a
+        # long-lived Broadway worker's mailbox (where it would surface as unexpected
+        # `handle_info` noise). The cancel and the leader's completion are both
+        # serialized through the GenServer, so exactly one of two things is true
+        # afterwards: either we were removed before completion (no reply sent), or
+        # completion already ran and a reply for THIS ref is in our mailbox — the
+        # zero-timeout drain below discards that one so nothing lingers.
+        GenServer.call(__MODULE__, {:cancel_wait, key, ref})
+        drain_stale_reply(ref)
+
         Logger.warning(
           "OAuth2 TokenCache: timed out after #{wait_timeout_ms}ms waiting for an " <>
             "in-flight token fetch; failing this delivery (retryable)"
@@ -99,6 +109,14 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
            error_message: "Timed out waiting for an in-flight OAuth2 token fetch",
            retryable: true
          }}
+    end
+  end
+
+  defp drain_stale_reply(ref) do
+    receive do
+      {:oauth2_token, ^ref, _result} -> :ok
+    after
+      0 -> :ok
     end
   end
 
@@ -158,6 +176,22 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
           {:reply, :lead, state}
         end
     end
+  end
+
+  def handle_call({:cancel_wait, key, req_ref}, _from, state) do
+    # Drop a timed-out waiter (identified by its per-request ref) from the key's
+    # waiters list so `notify_and_clear` no longer sends it a reply. A no-op if the
+    # key already completed and cleared.
+    state =
+      case state.inflight do
+        %{^key => %{waiters: waiters} = entry} ->
+          put_in(state.inflight[key], %{entry | waiters: List.keydelete(waiters, req_ref, 1)})
+
+        _ ->
+          state
+      end
+
+    {:reply, :ok, state}
   end
 
   def handle_call({:complete, key, result}, _from, state) do

@@ -8,7 +8,35 @@ defmodule AshIntegration.Transport.HttpWireTest do
   """
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias AshIntegration.Transport.HttpWire
+  alias AshIntegration.Transport.Utils
+
+  describe "strip_pinned_req_options/1 → operator cannot override the SSRF pin" do
+    test "drops redirect/retry overrides (with a warning) but keeps other options" do
+      log =
+        capture_log(fn ->
+          assert Utils.strip_pinned_req_options(
+                   redirect: true,
+                   retry: true,
+                   connect_options: [timeout: 1_000]
+                 ) == [connect_options: [timeout: 1_000]]
+        end)
+
+      assert log =~ "redirect/retry are pinned"
+    end
+
+    test "leaves req_options that touch neither pinned option untouched (no warning)" do
+      log =
+        capture_log(fn ->
+          assert Utils.strip_pinned_req_options(connect_options: [timeout: 1_000]) ==
+                   [connect_options: [timeout: 1_000]]
+        end)
+
+      refute log =~ "pinned"
+    end
+  end
 
   describe "egress_error/2 → category-aware classification" do
     test "an :unresolvable host is a RETRYABLE transport error (transient DNS)" do

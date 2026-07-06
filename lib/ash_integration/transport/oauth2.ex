@@ -91,7 +91,15 @@ defmodule AshIntegration.Transport.OAuth2 do
 
   defp do_request(descriptor, url, connect_options) do
     {form, headers} = build_request(descriptor)
-    req_options = Application.get_env(:ash_integration, :oauth2_req_options, [])
+
+    # Strip any operator-overridden `redirect`/`retry` before folding req_options in:
+    # they're appended after the pinned `redirect: false`/`retry: false` and Req is
+    # last-wins, so an override would re-enable redirect following on the token
+    # endpoint (which is `Egress.pin`ned) and bypass the SSRF pin — the same hole
+    # HttpWire guards on the delivery request.
+    req_options =
+      Application.get_env(:ash_integration, :oauth2_req_options, [])
+      |> Utils.strip_pinned_req_options()
 
     options =
       [

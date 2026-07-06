@@ -54,6 +54,21 @@ defmodule AshIntegration.Transport.SecretValidationsTest do
       assert error_on?(changeset, :client_secret)
     end
 
+    test "an explicit empty-string secret is invalid (same secret-less credential as nil)" do
+      changeset =
+        Ash.Changeset.for_create(ApiKey, :create, %{header_name: "X-API-Key", value: ""})
+
+      refute changeset.valid?
+      assert error_on?(changeset, :value)
+    end
+
+    test "a whitespace-only secret is invalid" do
+      changeset = Ash.Changeset.for_create(Stripe, :create, %{secret: "   "})
+
+      refute changeset.valid?
+      assert error_on?(changeset, :secret)
+    end
+
     test "a real (non-nil) secret still passes the presence check" do
       changeset =
         Ash.Changeset.for_create(ApiKey, :create, %{header_name: "X-API-Key", value: "k"})

@@ -13,21 +13,25 @@ defmodule AshIntegration.Transport.Validations.RequireEncryptedArgument do
     field = opts[:field]
     encrypted_attr = String.to_existing_atom("encrypted_#{field}")
 
-    # `fetch_argument` returns `{:ok, nil}` for an argument explicitly provided as
-    # nil — which is NOT a real secret. Guarding on `not is_nil(value)` makes both
-    # an explicit nil and an omitted argument fall through to the encrypted-attribute
-    # check, so a create with `%{value: nil}` is rejected instead of saving a
-    # secret-less credential (a "Bearer " with no token).
-    case Ash.Changeset.fetch_argument(changeset, field) do
-      {:ok, value} when not is_nil(value) ->
+    # A real secret is a NON-BLANK string argument. `fetch_argument` returns
+    # `{:ok, nil}` for an explicit nil and `{:ok, ""}` for an explicit empty string;
+    # both — and a whitespace-only value — would save with no meaningful ciphertext
+    # and make the transport send an empty credential (a bare "Bearer " / an empty
+    # api-key header), the exact secret-less config this validation exists to
+    # prevent. Anything that isn't a real secret falls through to the
+    # encrypted-attribute check (so an update that omits the argument still keeps
+    # the existing encrypted value).
+    if present_secret?(Ash.Changeset.fetch_argument(changeset, field)) do
+      :ok
+    else
+      if Ash.Changeset.get_attribute(changeset, encrypted_attr) do
         :ok
-
-      _ ->
-        if Ash.Changeset.get_attribute(changeset, encrypted_attr) do
-          :ok
-        else
-          {:error, field: field, message: "is required"}
-        end
+      else
+        {:error, field: field, message: "is required"}
+      end
     end
   end
+
+  defp present_secret?({:ok, value}) when is_binary(value), do: String.trim(value) != ""
+  defp present_secret?(_), do: false
 end

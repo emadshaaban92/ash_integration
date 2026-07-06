@@ -353,6 +353,39 @@ defmodule AshIntegration.Transport.OAuth2Test do
     end
   end
 
+  describe "token-endpoint SSRF hardening" do
+    test "oauth2_req_options cannot re-enable redirect following (the egress pin holds)" do
+      # An operator tries to turn redirect following back on for the token endpoint.
+      # It must be stripped: the pinned `redirect: false` has to win, or a 3xx from
+      # the token URL would re-resolve and bypass the SSRF IP pin.
+      Application.put_env(:ash_integration, :oauth2_req_options,
+        plug: {Req.Test, @stub},
+        redirect: true
+      )
+
+      counter = start_counter()
+
+      stub_token(fn conn ->
+        bump(counter)
+
+        if count(counter) == 1 do
+          # A token endpoint that 302s elsewhere. If redirects were followed, Req
+          # would fetch the Location (a second stub call); with the override stripped
+          # the 302 is final and surfaces as a non-2xx token-endpoint error.
+          conn
+          |> Plug.Conn.put_resp_header("location", "https://login.test/oauth2/token2")
+          |> Plug.Conn.send_resp(302, "")
+        else
+          token_response(conn)
+        end
+      end)
+
+      assert {:error, %{failure_class: :transport}} = OAuth2.get_token(descriptor())
+      # The redirect target was never fetched — only the original request was made.
+      assert count(counter) == 1
+    end
+  end
+
   describe "waiter ref safety (stale single-flight replies)" do
     test "a timed-out waiter is not handed a stale reply on its next wait" do
       # Short waiter timeout so the round-1 waiter gives up while the leader is still
@@ -419,6 +452,47 @@ defmodule AshIntegration.Transport.OAuth2Test do
       # The worker must receive the FRESH token, not the round-1 stale error still
       # sitting in its mailbox (the bug: matching on the shared key grabs the stale one).
       assert_receive {:worker_result, {:ok, "fresh-tok"}}, 2_000
+    end
+
+    test "a timed-out waiter is deregistered so the leader's late reply never reaches it" do
+      prev = Application.get_env(:ash_integration, :oauth2_wait_timeout_ms)
+      Application.put_env(:ash_integration, :oauth2_wait_timeout_ms, 100)
+      on_exit(fn -> restore(:oauth2_wait_timeout_ms, prev) end)
+
+      test_pid = self()
+      d = descriptor()
+
+      stub_token(fn conn ->
+        send(test_pid, :fetch_started)
+        receive do: (:release -> :ok)
+        token_response(conn)
+      end)
+
+      leader = spawn_caller(test_pid, d, :leader)
+      Req.Test.allow(@stub, test_pid, leader)
+      send(leader, :go)
+      assert_receive :fetch_started, 1_000
+
+      # The worker waits, times out (~100ms) and deregisters, then stays alive so we
+      # can inspect its mailbox.
+      worker =
+        spawn(fn ->
+          send(test_pid, {:worker_result, OAuth2.get_token(d)})
+          receive do: (:stop -> :ok)
+        end)
+
+      assert_receive {:worker_result, {:error, %{retryable: true}}}, 2_000
+
+      # The worker has already timed out and cancelled its wait; NOW the leader
+      # completes. A correctly-deregistered waiter is sent nothing.
+      send(leader, :release)
+      assert_receive {:leader_result, {:ok, "tok-123"}}, 2_000
+
+      wait_until_blocked(worker)
+      {:messages, messages} = Process.info(worker, :messages)
+      refute Enum.any?(messages, &match?({:oauth2_token, _ref, _result}, &1))
+
+      send(worker, :stop)
     end
   end
 
