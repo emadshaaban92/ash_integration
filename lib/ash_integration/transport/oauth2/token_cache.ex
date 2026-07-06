@@ -60,7 +60,14 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   end
 
   defp coordinate(key, descriptor) do
-    case GenServer.call(__MODULE__, {:acquire, key}, wait_timeout_ms()) do
+    # A unique per-request ref tags the leader's reply so a *stale* reply — one
+    # deposited into this (long-lived Broadway worker) process's mailbox after an
+    # earlier wait on the same key timed out — can never be mistaken for the result
+    # of THIS wait. Matching on the shared `key` would let an hours-old token/error
+    # match instantly; a fresh ref each request rules that out.
+    ref = make_ref()
+
+    case GenServer.call(__MODULE__, {:acquire, key, ref}, wait_timeout_ms()) do
       {:hit, token} ->
         {:ok, token}
 
@@ -70,17 +77,27 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
         finalize(result)
 
       :wait ->
-        await_leader(key)
+        await_leader(key, ref)
     end
   end
 
-  defp await_leader(key) do
+  defp await_leader(key, ref) do
     wait_timeout_ms = wait_timeout_ms()
 
     receive do
-      {:oauth2_token, ^key, result} -> finalize(result)
+      {:oauth2_token, ^ref, result} -> finalize(result)
     after
       wait_timeout_ms ->
+        # Deregister this waiter so the leader doesn't later `send` its reply into a
+        # long-lived Broadway worker's mailbox (where it would surface as unexpected
+        # `handle_info` noise). The cancel and the leader's completion are both
+        # serialized through the GenServer, so exactly one of two things is true
+        # afterwards: either we were removed before completion (no reply sent), or
+        # completion already ran and a reply for THIS ref is in our mailbox — the
+        # zero-timeout drain below discards that one so nothing lingers.
+        GenServer.call(__MODULE__, {:cancel_wait, key, ref})
+        drain_stale_reply(ref)
+
         Logger.warning(
           "OAuth2 TokenCache: timed out after #{wait_timeout_ms}ms waiting for an " <>
             "in-flight token fetch; failing this delivery (retryable)"
@@ -92,6 +109,14 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
            error_message: "Timed out waiting for an in-flight OAuth2 token fetch",
            retryable: true
          }}
+    end
+  end
+
+  defp drain_stale_reply(ref) do
+    receive do
+      {:oauth2_token, ^ref, _result} -> :ok
+    after
+      0 -> :ok
     end
   end
 
@@ -127,7 +152,7 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
   end
 
   @impl true
-  def handle_call({:acquire, key}, {caller_pid, _tag}, state) do
+  def handle_call({:acquire, key, req_ref}, {caller_pid, _tag}, state) do
     case cached(key) do
       {:ok, token} ->
         # Filled by a leader while this caller was en route to the GenServer.
@@ -135,7 +160,10 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
 
       :miss ->
         if Map.has_key?(state.inflight, key) do
-          state = update_in(state.inflight[key].waiters, &[caller_pid | &1])
+          # Remember each waiter WITH its per-request ref, so the completion reply is
+          # addressed to this specific wait and a timed-out earlier wait's stale
+          # message can't satisfy it.
+          state = update_in(state.inflight[key].waiters, &[{caller_pid, req_ref} | &1])
           {:reply, :wait, state}
         else
           ref = Process.monitor(caller_pid)
@@ -148,6 +176,22 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
           {:reply, :lead, state}
         end
     end
+  end
+
+  def handle_call({:cancel_wait, key, req_ref}, _from, state) do
+    # Drop a timed-out waiter (identified by its per-request ref) from the key's
+    # waiters list so `notify_and_clear` no longer sends it a reply. A no-op if the
+    # key already completed and cleared.
+    state =
+      case state.inflight do
+        %{^key => %{waiters: waiters} = entry} ->
+          put_in(state.inflight[key], %{entry | waiters: List.keydelete(waiters, req_ref, 1)})
+
+        _ ->
+          state
+      end
+
+    {:reply, :ok, state}
   end
 
   def handle_call({:complete, key, result}, _from, state) do
@@ -229,7 +273,7 @@ defmodule AshIntegration.Transport.OAuth2.TokenCache do
         state
 
       {%{ref: ref, waiters: waiters}, inflight} ->
-        for pid <- waiters, do: send(pid, {:oauth2_token, key, result})
+        for {pid, req_ref} <- waiters, do: send(pid, {:oauth2_token, req_ref, result})
         %{state | inflight: inflight, monitors: Map.delete(state.monitors, ref)}
     end
   end

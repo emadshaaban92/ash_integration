@@ -8,6 +8,41 @@ defmodule AshIntegration.Transport.Utils do
 
   import Bitwise
 
+  require Logger
+
+  # Security-critical Req options a transport pins and the operator must NOT be able
+  # to override via `req_options`. See `strip_pinned_req_options/1`.
+  @pinned_req_options [:redirect, :retry]
+
+  @doc """
+  Strip the security-critical Req options a transport pins (`:redirect`, `:retry`)
+  from operator-configured `req_options`, warning if either is present.
+
+  Both the wire transports (`HttpWire`) and the OAuth2 token fetch (`OAuth2`) build
+  a `Req` request with `redirect: false` / `retry: false` and then append the
+  operator's `req_options`. `Req` is last-wins, so `req_options: [redirect: true]`
+  would silently re-enable redirect following and let a 3xx to an internal address
+  bypass the egress IP pin (SSRF) — on the delivery request AND the token-endpoint
+  request, both of which go through `Egress.pin/1`. These options are the
+  transport's to own; drop any operator override so the pin holds.
+  """
+  @spec strip_pinned_req_options(keyword()) :: keyword()
+  def strip_pinned_req_options(req_options) do
+    case Keyword.take(req_options, @pinned_req_options) do
+      [] ->
+        req_options
+
+      overridden ->
+        Logger.warning(
+          "AshIntegration: ignoring req_options #{inspect(Keyword.keys(overridden))} — " <>
+            "redirect/retry are pinned by the transport (following a redirect would " <>
+            "bypass the egress IP pin / SSRF protection)"
+        )
+
+        Keyword.drop(req_options, @pinned_req_options)
+    end
+  end
+
   @doc """
   De-duplicate a `{name, value}` header list case-insensitively, keeping the
   **last** value for each name and that value's position.

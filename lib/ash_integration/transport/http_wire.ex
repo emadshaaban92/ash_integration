@@ -26,6 +26,7 @@ defmodule AshIntegration.Transport.HttpWire do
     req_options =
       Application.get_env(:ash_integration, :req_options, [])
       |> put_test_owner(owner)
+      |> Utils.strip_pinned_req_options()
 
     Req.request(request_options ++ merge_connect_options(req_options, connect_options))
   end

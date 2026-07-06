@@ -20,9 +20,18 @@ defmodule AshIntegration.Transport.OAuth2 do
   `Utils.scrub_reason/1`) and never persisted.
   """
 
+  require Logger
+
   alias AshIntegration.Transport.Egress
   alias AshIntegration.Transport.OAuth2.TokenCache
   alias AshIntegration.Transport.Utils
+
+  # Token-request params the grant itself owns. An operator's `extra_params` must
+  # not smuggle these in — appended after `grant_type`/`scope`/`audience`/the
+  # credentials, a duplicate `grant_type` (etc.) would send the param twice, with
+  # server behaviour undefined. Drop them (with a warning) so the grant stays
+  # well-formed.
+  @reserved_token_params ~w(grant_type scope audience client_id client_secret)
 
   @typedoc "A decrypted client-credentials descriptor (the `client_secret` loaded)."
   @type descriptor :: struct()
@@ -82,7 +91,15 @@ defmodule AshIntegration.Transport.OAuth2 do
 
   defp do_request(descriptor, url, connect_options) do
     {form, headers} = build_request(descriptor)
-    req_options = Application.get_env(:ash_integration, :oauth2_req_options, [])
+
+    # Strip any operator-overridden `redirect`/`retry` before folding req_options in:
+    # they're appended after the pinned `redirect: false`/`retry: false` and Req is
+    # last-wins, so an override would re-enable redirect following on the token
+    # endpoint (which is `Egress.pin`ned) and bypass the SSRF pin — the same hole
+    # HttpWire guards on the delivery request.
+    req_options =
+      Application.get_env(:ash_integration, :oauth2_req_options, [])
+      |> Utils.strip_pinned_req_options()
 
     options =
       [
@@ -121,7 +138,14 @@ defmodule AshIntegration.Transport.OAuth2 do
 
     case descriptor.auth_style do
       :basic ->
-        credentials = Base.encode64("#{descriptor.client_id}:#{descriptor.client_secret}")
+        # RFC 6749 §2.3.1: form-urlencode the client id and secret BEFORE joining
+        # them with ":" and Base64-encoding, so a credential containing ':' or '%'
+        # round-trips correctly against strict IdPs.
+        credentials =
+          Base.encode64(
+            "#{form_encode(descriptor.client_id)}:#{form_encode(descriptor.client_secret)}"
+          )
+
         {base, [{"authorization", "Basic #{credentials}"}]}
 
       _post ->
@@ -134,10 +158,32 @@ defmodule AshIntegration.Transport.OAuth2 do
     end
   end
 
-  defp extra_params(params) when is_map(params),
-    do: Enum.map(params, fn {key, value} -> {to_string(key), to_string(value)} end)
+  defp extra_params(params) when is_map(params) do
+    params
+    |> Enum.map(fn {key, value} -> {to_string(key), to_string(value)} end)
+    |> reject_reserved_params()
+  end
 
   defp extra_params(_params), do: []
+
+  # Drop any grant-owned param an operator tried to set via `extra_params`, warning
+  # once per offending key. Silently dropping (rather than raising) keeps a stray
+  # config from failing every delivery while still sending a well-formed grant.
+  defp reject_reserved_params(pairs) do
+    {reserved, allowed} =
+      Enum.split_with(pairs, fn {key, _value} -> key in @reserved_token_params end)
+
+    for {key, _value} <- reserved do
+      Logger.warning(
+        "OAuth2: dropping reserved token-request param #{inspect(key)} from extra_params " <>
+          "(managed by the client-credentials grant; sending it again would duplicate it)"
+      )
+    end
+
+    allowed
+  end
+
+  defp form_encode(value), do: URI.encode_www_form(to_string(value))
 
   defp maybe_put(list, _key, value) when value in [nil, ""], do: list
   defp maybe_put(list, key, value), do: Keyword.put(list, key, value)

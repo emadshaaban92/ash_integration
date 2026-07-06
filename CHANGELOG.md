@@ -37,7 +37,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     warning: STARTTLS can be stripped by an active attacker, so `tls: :always` is
     recommended for internet-facing relays.
 
+- **Hardened the auth/secrets layer.** A pass over the outbound auth, signing, and
+  OAuth2 code closed several holes:
+  - `req_options` / `oauth2_req_options` can no longer override the transport's
+    pinned `redirect: false` / `retry: false`. Both are appended after the pinned
+    values and `Req` is last-wins, so `redirect: true` previously re-enabled
+    redirect following and let a 3xx bypass the egress IP pin (SSRF) — on both the
+    delivery request and the token-endpoint request. Those two keys are now stripped
+    from operator `req_options` (with a warning).
+  - A secret argument provided as an explicit `nil`, empty string, or whitespace-only
+    string is rejected at save time instead of saving a credential with no ciphertext
+    (which sent an empty credential, e.g. a bare `"Bearer "`).
+  - The api-key and stripe-signing `header_name` are validated at save time and
+    rejected if they contain a control character (CR/LF/DEL), matching the guard the
+    `custom` signing scheme already applies — a CRLF would split the request and
+    crash-loop the delivery outside the failure taxonomy.
+  - The OAuth2 token cache no longer lets a timed-out single-flight waiter pick up a
+    stale reply on a later fetch, and deregisters the waiter on timeout so the
+    leader's late reply doesn't linger as unexpected-message noise.
+  - Reserved OAuth2 token-request params (`grant_type`, `scope`, `audience`,
+    `client_id`, `client_secret`) smuggled in via `extra_params` are dropped so the
+    grant is never sent with duplicate form fields.
+
 ### Changed
+
+- **OAuth2 `:basic` token-endpoint auth now form-urlencodes the client id and
+  secret** before Base64-encoding them into the `Authorization` header, per RFC 6749
+  §2.3.1. **Behavior change:** a `client_id`/`client_secret` containing `:`, `%`, `+`,
+  or a space now encodes differently on the wire (correctly). A credential with no
+  such characters is unaffected; only a lenient IdP that accepted the previous
+  raw-joined form for a special-character secret will see the encoded form instead.
+
 
 - **BREAKING: reworked the delivery retry / backoff / terminal model** (see
   [`design/delivery-retry-model.md`](design/delivery-retry-model.md)). Timing, attempt
