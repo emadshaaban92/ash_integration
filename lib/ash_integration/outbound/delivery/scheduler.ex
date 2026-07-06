@@ -60,10 +60,14 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
 
   @impl true
   def init(_opts) do
-    Process.send_after(self(), :schedule, @idle_interval)
+    ref = Process.send_after(self(), :schedule, @idle_interval)
 
     {:ok,
-     %{last_run_at: System.monotonic_time(:millisecond) - @min_run_interval_ms, deferred: false}}
+     %{
+       last_run_at: System.monotonic_time(:millisecond) - @min_run_interval_ms,
+       deferred: false,
+       idle_timer: ref
+     }}
   end
 
   @impl true
@@ -77,8 +81,7 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
 
     if run_due?(state.last_run_at, now) do
       sweep()
-      Process.send_after(self(), :schedule, @idle_interval)
-      %{state | last_run_at: now, deferred: false}
+      %{state | last_run_at: now, deferred: false, idle_timer: rearm_idle(state.idle_timer)}
     else
       unless state.deferred do
         Process.send_after(self(), :schedule, @min_run_interval_ms - (now - state.last_run_at))
@@ -86,6 +89,17 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
 
       %{state | deferred: true}
     end
+  end
+
+  # Keep exactly ONE idle-sweep timer in flight. Each due run used to arm a fresh
+  # 10s timer without cancelling the previous one, so a busy period of `notify/0`-
+  # driven runs left roughly one stray idle timer per run perpetually queued —
+  # turning the "10s idle sweep" into a near-continuous one. Cancel the prior timer
+  # before arming the next so the idle cadence stays bounded regardless of how many
+  # runs fired inside a window.
+  defp rearm_idle(ref) do
+    if ref, do: Process.cancel_timer(ref)
+    Process.send_after(self(), :schedule, @idle_interval)
   end
 
   @doc false
@@ -116,27 +130,35 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
     {failed, pending} = Enum.split_with(heads, &(&1.state == :failed))
 
     progress =
-      bulk_schedule_failed(failed) +
+      bulk_schedule_failed(Enum.map(failed, & &1.id)) +
         Enum.count(pending, &(promote(&1.id) in [:scheduled, :suppressed]))
 
     if length(heads) >= @batch_size and progress > 0, do: sweep(), else: :ok
   end
 
+  @doc false
   # Re-promote the batch's `:failed` heads (retry re-promotions — always a real
   # `:schedule`, never content-suppressed) in ONE guarded bulk UPDATE instead of a
-  # get+update round-trip per head. The query-side guard replays the eligibility the
-  # sweep saw — still `:failed` AND still non-terminal — so a row that raced away
-  # (finalized by another scheduler, or taken `:expired` by the age sweep between
-  # read and write) matches nothing: a clean no-op, not a resurrect. `:schedule`'s
-  # changes (`SetAttribute` + `ClearClaim`) are all atomic-capable, so `:atomic`
-  # runs this as a single UPDATE; notifications still fire for host subscribers.
-  defp bulk_schedule_failed([]), do: 0
+  # get+update round-trip per head. The query-side guard replays the FULL eligibility
+  # the sweep saw — still `:failed`, still non-terminal, AND still past its
+  # `next_attempt_at` backoff — so a row that raced away matches nothing: a clean
+  # no-op, not a resurrect. The backoff predicate is load-bearing under a multi-node
+  # race: between the sweep's read and this write another node can promote the same
+  # `:failed` head, the relay can re-fail it, and it lands back `:failed` with a
+  # FRESH `next_attempt_at` in the future; without re-checking backoff here this
+  # stale batch would re-promote it immediately, skipping the new backoff. (It also
+  # covers the row being finalized elsewhere or taken `:expired` by the age sweep.)
+  # `:schedule`'s changes (`SetAttribute` + `ClearClaim`) are all atomic-capable, so
+  # `:atomic` runs this as a single UPDATE; notifications still fire for host
+  # subscribers. Public (`@doc false`) only so the write-time guard is unit-testable.
+  def bulk_schedule_failed([]), do: 0
 
-  defp bulk_schedule_failed(heads) do
-    ids = Enum.map(heads, & &1.id)
-
+  def bulk_schedule_failed(ids) do
     AshIntegration.event_delivery_resource()
-    |> Ash.Query.filter(id in ^ids and state == :failed and is_nil(terminal_reason))
+    |> Ash.Query.filter(
+      id in ^ids and state == :failed and is_nil(terminal_reason) and
+        (is_nil(next_attempt_at) or next_attempt_at <= now())
+    )
     |> Ash.bulk_update(:schedule, %{},
       strategy: [:atomic, :stream],
       authorize?: false,
@@ -172,9 +194,16 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
         apply_promotion(delivery, if(suppress?(delivery), do: :suppress, else: :schedule))
 
       # A `:failed` head raced in behind a stale id (normally bulk-promoted above) —
-      # a retry re-promotion, always a real `:schedule`.
+      # a retry re-promotion, always a real `:schedule`. Route it through the SAME
+      # backoff-guarded bulk UPDATE as the bulk path (`bulk_schedule_failed/1`) rather
+      # than the bare `apply_promotion/2` (which guards only state+terminal): otherwise
+      # the multi-node race — another node promotes, the relay re-fails it with a fresh
+      # `next_attempt_at`, this stale write lands — would skip the new backoff here too,
+      # the very bug the bulk path fixes, ten lines away. (`apply_promotion/2` can't
+      # gain the predicate unconditionally: the probe's `force_schedule/1` shares it and
+      # deliberately ignores backoff.)
       {:ok, %{state: :failed} = delivery} ->
-        apply_promotion(delivery, :schedule)
+        if bulk_schedule_failed([delivery.id]) == 1, do: :scheduled, else: :skipped
 
       # Raced away since the query (e.g. it advanced to `:parked`): clean no-op.
       {:ok, _delivery} ->

@@ -39,6 +39,17 @@ defmodule AshIntegration.Connection.Transformer do
        allow_nil?: true,
        public?: true
      )
+     # Origin of the current suspension: `:auto` (derived transport/response health),
+     # `:manual` (operator pause), or `:parked` (opt-in parked-backlog suspend). Nil
+     # when not suspended. Lets the derived-health recompute unwind ONLY its own
+     # `:auto` suspensions — never a manual or parked one. Always selected so the
+     # recompute's atomic unsuspend guard (`suspension_source == :auto`) can read it.
+     |> add_attribute_if_not_exists(:suspension_source, :atom,
+       allow_nil?: true,
+       public?: true,
+       always_select?: true,
+       constraints: [one_of: [:auto, :manual, :parked]]
+     )
      |> add_create_timestamp_if_not_exists(:created_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_subscriptions_relationship_if_not_exists()
@@ -273,12 +284,24 @@ defmodule AshIntegration.Connection.Transformer do
           allow_nil?: true
         )
 
+      # Who is suspending — defaults to `:manual` so a bare operator `suspend` is
+      # tagged manual and the derived-health recompute won't unwind it. `Health`
+      # passes `:auto`, `ParkedHealth` passes `:parked`.
+      source_arg =
+        Transformer.build_entity!(Dsl, [:actions, :update], :argument,
+          name: :source,
+          type: :atom,
+          allow_nil?: false,
+          default: :manual,
+          constraints: [one_of: [:auto, :manual, :parked]]
+        )
+
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :update,
           name: :suspend,
           accept: [],
           require_atomic?: false,
-          arguments: [reason_arg],
+          arguments: [reason_arg, source_arg],
           changes: [
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
               change: {Change.SetAttribute, [attribute: :suspended, value: true]}
@@ -306,6 +329,7 @@ defmodule AshIntegration.Connection.Transformer do
             set_change(:suspended, false),
             set_change(:suspended_at, nil),
             set_change(:suspension_reason, nil),
+            set_change(:suspension_source, nil),
             Transformer.build_entity!(Dsl, [:actions, :update], :change,
               change:
                 {AshIntegration.Outbound.Delivery.Changes.EmitResumeTelemetry,

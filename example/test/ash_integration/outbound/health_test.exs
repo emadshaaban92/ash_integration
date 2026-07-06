@@ -107,6 +107,66 @@ defmodule Example.Outbound.HealthTest do
         refute reload(s1).suspended
       end)
     end
+
+    test "recompute never unwinds a MANUAL suspension, even with a success in the window",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+
+        # A prior healthy delivery leaves a `:success` in the connection's window…
+        deliver!(create_event!(s1, state: :scheduled))
+        # …then an operator manually pauses the (healthy) connection for maintenance.
+        manual_suspend!(dest)
+        assert reload(dest).suspended
+        assert reload(dest).suspension_source == :manual
+
+        # Without a suspension-origin marker the recompute would silently resume it
+        # (its frozen window is full of successes). The `:auto`-only guard forbids it.
+        Health.recompute()
+        assert reload(dest).suspended, "a manual suspension must never be auto-resumed"
+      end)
+    end
+
+    test "recompute never unwinds a PARKED (opt-in) suspension, even with a success in the window",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+
+        # The subscription delivered fine before its transform broke — a `:success`
+        # sits in its response window — then the parked-backlog opt-in suspends it.
+        deliver!(create_event!(s1, state: :scheduled))
+        parked_suspend!(s1)
+        assert reload(s1).suspended
+        assert reload(s1).suspension_source == :parked
+
+        # Parked deliveries write no Log rows, so the window's success would otherwise
+        # make recompute unwind the parked-suspend on the next tick (the flap the
+        # design forbids — the parked-suspend is a DISTINCT suspension).
+        Health.recompute()
+        assert reload(s1).suspended, "an opt-in parked-suspend must never be auto-resumed"
+      end)
+    end
+
+    test "recompute still unwinds a legacy NULL-source suspension (upgrade path)",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+
+        # A prior healthy delivery leaves a `:success` in the connection's window.
+        deliver!(create_event!(s1, state: :scheduled))
+
+        # Simulate a suspension that predates the `suspension_source` column — the
+        # state of every in-flight suspension on upgrade day: suspended, source NULL.
+        force_suspended_null_source!(dest)
+        assert reload(dest).suspended
+        assert is_nil(reload(dest).suspension_source)
+
+        # NULL counts as `:auto`, so recompute (seeing the success) still unwinds it —
+        # preserving the pre-upgrade recovery guarantee (recompute used to unwind all).
+        Health.recompute()
+        refute reload(dest).suspended, "a legacy NULL-source suspension must still auto-unsuspend"
+      end)
+    end
   end
 
   describe "suspension leaves waiting heads for the probe (no park drain)" do
@@ -278,7 +338,141 @@ defmodule Example.Outbound.HealthTest do
     end
   end
 
+  describe "probe rotation & anchor survival (lifecycle regressions)" do
+    test "a failing probe advances the cursor so every suspended entity is probed (no starvation)" do
+      # More suspended connections than `probe_batch`, all failing fast. A failed probe
+      # is logged `failure_class: :probe` — which used to match neither the success nor
+      # the scope-class cursor filter, so the SAME batch was re-probed every tick and
+      # the rest were NEVER probed. The cursor must now advance on a failing probe.
+      with_health([window_attempts: 1, probe_batch: 1], fn ->
+        entities =
+          for _ <- 1..3 do
+            conn = create_connection!(create_user!())
+            ev = create_event!(create_subscription!(conn, "widget.updated"), state: :scheduled)
+            record_failure!(ev, "transport")
+            Health.recompute()
+            assert reload(conn).suspended
+            %{conn: conn, ev: ev}
+          end
+
+        # Three probe ticks, one entity each (probe_batch=1). After each, fail the
+        # promoted head (writes a `:probe` Log, returns it to `:failed`) so the next
+        # tick must rotate to a different entity.
+        probed =
+          for _ <- 1..3 do
+            Health.probe()
+
+            scheduled = Enum.filter(entities, &(reload(&1.ev).state == :scheduled))
+            assert [%{conn: conn, ev: ev}] = scheduled, "exactly one entity probed per tick"
+
+            record_suspended_failure!(reload(ev))
+            conn.id
+          end
+
+        assert Enum.sort(probed) == Enum.sort(Enum.map(entities, & &1.conn.id)),
+               "each failing probe must rotate to a fresh entity — all three probed"
+      end)
+    end
+
+    test "a suspended entity whose Log anchor was reaped is still probeable (no anchor required)",
+         %{connection: dest} do
+      with_window(1, fn ->
+        s1 = create_subscription!(dest, "widget.updated")
+        ev = create_event!(s1, state: :scheduled)
+        record_failure!(ev, "transport")
+        Health.recompute()
+        assert reload(dest).suspended
+        assert reload(ev).state == :failed
+
+        # Simulate retention reaping ALL of the connection's Log rows (it deletes every
+        # row past `delivery_days` with no status filter), so the entity loses its
+        # last probe/recompute anchor. An inner-join probe would drop it here — stuck
+        # suspended forever with zero signal.
+        delete_all_logs!()
+        assert logs() == []
+
+        # The LEFT-join probe keeps the anchorless entity (ordered first, most-starved)
+        # and promotes its waiting head so recovery can still be observed.
+        Health.probe()
+
+        assert reload(ev).state == :scheduled,
+               "an anchorless suspended entity must still be probed"
+      end)
+    end
+
+    test "the probe skips :manual suspensions, so head-less ones can't starve :auto probing" do
+      # The LEFT JOIN's NULLS-FIRST ordering would pin anchorless, unpromotable entities
+      # (a manual pause of a quiet connection; a parked-suspended subscription) to the
+      # front of the rotation forever — re-creating bug 1's starvation through a
+      # different door. Restricting the probe to `:auto` keeps them out entirely, so a
+      # genuinely-recovering `:auto` entity is still probed (and no real probe traffic
+      # is pushed through an operator-paused endpoint).
+      with_health([window_attempts: 1, probe_batch: 1], fn ->
+        # Two manually-suspended, head-less connections — anchorless (NULL cursor), so
+        # under `NULLS FIRST` they would sit ahead of any anchored `:auto` entity.
+        for _ <- 1..2 do
+          c = create_connection!(create_user!())
+          manual_suspend!(c)
+          assert reload(c).suspended and reload(c).suspension_source == :manual
+        end
+
+        # One `:auto`-suspended connection with a waiting head.
+        auto = create_connection!(create_user!())
+        ev = create_event!(create_subscription!(auto, "widget.updated"), state: :scheduled)
+        record_failure!(ev, "transport")
+        Health.recompute()
+        assert reload(auto).suspended and reload(auto).suspension_source == :auto
+
+        # probe_batch=1: without the `:auto` filter a NULL-anchor manual entity wins the
+        # single slot and promotes nothing (`:none`), and the `:auto` head is starved.
+        Health.probe()
+        assert reload(ev).state == :scheduled, "the :auto entity's head must still be probed"
+      end)
+    end
+  end
+
+  describe "start_link config threading" do
+    test "start_link threads window_attempts through, not just the intervals" do
+      # Previously init merged the opts but kept only the intervals; `window_attempts`
+      # / `probe_batch` were re-read from app env, so start_link opts were dropped.
+      start_supervised!({Health, window_attempts: 7})
+
+      on_exit(fn ->
+        :persistent_term.erase({Health, :window_attempts})
+        :persistent_term.erase({Health, :probe_batch})
+      end)
+
+      assert Health.window_attempts() == 7
+    end
+  end
+
   # ── Helpers ───────────────────────────────────────────────────────────────
+
+  defp manual_suspend!(record) do
+    Ash.update!(Ash.Changeset.for_update(record, :suspend, %{}, authorize?: false),
+      authorize?: false
+    )
+  end
+
+  defp parked_suspend!(record) do
+    Ash.update!(
+      Ash.Changeset.for_update(record, :suspend, %{reason: "parked", source: :parked},
+        authorize?: false
+      ),
+      authorize?: false
+    )
+  end
+
+  defp delete_all_logs!, do: Example.Repo.delete_all("outbound_delivery_logs")
+
+  # Force a connection into a suspension that predates the `suspension_source` column
+  # (suspended, source NULL) — the upgrade-day state the recompute must still unwind.
+  defp force_suspended_null_source!(connection) do
+    Example.Repo.update_all(
+      from(c in "outbound_connections", where: c.id == type(^connection.id, Ecto.UUID)),
+      set: [suspended: true, suspended_at: DateTime.utc_now(), suspension_source: nil]
+    )
+  end
 
   defp cancel!(event) do
     Ash.update!(Ash.Changeset.for_update(event, :cancel, %{}, authorize?: false),
