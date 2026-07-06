@@ -68,6 +68,12 @@ defmodule AshIntegration.Transport.KafkaConfig do
     end
   end
 
+  validations do
+    # Reject a malformed broker (`host:abc`, `host:99999`) at save time rather
+    # than letting `Utils.parse_brokers/1` raise at delivery.
+    validate AshIntegration.Transport.Validations.KafkaBrokers
+  end
+
   changes do
     # Store header names lowercase so they can't collide case-insensitively with
     # the library's wire headers or a transform override at delivery.
