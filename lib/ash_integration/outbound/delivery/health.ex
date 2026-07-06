@@ -116,6 +116,18 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     {:noreply, state}
   end
 
+  @impl true
+  def terminate(_reason, _state) do
+    # Erase the published knobs so a stopped GenServer leaves no stale values in the
+    # global `:persistent_term` for later direct `recompute/0`/`probe/0` calls in the
+    # same VM — a cross-test-contamination footgun the `Application.put_env`-based
+    # config didn't have (`get_config/1` prefers a published value unconditionally).
+    # Harmless on the app's own shutdown; a crash-restart re-publishes in `init/1`.
+    :persistent_term.erase({__MODULE__, :window_attempts})
+    :persistent_term.erase({__MODULE__, :probe_batch})
+    :ok
+  end
+
   defp run(fun, label) do
     fun.()
   rescue
@@ -191,14 +203,25 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   # or a `:parked` opt-in suspend has its own origin and recovery path — the recompute
   # must not silently resume it just because the entity's frozen `Log` window happens
   # to contain a success (a manually-paused-but-healthy connection; a parked-suspended
-  # subscription whose earlier lanes delivered fine). The `suspension_source == :auto`
-  # guard is what keeps those distinct suspensions from flapping. See
-  # `design/connection-health.md` §8 and the ParkedHealth "distinct suspension" note.
+  # subscription whose earlier lanes delivered fine). The source guard is what keeps
+  # those distinct suspensions from flapping. See `design/connection-health.md` §8 and
+  # the ParkedHealth "distinct suspension" note.
+  #
+  # `is_nil(suspension_source)` counts as `:auto`: a suspension that predates the
+  # `suspension_source` column (every in-flight suspension on upgrade day) carries
+  # `NULL`, and before this column recompute unwound ALL of them — so treating legacy
+  # `NULL` as auto-unwindable preserves the pre-upgrade recovery guarantee (and is
+  # self-healing: every new suspension records a real source). Mirrors the probe's
+  # `coalesce(suspension_source, 'auto')` candidate filter.
   defp unsuspend(scope, id) do
     scope.resource
     |> Ash.get!(id, authorize?: false)
     |> Ash.Changeset.for_update(:unsuspend, %{}, authorize?: false)
-    |> Ash.Changeset.filter(Ash.Expr.expr(suspended == true and suspension_source == :auto))
+    |> Ash.Changeset.filter(
+      Ash.Expr.expr(
+        suspended == true and (is_nil(suspension_source) or suspension_source == :auto)
+      )
+    )
     |> Ash.update(authorize?: false, return_notifications?: true)
     |> case do
       {:ok, _record, _notifications} -> :ok
@@ -248,9 +271,20 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   # absent from `recompute`'s candidate set) — stuck suspended forever with zero
   # signal. With the left join it stays probeable, and the first failing probe writes
   # a fresh `'probe'` anchor. (`e.id` breaks ties so anchorless entities still rotate
-  # deterministically.) A manual `suspend` on a genuinely quiet entity with no
-  # deliverable head still promotes nothing — `promote_probe/2` returns `:none` — so
-  # it remains operator-recovered (§8), just no longer excluded by a missing anchor.
+  # deterministically.)
+  #
+  # The candidate set is restricted to `:auto` (derived-health) suspensions — the ONLY
+  # kind this probe/recompute cycle can recover. This is load-bearing given the left
+  # join: a `:manual` operator pause or a `:parked` opt-in suspend is anchorless
+  # (quiet, or a backlog of unpromotable `:parked` heads), so its `NULL` cursor would
+  # pin it to the FRONT of the `NULLS FIRST` rotation forever — with ≥ `probe_batch`
+  # such entities the batch is all unpromotable and genuinely-recovering `:auto`
+  # suspensions would never be probed again, re-creating the very starvation this file
+  # set out to kill. Restricting to `:auto` also stops the probe from pushing a REAL
+  # delivery through an operator-paused (`:manual`) endpoint, and from burning a slot
+  # on a `:parked` subscription that `recompute` will never auto-resume anyway (bug 2).
+  # `coalesce(…, 'auto')` treats a legacy `NULL` (a suspension that predates the
+  # `suspension_source` column) as `:auto`, matching the unsuspend guard.
   # sobelow_skip ["SQL.Query"]
   defp pick_suspended(scope, m) do
     sql = """
@@ -265,6 +299,7 @@ defmodule AshIntegration.Outbound.Delivery.Health do
       LIMIT 1
     ) ll ON true
     WHERE e.suspended = true
+      AND coalesce(e.suspension_source, 'auto') = 'auto'
       AND NOT EXISTS (
         SELECT 1 FROM #{ed_table()} s
         WHERE s.#{scope.id_column} = e.id AND s.state = 'scheduled'
@@ -361,7 +396,10 @@ defmodule AshIntegration.Outbound.Delivery.Health do
   # Prefer the value the running GenServer published (start_link opts merged over app
   # env); fall back to the app-env config when no GenServer is running (direct
   # `recompute/0`/`probe/0` calls in tests/manual runs). This keeps both the
-  # start_link path and the `Application.put_env` path effective.
+  # start_link path and the `Application.put_env` path effective. Note the precedence
+  # inversion vs. the old app-env-only reader: once a GenServer has published (and
+  # until it terminates, which erases the keys), a runtime `Application.put_env` is
+  # ignored — a consistent snapshot rather than a mid-run-mutable read.
   defp get_config(key) do
     case :persistent_term.get({__MODULE__, key}, :__unset__) do
       :__unset__ -> Keyword.fetch!(config(), key)

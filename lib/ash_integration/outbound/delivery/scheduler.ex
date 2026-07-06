@@ -194,9 +194,16 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
         apply_promotion(delivery, if(suppress?(delivery), do: :suppress, else: :schedule))
 
       # A `:failed` head raced in behind a stale id (normally bulk-promoted above) —
-      # a retry re-promotion, always a real `:schedule`.
+      # a retry re-promotion, always a real `:schedule`. Route it through the SAME
+      # backoff-guarded bulk UPDATE as the bulk path (`bulk_schedule_failed/1`) rather
+      # than the bare `apply_promotion/2` (which guards only state+terminal): otherwise
+      # the multi-node race — another node promotes, the relay re-fails it with a fresh
+      # `next_attempt_at`, this stale write lands — would skip the new backoff here too,
+      # the very bug the bulk path fixes, ten lines away. (`apply_promotion/2` can't
+      # gain the predicate unconditionally: the probe's `force_schedule/1` shares it and
+      # deliberately ignores backoff.)
       {:ok, %{state: :failed} = delivery} ->
-        apply_promotion(delivery, :schedule)
+        if bulk_schedule_failed([delivery.id]) == 1, do: :scheduled, else: :skipped
 
       # Raced away since the query (e.g. it advanced to `:parked`): clean no-op.
       {:ok, _delivery} ->
