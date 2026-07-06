@@ -170,6 +170,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default SNI, so the upgrade verifies. `verify: :verify_none` still bypasses it,
   and an explicit `sni` still wins.
 
+- **Dispatch/capture correctness fixes.**
+  - Dispatch now fans a whole claimed batch out in a **single transaction**
+    regardless of `dispatch: [batch_size: N]` (previously Ash's default 100-row
+    chunking split a larger batch across transactions, and a partial commit could
+    re-dispatch already-committed events). The `batch_size` knob is therefore also
+    the dispatch transaction size — see its docs.
+  - The `:dispatch` update carries a `dispatched_at IS NULL` fence, so a lease-expiry
+    re-claim can't double-dispatch an event (no duplicate deliveries, no misleading
+    `dispatch_error`).
+  - `EventDelivery`'s `:reprocess` is now guarded to `state in [:pending, :parked,
+    :failed]`, so reprocessing an in-flight `:scheduled` row (duplicate delivery) or a
+    settled `:delivered`/`:suppressed`/`:cancelled` row (resurrecting final/superseded
+    state) is a no-op.
+  - `capture_isolation? true` now isolates a producer `throw`/`exit`, not just a
+    raise, so those failure modes no longer roll back the host's business action.
+  - A non-map `project/3` return now fails closed (parks all candidates) instead of
+    crashing the dispatch processor.
+
+- **Upgrade note — host-overridden Event/EventDelivery code interfaces.** The
+  injected code-interface set is now applied **per name**: a host that defines one
+  interface entry (e.g. `define :create`) keeps it and still receives the *rest* of
+  the library's interfaces. Previously any host-defined `:create` interface suppressed
+  the **entire** injected set. A host that relied on that as an opt-out (e.g. to keep
+  `destroy`/`cancel` off its public interface) will see those functions reappear after
+  this upgrade, with no compile error — remove them explicitly if that is not wanted.
+  The same applies to the injected `defaults` (`:read`/`:destroy`), which are now
+  skipped per action name so a host's explicit `read :read`/`destroy :destroy` no
+  longer collides.
+
 ## [0.2.0]
 
 ### Changed

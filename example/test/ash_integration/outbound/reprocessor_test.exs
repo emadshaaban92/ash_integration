@@ -150,6 +150,22 @@ defmodule Example.Outbound.ReprocessorTest do
       assert reload(scheduled).state == :scheduled
     end
 
+    test "refuses to resurrect a settled :cancelled row", %{connection: dest} do
+      # A :cancelled (e.g. coalesced-away) row carries superseded state; reprocessing
+      # it would re-deliver stale data out of order. The guard enforces the documented
+      # source set (:pending/:parked/:failed), so a settled state is a no-op.
+      sub = create_subscription!(dest, "widget.updated", "-- noop")
+      cancelled = build_delivery!(sub, %{state: :cancelled})
+
+      result =
+        cancelled
+        |> Ash.Changeset.for_update(:reprocess, %{last_error: nil}, authorize?: false)
+        |> Ash.update(authorize?: false)
+
+      assert match?({:error, _}, result)
+      assert reload(cancelled).state == :cancelled
+    end
+
     test "allows a :failed row (operator retry-now)", %{connection: dest} do
       sub = create_subscription!(dest, "widget.updated", "-- noop")
       failed = build_delivery!(sub, %{state: :failed})

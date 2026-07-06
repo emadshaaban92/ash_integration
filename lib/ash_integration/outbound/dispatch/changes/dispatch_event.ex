@@ -45,6 +45,15 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
   # `after_batch`), so there are no duplicate deliveries, no silent `dispatched_at`
   # re-stamp on skip-plan events, and no unique-constraint raise recording a
   # misleading `dispatch_error` on an event that dispatched fine.
+  #
+  # CAUTION: "the non-atomic bulk path silently drops a `StaleRecord`" is Ash
+  # *behavior* (deps/ash update/bulk.ex ~L2803: `{:error, %StaleRecord{}} -> {:cont,
+  # {:ok, results}}`), not a documented contract. If a future Ash surfaced it as an
+  # error instead, a fully-stale batch would flip to `{:error, _}` → `retry_one` per
+  # event → every retry also stale → the batch acked as failed though it actually
+  # dispatched. The "re-claimed already-dispatched skip-plan event is not re-stamped"
+  # test in `dispatch_relay_test` is keyed to this exact behavior and must NOT be
+  # simplified away — it is the tripwire for that Ash change.
   def batch_change(changesets, _opts, _context) do
     Enum.map(changesets, fn changeset ->
       changeset

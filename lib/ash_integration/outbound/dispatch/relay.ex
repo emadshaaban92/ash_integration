@@ -174,6 +174,14 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
     # had deliveries parked (default OFF → no-op). Kept out of the change's
     # `after_batch` so its count/update never runs inside the dispatch transaction —
     # only committed (non-failed) messages are considered.
+    #
+    # INVARIANT COUPLING: this reads the parked signal from the message SPECS, not
+    # from committed rows. A message whose `:dispatch` write was dropped as a
+    # `StaleRecord` (the item-2 lease-expiry fence) still keeps `status: :ok`, so its
+    # specs feed in here even though ITS rows were never inserted (the winning pass
+    # inserted them). Harmless today because `ParkedHealth` recounts from the DB — the
+    # spec-derived list is only a "which subscriptions to re-count" hint, never the
+    # count itself — but the spec ≠ committed-rows gap is why this must stay a hint.
     evaluate_parked_suspend(dispatched)
 
     dispatched
@@ -228,6 +236,13 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
         # `batch_size` to the batch length keeps it a single transaction, so the
         # result is only ever `:success` or `:error` (never `:partial_success`) and
         # a rollback commits nothing for `retry_one` to duplicate.
+        #
+        # `length(events)` is the whole batch because the Broadway batcher's
+        # `batch_size` and the producer's `claim_limit` are the same `config
+        # [:batch_size]` (see `start_link/1`), so `handle_batch` never receives more
+        # than that. This pin makes the dispatch transaction size = the `batch_size`
+        # knob — see its doc in `Dispatch.Supervisor`. If those two config wirings
+        # ever diverge, revisit this so it doesn't silently regress to chunking.
         batch_size: length(events),
         return_records?: true,
         return_errors?: true,

@@ -82,7 +82,8 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
       batch_size: [
         type: :pos_integer,
         default: 100,
-        doc: "Max events claimed from the outbox and fanned out per round."
+        doc:
+          "Max events claimed from the outbox and fanned out per round. This is ALSO the dispatch transaction size: the relay pins Ash's bulk-update `batch_size` to the batch length so the whole fan-out (stamps + delivery inserts + coalesce UPDATEs) commits atomically, which means one transaction holds locks proportional to batch_size × subscriptions. Keep it modest (hundreds, not tens of thousands) — a very large value trades atomicity for long-held row locks."
       ],
       max_attempts: [
         type: :pos_integer,

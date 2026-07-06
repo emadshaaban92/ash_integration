@@ -717,10 +717,10 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     )
   end
 
-  # Precondition filter for `:reprocess`: the update matches any row that is not
-  # in-flight (`state != :scheduled`). Blocks a reprocess of a `:scheduled` row, whose
-  # lease-clearing would otherwise cause a duplicate delivery, while still allowing
-  # the legitimate `:pending`/`:parked`/`:failed` sources.
+  # Precondition filter for `:reprocess`: the update matches only the legitimate
+  # source states (`state in [:pending, :parked, :failed]`). Blocks a reprocess of an
+  # in-flight `:scheduled` row (lease-clearing → duplicate delivery) AND of a settled
+  # `:delivered`/`:suppressed`/`:cancelled` row (resurrecting final/superseded state).
   defp guard_reprocessable do
     Transformer.build_entity!(Dsl, [:actions, :update], :change,
       change: AshIntegration.Outbound.Delivery.Changes.GuardReprocessable
