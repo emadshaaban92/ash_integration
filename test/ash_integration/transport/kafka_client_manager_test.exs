@@ -10,6 +10,7 @@ defmodule AshIntegration.Transport.KafkaClientManagerTest do
   # stays readable.
   @moduletag capture_log: true
 
+  alias AshIntegration.Outbound.Wire.Transports.Kafka
   alias AshIntegration.Transport.KafkaClientManager, as: Manager
 
   @brokers [{~c"broker-1", 9092}]
@@ -87,6 +88,11 @@ defmodule AshIntegration.Transport.KafkaClientManagerTest do
   end
 
   defp tracked(pid), do: :sys.get_state(pid).clients
+
+  # A connection config that drives `Kafka.build_client_config/1` down the
+  # verify_peer + match_fun branch. Rebuilt per call so each `build_client_config`
+  # mints a fresh ssl `match_fun` closure instance.
+  defp tls_config, do: %{security: %Ash.Union{type: :tls, value: %{verify: :verify_peer}}}
 
   setup do
     {backend, agent} = new_backend()
@@ -345,6 +351,61 @@ defmodule AshIntegration.Transport.KafkaClientManagerTest do
       assert Manager.client_id_for("int-1") in client_ids
       assert Manager.client_id_for("int-2") in client_ids
       assert map_size(tracked(pid)) == 2
+    end
+  end
+
+  # --- Fingerprint stability across the real TLS match_fun closure --------
+
+  # The reuse path ("unchanged config ⇒ don't restart") rests on the SAME effective
+  # config fingerprinting identically on every delivery. The one part of the config
+  # that could serialize differently per call is the ssl `match_fun` — an anonymous
+  # closure the transport bakes into `client_config`. The other reuse tests use a
+  # hand-written `[ssl: [verify: :verify_peer]]` that has no closure, so they don't
+  # cover the config that actually ships. These do: they run the REAL
+  # `Kafka.build_client_config/1` output (which carries
+  # `:public_key.pkix_verify_hostname_match_fun(:https)`) through the manager, and a
+  # *freshly rebuilt* config on the second ensure so a new closure instance is what
+  # has to fingerprint the same. If a future TLS-opts change introduces a per-call
+  # closure (a `verify_fun` capturing a fresh binary, an `sni_fun`, a timestamp),
+  # these fail instead of prod silently restarting the client on every produce.
+  describe "fingerprint stability across the real TLS match_fun closure" do
+    test "a freshly-rebuilt client_config is treated as unchanged (no restart)", %{
+      backend: backend,
+      agent: agent
+    } do
+      {:ok, client_config} = Kafka.build_client_config(tls_config())
+      # Sanity check: the config really does carry the match_fun closure this test
+      # exists to pin down — otherwise it would silently prove nothing.
+      assert [ssl: ssl] = client_config
+      assert is_function(get_in(ssl, [:customize_hostname_check])[:match_fun])
+
+      pid = start_manager(backend)
+      assert :ok = ensure(pid, "int-1", @brokers, client_config, @producer_config)
+
+      # A second ensure with a freshly-rebuilt config (new closure instance) must be
+      # treated as UNCHANGED — reuse the live client, no stop/start.
+      {:ok, client_config_2} = Kafka.build_client_config(tls_config())
+      assert :ok = ensure(pid, "int-1", @brokers, client_config_2, @producer_config)
+
+      assert length(starts(agent)) == 1
+      assert stops(agent) == []
+    end
+
+    test "a genuinely different TLS config still restarts", %{backend: backend, agent: agent} do
+      {:ok, verify_peer} = Kafka.build_client_config(tls_config())
+
+      {:ok, verify_none} =
+        Kafka.build_client_config(%{
+          security: %Ash.Union{type: :tls, value: %{verify: :verify_none}}
+        })
+
+      pid = start_manager(backend)
+      assert :ok = ensure(pid, "int-1", @brokers, verify_peer, @producer_config)
+      assert :ok = ensure(pid, "int-1", @brokers, verify_none, @producer_config)
+
+      # The closure stability must not be so coarse that it masks a real change.
+      assert length(starts(agent)) == 2
+      assert stops(agent) == [Manager.client_id_for("int-1")]
     end
   end
 end
