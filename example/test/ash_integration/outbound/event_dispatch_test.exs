@@ -306,6 +306,50 @@ defmodule Example.Outbound.EventDispatchTest do
     assert length(ids) == length(Enum.uniq(ids))
   end
 
+  describe "capture_isolation? catches non-exception failures too (item 4)" do
+    test "an isolated producer that THROWS drops the event; the host action commits",
+         %{connection: dest} do
+      create_subscription!(dest, "test.isolated_erratic")
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:ash_integration, :capture, :isolated_failure]
+        ])
+
+      widget = create_widget!(%{name: "throw", stock: 1})
+
+      # The host action committed despite the producer throwing (not raising)...
+      assert reload(widget).name == "throw"
+      # ...no event was captured, and the isolated-failure telemetry fired.
+      assert Ash.count!(Event, authorize?: false) == 0
+
+      assert_received {[:ash_integration, :capture, :isolated_failure], ^ref, %{count: 1},
+                       %{event_type: "test.isolated_erratic"}}
+    end
+
+    test "an isolated producer that EXITS drops the event; the host action commits",
+         %{connection: dest} do
+      create_subscription!(dest, "test.isolated_erratic")
+
+      widget = create_widget!(%{name: "exit", stock: 1})
+
+      assert reload(widget).name == "exit"
+      assert Ash.count!(Event, authorize?: false) == 0
+    end
+
+    test "WITHOUT isolation, a producer throw still rolls the host action back",
+         %{connection: dest} do
+      # capture_isolation? is opt-in: a coupled event's producer failure must remain
+      # coupled to the host transaction (no widget, no event).
+      create_subscription!(dest, "test.coupled_erratic")
+
+      assert catch_throw(create_widget!(%{name: "throw", stock: 1})) == :erratic_throw
+
+      assert Ash.count!(Event, authorize?: false) == 0
+      assert Ash.read!(Widget, authorize?: false) == []
+    end
+  end
+
   # ── Helpers ───────────────────────────────────────────────────────────────
 
   defp create_user! do

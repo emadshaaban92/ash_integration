@@ -25,7 +25,8 @@ defmodule AshIntegration.Outbound.Capture.PublishEvent do
   # The cost is coupling — a producer bug can block a business write.
   #
   # An event can opt OUT of that coupling per-declaration with `capture_isolation?
-  # true`: a `produce`/`event_key` failure for THAT event is caught, logged, and
+  # true`: a `produce`/`event_key` failure for THAT event — a raise, a `throw`, or an
+  # `exit` — is caught, logged, and
   # surfaced on `[:ash_integration, :capture, :isolated_failure]` telemetry, and the
   # event is **dropped** (the business action still commits). Use it for
   # non-critical events where availability beats outbox completeness. The shared
@@ -85,28 +86,43 @@ defmodule AshIntegration.Outbound.Capture.PublishEvent do
   end
 
   # One trigger → Event attrs for each subscribed version × produced data. When the
-  # event opts into `capture_isolation?`, a raising produce/event_key is caught,
-  # logged, and the event dropped — the host action commits regardless.
+  # event opts into `capture_isolation?`, a produce/event_key failure (raise, throw,
+  # or exit) is caught, logged, and the event dropped — the host action commits
+  # regardless.
   defp capture(%{capture_isolation?: true} = trigger, pairs, ctx, meta) do
     do_capture(trigger, pairs, ctx, meta)
   rescue
     exception ->
-      Logger.error(
-        "AshIntegration: isolated capture failure for event " <>
-          "\"#{trigger.event_type}\" (#{inspect(trigger.producer)}) — event dropped, host " <>
-          "action committed: #{Exception.message(exception)}"
-      )
-
-      :telemetry.execute(
-        [:ash_integration, :capture, :isolated_failure],
-        %{count: 1},
-        %{event_type: trigger.event_type, producer: trigger.producer}
-      )
-
-      []
+      # A raise is the common failure, but the documented contract is "a failure for
+      # THIS event is caught, the event dropped, the host action commits" — so a
+      # producer that `throw`s or `exit`s (or exits over a `GenServer.call`, etc.)
+      # must be isolated too, else it escapes the rescue and rolls the host txn back,
+      # exactly the coupling `capture_isolation?` promises to sever.
+      drop_isolated(trigger, Exception.message(exception))
+  catch
+    kind, reason when kind in [:throw, :exit] ->
+      drop_isolated(trigger, "#{kind}: #{inspect(reason)}")
   end
 
   defp capture(trigger, pairs, ctx, meta), do: do_capture(trigger, pairs, ctx, meta)
+
+  # Log + emit `:isolated_failure` telemetry and drop the event (return no attrs), so
+  # the host's business action commits regardless of the producer's failure mode.
+  defp drop_isolated(trigger, detail) do
+    Logger.error(
+      "AshIntegration: isolated capture failure for event " <>
+        "\"#{trigger.event_type}\" (#{inspect(trigger.producer)}) — event dropped, host " <>
+        "action committed: #{detail}"
+    )
+
+    :telemetry.execute(
+      [:ash_integration, :capture, :isolated_failure],
+      %{count: 1},
+      %{event_type: trigger.event_type, producer: trigger.producer}
+    )
+
+    []
+  end
 
   defp do_capture(%{event_type: type, producer: producer, versions: versions}, pairs, ctx, meta) do
     type

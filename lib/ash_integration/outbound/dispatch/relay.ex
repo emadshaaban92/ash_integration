@@ -10,7 +10,9 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
         → Batcher
             handle_batch:     Ash.bulk_update(:dispatch) — stamp dispatched_at +
                               materialize deliveries + coalesce, ALL in ONE
-                              transaction (the change's `after_batch`)
+                              transaction (the change's `after_batch`; `dispatch/2`
+                              pins `batch_size` to the batch length so Ash's default
+                              100-row chunking can't split it into several txns)
         → ack: notify the scheduler (the stamp already happened in the txn)
 
   **Prep happens outside the transaction, on purpose.** `project/3` is host code
@@ -172,6 +174,14 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
     # had deliveries parked (default OFF → no-op). Kept out of the change's
     # `after_batch` so its count/update never runs inside the dispatch transaction —
     # only committed (non-failed) messages are considered.
+    #
+    # INVARIANT COUPLING: this reads the parked signal from the message SPECS, not
+    # from committed rows. A message whose `:dispatch` write was dropped as a
+    # `StaleRecord` (the item-2 lease-expiry fence) still keeps `status: :ok`, so its
+    # specs feed in here even though ITS rows were never inserted (the winning pass
+    # inserted them). Harmless today because `ParkedHealth` recounts from the DB — the
+    # spec-derived list is only a "which subscriptions to re-count" hint, never the
+    # count itself — but the spec ≠ committed-rows gap is why this must stay a hint.
     evaluate_parked_suspend(dispatched)
 
     dispatched
@@ -216,6 +226,24 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
         # the default [:atomic_batches, :atomic] would skip them. return_records?
         # so after_batch receives the updated events.
         strategy: :stream,
+        # Force the WHOLE Broadway batch into ONE `transaction: :batch` chunk. Ash's
+        # bulk_update defaults to `batch_size: 100`, chunking a larger stream into
+        # one transaction PER 100 rows — which would (a) break the moduledoc's
+        # "all in ONE transaction" atomicity for a host-configured `dispatch:
+        # [batch_size: N]` above 100, and (b) turn a `:partial_success` (some chunks
+        # committed, some rolled back) into a whole-batch `{:error, _}` that
+        # `retry_one` would then re-dispatch over ALREADY-committed events. Pinning
+        # `batch_size` to the batch length keeps it a single transaction, so the
+        # result is only ever `:success` or `:error` (never `:partial_success`) and
+        # a rollback commits nothing for `retry_one` to duplicate.
+        #
+        # `length(events)` is the whole batch because the Broadway batcher's
+        # `batch_size` and the producer's `claim_limit` are the same `config
+        # [:batch_size]` (see `start_link/1`), so `handle_batch` never receives more
+        # than that. This pin makes the dispatch transaction size = the `batch_size`
+        # knob — see its doc in `Dispatch.Supervisor`. If those two config wirings
+        # ever diverge, revisit this so it doesn't silently regress to chunking.
+        batch_size: length(events),
         return_records?: true,
         return_errors?: true,
         stop_on_error?: false,

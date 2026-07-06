@@ -293,6 +293,70 @@ defmodule Example.Outbound.DispatchRelayTest do
     end
   end
 
+  describe "batch atomicity above Ash's default 100-row chunk (item 1)" do
+    test "a >100-event batch commits as one transaction; a poison row never strands committed batchmates",
+         %{connection: conn} do
+      s1 = create_subscription!(conn, "widget.updated")
+      for _ <- 1..101, do: create_widget!(%{name: "w", stock: 1})
+
+      events = Event |> Ash.Query.sort(id: :asc) |> Ash.read!(authorize?: false)
+      assert length(events) == 101
+
+      # Pre-seed the NEWEST event's delivery so its in-txn materialize hits the
+      # unique (event_id, subscription_id) identity and raises — a stand-in for any
+      # mid-batch infra failure, placed so it lands in the SECOND default 100-chunk.
+      poison = List.last(events)
+      seed_conflicting_delivery!(poison, s1, conn)
+
+      claimed = Dispatcher.claim(200)
+      assert length(claimed) == 101, "the whole >100 batch must be claimed at once"
+
+      results = run_batch(claimed)
+
+      # Pinning bulk_update's `batch_size` to the batch length makes the whole fan-out
+      # ONE transaction: the poison rolls it all back → `retry_one` re-dispatches each
+      # event in its own txn → the 100 healthy events commit, only the poison fails.
+      # Under Ash's default `batch_size: 100` the first chunk would have committed and
+      # `retry_one` would then re-dispatch those already-committed events (failing).
+      assert Enum.count(results, &(&1.status == :ok)) == 100
+      assert Enum.count(results, &match?({:failed, _}, &1.status)) == 1
+
+      failed = Enum.find(results, &match?({:failed, _}, &1.status))
+      assert failed.data.event.id == poison.id
+
+      healthy = Enum.reject(events, &(&1.id == poison.id))
+      assert Enum.all?(healthy, &(not is_nil(reload(&1).dispatched_at)))
+      # No duplicate deliveries: 100 healthy + the 1 pre-seeded poison row.
+      assert Ash.count!(EventDelivery, authorize?: false) == 101
+    end
+  end
+
+  describe "the dispatched_at IS NULL idempotency guard (lease-expiry re-claim, item 2)" do
+    test "a re-claimed already-dispatched skip-plan event is not re-stamped", %{connection: _conn} do
+      # A skip-plan event (no subscribers) stamps `dispatched_at` but writes no
+      # deliveries and has no unique identity guarding it. Simulate the fixed 60s
+      # lease expiring mid-fan-out: pass A dispatches + stamps, then pass B — still
+      # holding the pre-stamp claim — must be a NO-OP, not a silent re-stamp.
+      event = seed_bare_event!()
+      [claimed] = Dispatcher.claim(10)
+      assert claimed.id == event.id
+
+      run_batch([claimed])
+      t1 = reload(event).dispatched_at
+      refute is_nil(t1)
+
+      # Pass B reuses the SAME pre-stamp struct (dispatched_at still nil in memory);
+      # the guard pushes `AND dispatched_at IS NULL` onto the UPDATE, so it matches
+      # zero rows and the write is a dropped StaleRecord — no re-stamp.
+      run_batch([claimed])
+
+      assert reload(event).dispatched_at == t1,
+             "a re-claimed already-dispatched event must not have dispatched_at re-stamped"
+
+      assert Ash.count!(EventDelivery, authorize?: false) == 0
+    end
+  end
+
   describe "the real async pipeline" do
     test "an isolated start_supervised! relay claims and fans out an event end-to-end", %{
       connection: conn
@@ -327,6 +391,59 @@ defmodule Example.Outbound.DispatchRelayTest do
 
   defp message_for(event) do
     %Broadway.Message{data: event, acknowledger: Acknowledger.for_event(event.id)}
+  end
+
+  # Drive the real batcher stage for a claimed set in one shot (prepare → handle →
+  # handle_batch), returning the resulting messages, WITHOUT the per-100 chunking of
+  # `drain_dispatch!` (which claims 100 at a time). Lets a test hand `handle_batch` a
+  # >100-message batch directly.
+  defp run_batch(events) do
+    events
+    |> Enum.map(&message_for/1)
+    |> Relay.prepare_messages(%{})
+    |> Enum.map(&Relay.handle_message(:default, &1, %{}))
+    |> then(&Relay.handle_batch(:default, &1, %{}, %{}))
+  end
+
+  # Pre-seed the exact delivery the fan-out will try to create, so its in-txn insert
+  # hits the unique (event_id, subscription_id) identity and raises.
+  defp seed_conflicting_delivery!(event, subscription, connection) do
+    EventDelivery
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        event_id: event.id,
+        event_type: event.event_type,
+        version: event.version,
+        event_key: event.event_key,
+        delivery: %{"pre" => "existing"},
+        state: :pending,
+        subscription_id: subscription.id,
+        connection_id: connection.id
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
+  end
+
+  # A directly-seeded, undispatched Event with no subscribers — a "skip-plan" event
+  # (dispatch stamps it but writes no deliveries).
+  defp seed_bare_event! do
+    Event
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        event_type: "widget.updated",
+        version: 1,
+        event_key: "k-#{System.unique_integer([:positive])}",
+        source_resource: "widget",
+        source_resource_id: "r1",
+        source_action: "update",
+        data: %{"id" => "r1"}
+      },
+      authorize?: false
+    )
+    |> Ash.create!(authorize?: false)
   end
 
   defp create_user! do

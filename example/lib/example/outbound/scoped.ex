@@ -6,7 +6,10 @@ defmodule Example.Outbound.Scoped do
   (fail-closed → treated as skip), `"raise"` → `project` raises (deliveries park),
   `"bad_projection"` → `{:deliver, <non-map>}` (a botched redaction — must park, not
   ship full data), `"bad_decision"` → an unrecognized decision shape (must park, not
-  crash). `data` is read with string keys because at dispatch it's reloaded from the DB.
+  crash), `"non_map"` → `project/3` returns a non-map entirely (must park-all, not
+  crash on `Map.get`), `"struct"` → `project/3` returns a struct (a map, but not a
+  decision map — must park-all, not silently skip). `data` is read with string keys
+  because at dispatch it's reloaded from the DB.
   """
   use AshIntegration.Outbound.Declare.Producer
 
@@ -24,8 +27,27 @@ defmodule Example.Outbound.Scoped do
 
   @impl true
   def project(events, _subscriptions, _context) do
-    if Enum.any?(events, &(mode(&1) == "raise")), do: raise("boom in project")
+    cond do
+      Enum.any?(events, &(mode(&1) == "raise")) ->
+        raise("boom in project")
 
+      # An entirely non-map return (contract is `%{event_id => decision}`) — a
+      # producer bug that must fail-closed to park-all, not crash the processor with
+      # a BadMapError on the caller's `Map.get`.
+      Enum.any?(events, &(mode(&1) == "non_map")) ->
+        :not_a_map
+
+      # A STRUCT return (a struct is a map): must also park-all, not silently skip.
+      # `Map.get(struct, id, default)` would return the default for every event.
+      Enum.any?(events, &(mode(&1) == "struct")) ->
+        MapSet.new([:not, :a, :decision, :map])
+
+      true ->
+        project_decisions(events)
+    end
+  end
+
+  defp project_decisions(events) do
     for event <- events, mode(event) != "omit", into: %{} do
       case mode(event) do
         "skip" -> {event.id, {:skip, "test skip"}}

@@ -154,10 +154,22 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
 
       dsl_state
       |> Transformer.add_entity([:attributes], pk, type: :prepend)
-      |> Spark.Dsl.Transformer.set_option([:postgres], :migration_defaults,
-        id: "fragment(\"uuidv7()\")"
-      )
+      |> put_migration_default(:id, "fragment(\"uuidv7()\")")
     end
+  end
+
+  # Merge the library's `id` migration default into the host's existing keyword
+  # rather than replacing it wholesale (a bare `set_option` would wipe host-set
+  # defaults). Only runs when the host hasn't defined `:id` themselves.
+  defp put_migration_default(dsl_state, key, value) do
+    existing = Transformer.get_option(dsl_state, [:postgres], :migration_defaults) || []
+
+    Spark.Dsl.Transformer.set_option(
+      dsl_state,
+      [:postgres],
+      :migration_defaults,
+      Keyword.put(existing, key, value)
+    )
   end
 
   defp add_attribute_if_not_exists(dsl_state, name, type, opts) do
@@ -278,12 +290,9 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   defp add_defaults_if_not_set(dsl_state) do
     existing_defaults = Transformer.get_option(dsl_state, [:actions], :defaults) || []
 
-    has_read? = Enum.any?(existing_defaults, &(match?(:read, &1) or match?({:read, _}, &1)))
-
-    has_destroy? =
-      Enum.any?(existing_defaults, &(match?(:destroy, &1) or match?({:destroy, _}, &1)))
-
-    additions = if(has_read?, do: [], else: [:read]) ++ if(has_destroy?, do: [], else: [:destroy])
+    # Only add a default the host lacks — see `default_present?/3`.
+    additions =
+      Enum.reject([:read, :destroy], &default_present?(dsl_state, existing_defaults, &1))
 
     case additions do
       [] ->
@@ -292,6 +301,19 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
       _ ->
         Transformer.set_option(dsl_state, [:actions], :defaults, existing_defaults ++ additions)
     end
+  end
+
+  # A default is "present" if it's already in the `defaults` list OR the host defined
+  # an action of that name explicitly. `SetPrimaryActions` expands each `defaults`
+  # entry into an un-deduped `prepend_action`, so injecting a default the host already
+  # defined yields a duplicate-action DSL error. See the matching note in
+  # `AshIntegration.Outbound.Capture.Event.Transformer`.
+  defp default_present?(dsl_state, existing_defaults, type) do
+    Enum.any?(existing_defaults, fn
+      ^type -> true
+      {^type, _} -> true
+      _ -> false
+    end) or not is_nil(Info.action(dsl_state, type))
   end
 
   # ── Create ──────────────────────────────────────────────────────────────
@@ -597,13 +619,15 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
       # `:failed` (operator "retry now", incl. a terminal head) row re-enters the
       # deliverable lifecycle, so `clear_claim()` wipes the lease/backoff bookkeeping
       # AND `terminal_reason`: a stale terminal verdict left on the row would silently
-      # re-terminal it on its first retryable failure.
+      # re-terminal it on its first retryable failure. `guard_reprocessable()` refuses
+      # the transition on an in-flight `:scheduled` row (only) so reprocessing can't
+      # clear its lease and cause a duplicate delivery.
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :update,
           name: :reprocess,
           accept: [:delivery, :body_hash, :last_error],
           require_atomic?: false,
-          changes: [set_state(:pending), clear_claim()]
+          changes: [guard_reprocessable(), set_state(:pending), clear_claim()]
         )
 
       Transformer.add_entity(dsl_state, [:actions], action, type: :append)
@@ -693,6 +717,16 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     )
   end
 
+  # Precondition filter for `:reprocess`: the update matches only the legitimate
+  # source states (`state in [:pending, :parked, :failed]`). Blocks a reprocess of an
+  # in-flight `:scheduled` row (lease-clearing → duplicate delivery) AND of a settled
+  # `:delivered`/`:suppressed`/`:cancelled` row (resurrecting final/superseded state).
+  defp guard_reprocessable do
+    Transformer.build_entity!(Dsl, [:actions, :update], :change,
+      change: AshIntegration.Outbound.Delivery.Changes.GuardReprocessable
+    )
+  end
+
   # Clear the relay's lease + backoff bookkeeping AND the terminal verdict (used
   # when a row (re-)enters the deliverable lifecycle) so it doesn't inherit a stale
   # `claimed_at`/`next_attempt_at`/`terminal_reason`.
@@ -713,35 +747,39 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   # ── Code interface ──────────────────────────────────────────────────────
 
   defp add_code_interface_if_not_exists(dsl_state) do
-    existing = Transformer.get_entities(dsl_state, [:code_interface])
-
-    if Enum.any?(existing, &(&1.name == :create)) do
+    existing_names =
       dsl_state
-    else
-      defines = [
-        {:create, [action: :create]},
-        {:read_all, [action: :read]},
-        {:schedule, [action: :schedule]},
-        {:deliver, [action: :deliver]},
-        {:suppress, [action: :suppress]},
-        {:record_failure, [action: :record_failure]},
-        {:cancel, [action: :cancel]},
-        {:reprocess, [action: :reprocess]},
-        {:destroy, [action: :destroy]}
-      ]
+      |> Transformer.get_entities([:code_interface])
+      |> MapSet.new(& &1.name)
 
-      Enum.reduce(defines, dsl_state, fn {name, opts}, state ->
-        {:ok, define} =
-          Transformer.build_entity(
-            Dsl,
-            [:code_interface],
-            :define,
-            Keyword.put(opts, :name, name)
-          )
+    defines = [
+      {:create, [action: :create]},
+      {:read_all, [action: :read]},
+      {:schedule, [action: :schedule]},
+      {:deliver, [action: :deliver]},
+      {:suppress, [action: :suppress]},
+      {:record_failure, [action: :record_failure]},
+      {:cancel, [action: :cancel]},
+      {:reprocess, [action: :reprocess]},
+      {:destroy, [action: :destroy]}
+    ]
 
-        Transformer.add_entity(state, [:code_interface], define, type: :append)
-      end)
-    end
+    # Add each interface only when the host hasn't already defined one of that name,
+    # so a host overriding a single `define` doesn't get the whole set re-added on
+    # top (a duplicate-name DSL error). See the matching note in the Event transformer.
+    defines
+    |> Enum.reject(fn {name, _opts} -> MapSet.member?(existing_names, name) end)
+    |> Enum.reduce(dsl_state, fn {name, opts}, state ->
+      {:ok, define} =
+        Transformer.build_entity(
+          Dsl,
+          [:code_interface],
+          :define,
+          Keyword.put(opts, :name, name)
+        )
+
+      Transformer.add_entity(state, [:code_interface], define, type: :append)
+    end)
   end
 
   # ── Identity (idempotency) ──────────────────────────────────────────────
