@@ -91,6 +91,12 @@ defmodule AshIntegration.Outbound.Retention do
         default: 365,
         doc:
           "Retention window (days) for the immutable Event log — the source of truth, kept independently of (and typically longer than) deliveries. Clamped up to delivery_days if set shorter."
+      ],
+      command_days: [
+        type: :pos_integer,
+        default: 90,
+        doc:
+          "Retention window (days) for terminal CommandExecution rows. The reap window IS the idempotency horizon: a duplicate arriving after its original is reaped re-applies. Only :applied/:failed rows are reaped — :dead_lettered (unexecuted work with an operator recourse) and :pending are never reaped."
       ]
     ]
   end
@@ -119,6 +125,22 @@ defmodule AshIntegration.Outbound.Retention do
       event_delivery: bounded_delete(delivery_query(now, delivery_days), limit),
       event: bounded_delete(event_query(now, event_days), limit)
     }
+    |> sweep_commands(now, limit)
+  end
+
+  # The command-row sweep is inbound-only: a pure-outbound host hasn't wired a
+  # `command_execution_resource`, so reaching for it (a `Keyword.fetch!`) would
+  # raise on every pass. Gate it on the same opt-in switch the supervisor uses.
+  defp sweep_commands(result, now, limit) do
+    if AshIntegration.inbound_configured?() do
+      Map.put(
+        result,
+        :command_execution,
+        bounded_delete(command_query(now, command_days()), limit)
+      )
+    else
+      result
+    end
   end
 
   @impl true
@@ -131,6 +153,7 @@ defmodule AshIntegration.Outbound.Retention do
     put_config(:delete_limit, config[:delete_limit])
     put_config(:delivery_days, config[:delivery_days])
     put_config(:event_days, config[:event_days])
+    put_config(:command_days, config[:command_days])
 
     schedule(config[:interval_ms])
     {:ok, %{interval: config[:interval_ms]}}
@@ -156,6 +179,7 @@ defmodule AshIntegration.Outbound.Retention do
   defp delete_limit, do: get_config(:delete_limit)
   defp delivery_days, do: get_config(:delivery_days)
   defp event_days, do: get_config(:event_days)
+  defp command_days, do: get_config(:command_days)
 
   defp get_config(key), do: :persistent_term.get({__MODULE__, key}, default(key))
 
@@ -197,6 +221,17 @@ defmodule AshIntegration.Outbound.Retention do
     |> Ash.Query.filter(
       created_at < ^threshold and not is_nil(dispatched_at) and not exists(deliveries, true)
     )
+  end
+
+  # The reap window IS the idempotency horizon. Only terminal-and-deterministic
+  # rows are reaped: `:dead_lettered` is unexecuted work with an operator recourse
+  # (reaping it would silently drop a command — the inbound twin of "never reap
+  # poison"), and `:pending` either applies or dead-letters.
+  defp command_query(now, days) do
+    threshold = DateTime.add(now, -days, :day)
+
+    AshIntegration.command_execution_resource()
+    |> Ash.Query.filter(state in [:applied, :failed] and updated_at < ^threshold)
   end
 
   # ── Bounded delete via Ash ──────────────────────────────────────────────────

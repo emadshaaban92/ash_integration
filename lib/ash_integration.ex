@@ -124,6 +124,35 @@ defmodule AshIntegration do
   end
 
   @doc """
+  The host-owned `CommandExecution` (the inbound idempotency record + audit trail
+  + dead-letter queue), carrying the `AshIntegration.Inbound.CommandExecution`
+  extension.
+  """
+  def command_execution_resource do
+    Keyword.fetch!(config(), :command_execution_resource)
+  end
+
+  @doc """
+  Whether the host has opted into the inbound command stage by wiring a
+  `command_execution_resource`. Pure-outbound hosts leave it unset; everything
+  inbound (boot verification, the relay, the retention sweep of command rows)
+  gates on this so an unconfigured host is never touched.
+  """
+  def inbound_configured? do
+    Keyword.has_key?(config(), :command_execution_resource)
+  end
+
+  @doc """
+  Domains scanned to build the inbound command catalog
+  (`AshIntegration.Inbound.Declare.Registry`). Each domain's resources are
+  filtered to those carrying the `AshIntegration.Inbound.Declare.Commands`
+  extension.
+  """
+  def command_domains do
+    Keyword.get(config(), :command_domains, [])
+  end
+
+  @doc """
   Domains scanned to build the event-first source registry
   (`AshIntegration.Outbound.Declare.Registry`). Each domain's resources are filtered to
   those carrying the `AshIntegration.Outbound.Declare.Source` extension.
