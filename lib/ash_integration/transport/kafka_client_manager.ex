@@ -37,6 +37,42 @@ defmodule AshIntegration.Transport.KafkaClientManager do
   (not via an async cast), a `:cleanup` message processed afterwards sees a fresh
   timestamp and cannot tear the client down between `ensure_client/4` returning
   `:ok` and the caller's produce.
+
+  ## Operational characteristics (costs of the above)
+
+    * **Config edits are applied live.** A config change stops the running client
+      and starts a new one *immediately*, so an operator rotating SASL credentials
+      (or editing brokers) at 5pm applies the change to in-flight traffic at once,
+      not at the next client restart. The flip side: an edit to *unreachable*
+      brokers or *bad* credentials takes a previously-healthy pipeline down — the
+      old client is stopped first, and if the new `start_client` fails, deliveries
+      fail (retryably) until the config is fixed or reverted. This inverts the old
+      behaviour, where a bad edit was silently ignored while the old client stayed
+      alive. It is deliberate: config should mean what it says, and the suspension
+      subsystem surfaces a persistently-bad edit.
+
+    * **A manager restart briefly restarts healthy clients.** After the manager
+      process crashes/restarts, its state is empty but brod clients survive under
+      `brod_sup`; the first delivery per integration adopts each survivor by
+      stopping and restarting it (its config is unknown, so a restart is the only
+      way to guarantee current config). Under load this shows up as a short burst
+      of produce failures across all active integrations at once — expected, not a
+      mystery incident.
+
+    * **Produce serializes through this one process.** Every delivery calls
+      `ensure_client/4`, so all Kafka produce for all integrations funnels through
+      this single GenServer (the price of recording activity synchronously — see
+      the race note above). A restart that *stalls* — e.g. `stop_client` on a
+      wedged brod client — head-of-line-blocks deliveries for *other*,
+      healthy integrations until their `GenServer.call` times out. Mitigating
+      factor: `:brod.start_client/3` does NOT block on unreachable brokers in
+      brod 4.x — `brod_client:init/1` only creates an ETS table and returns
+      `{ok, state, {continue, init}}`, with the metadata/broker connection made
+      asynchronously in `handle_continue/2` *after* `start_client` has returned —
+      so the common misconfigured-broker case is fast. If head-of-line blocking
+      ever becomes a real problem, the fix is per-integration processes
+      (`Registry` + `DynamicSupervisor`), a larger change deferred out of this
+      module for now.
   """
 
   use GenServer
@@ -210,11 +246,23 @@ defmodule AshIntegration.Transport.KafkaClientManager do
       [auto_start_producers: true, default_producer_config: producer_config]
   end
 
-  # A stable fingerprint of everything that determines client identity. `phash2`
-  # is deterministic for equal terms (including the ssl `match_fun` closure), so a
-  # changed broker, rotated SASL credential, or changed producer config yields a
+  # A collision-free fingerprint of everything that determines client identity, so
+  # a changed broker, rotated SASL credential, or changed producer config yields a
   # different fingerprint and triggers a restart.
-  defp fingerprint(brokers, config), do: :erlang.phash2({brokers, config})
+  #
+  # A SHA-256 digest of the config term — deliberately NOT `phash2` (27-bit, so two
+  # configs could in principle collide, and a fingerprint collision on a rotated
+  # credential is precisely the bug this guards against), and NOT the raw
+  # `{brokers, config}` term compared with `==` (the `client_config` carries the
+  # DECRYPTED SASL password, which must not sit in this GenServer's state where a
+  # crash-log state dump would leak it). The digest is collision-free in practice
+  # and secret-free. `term_to_binary` is deterministic for equal terms, including
+  # the ssl `match_fun` closure — the "same config twice ⇒ no restart" test is the
+  # guard that keeps a future TLS-opts refactor (a per-call closure) from silently
+  # restarting the client on every delivery.
+  defp fingerprint(brokers, config) do
+    :crypto.hash(:sha256, :erlang.term_to_binary({brokers, config}))
+  end
 
   defp track(state, integration_id, fingerprint) do
     put_in(state, [:clients, integration_id], %{fingerprint: fingerprint, last_active: now()})
