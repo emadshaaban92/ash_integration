@@ -139,11 +139,34 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   defp run_deliveries(messages) do
     connection = hd(messages).data.connection
     deliveries = Enum.map(messages, & &1.data)
-    results = Transport.deliver_batch(connection, deliveries)
+    results = deliver_batch(connection, deliveries)
 
     Enum.each(messages, fn %Message{data: delivery} ->
       apply_result(delivery, Map.get(results, delivery.id))
     end)
+  end
+
+  # `Transport.deliver_batch/2` is contracted to return one `{:ok, _}` / `{:error, _}`
+  # per id and NEVER raise — but nothing enforces that. A transport bug that raises
+  # would, unguarded, crash the batcher: Broadway fails the whole batch and the
+  # acknowledger records NOTHING (no `last_error`, no `next_attempt_at` backoff), so
+  # every row stays `:scheduled` and silently retries at the lease cadence forever.
+  # Rescue it into a synthetic per-row retryable `:error` (no `retryable`/`failure_class`
+  # keys ⇒ retryable, classified `:response`) so each row flows through the SAME
+  # `record_failure` path — durable backoff + a visible `last_error` — as a real
+  # failure, exactly as a missing per-row result is handled in `apply_result/2`.
+  defp deliver_batch(connection, deliveries) do
+    Transport.deliver_batch(connection, deliveries)
+  rescue
+    exception ->
+      Logger.error(
+        "Outbound delivery: transport raised for connection #{connection.id} — recording " <>
+          "#{length(deliveries)} row(s) as a retryable failure:\n" <>
+          Exception.format(:error, exception, __STACKTRACE__)
+      )
+
+      error = {:error, %{error_message: "transport raised: #{Exception.message(exception)}"}}
+      Map.new(deliveries, fn delivery -> {delivery.id, error} end)
   end
 
   # ── Per-row outcome application (with the lease-token fence) ──────────────────
