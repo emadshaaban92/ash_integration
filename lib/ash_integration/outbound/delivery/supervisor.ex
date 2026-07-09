@@ -161,6 +161,18 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
   def backoff_jitter_ratio, do: @backoff_jitter_ratio
 
   @doc """
+  Configured `:concurrency` for this stage — the peak number of delivery Broadway
+  processors each holding a repo connection for the per-row bookkeeping write
+  (`:deliver` / `:record_failure`). Read fresh (validated) from config; consumed by
+  the boot-time pool check (`AshIntegration.Outbound.PoolCheck`).
+  """
+  def concurrency do
+    Application.get_env(:ash_integration, @config_key, [])
+    |> validate!()
+    |> Keyword.fetch!(:concurrency)
+  end
+
+  @doc """
   Soft-lease window (seconds) a claimed delivery is reserved before reclaim.
   DERIVED from the (globally-capped) transport timeout plus a fixed margin — not a
   host knob — so the lease always outlives the slowest attempt.

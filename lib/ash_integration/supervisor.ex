@@ -31,6 +31,13 @@ defmodule AshIntegration.Supervisor do
 
       warn_if_catalog_empty()
 
+      # Boot check: the dispatch/delivery concurrency knobs, the relay producers, the
+      # scheduler, health, and retention all share the host repo's connection pool.
+      # Warn loudly (never crash) if their total exceeds `pool_size`, so an
+      # oversubscription surfaces here rather than as DBConnection queue timeouts that
+      # land on the failure paths and burn the dispatch poison budget.
+      AshIntegration.Outbound.PoolCheck.warn_if_oversubscribed()
+
       children = [
         AshIntegration.Transport.KafkaClientManager,
         # The scheduler (brain): promotes pending → scheduled, owning ordering

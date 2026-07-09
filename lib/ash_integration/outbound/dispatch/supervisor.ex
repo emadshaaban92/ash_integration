@@ -124,6 +124,18 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
   """
   def lease_seconds, do: @lease_seconds
 
+  @doc """
+  Configured `:concurrency` for this stage — the peak number of dispatch Broadway
+  batchers each holding a repo connection for the fan-out transaction. Read fresh
+  (validated) from config; consumed by the boot-time pool check
+  (`AshIntegration.Outbound.PoolCheck`).
+  """
+  def concurrency do
+    Application.get_env(:ash_integration, @config_key, [])
+    |> validate!()
+    |> Keyword.fetch!(:concurrency)
+  end
+
   @doc false
   def batch_timeout_ms, do: @batch_timeout_ms
 
