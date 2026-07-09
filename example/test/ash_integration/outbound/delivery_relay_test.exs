@@ -372,6 +372,65 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
+  describe "transport raise (a bug) is recorded, not silently retried forever" do
+    test "a raising transport records the row :failed with backoff instead of crashing the batch",
+         %{connection: conn} do
+      # A transport bug: instead of honoring the `{:ok, _}` / `{:error, _}` tuple
+      # contract, `deliver_batch/2` raises. Unguarded this crashes the batcher —
+      # Broadway fails the whole batch and the acknowledger records NOTHING, so the
+      # row keeps its `:scheduled` state and silently retries at the lease cadence
+      # forever (no `last_error`, no backoff). The relay must rescue it into a
+      # per-row retryable failure that flows through the normal `record_failure` path.
+      Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn _conn ->
+        raise "boom: simulated transport bug"
+      end)
+
+      d = scheduled_delivery!(create_subscription!(conn))
+
+      # The drain must complete — a rescued raise never propagates out of the batch.
+      drain_delivery!()
+
+      reloaded = reload(d)
+      # Recorded like any healthy retryable failure: `:failed` head holding its lane,
+      # a durable backoff cursor, the lease released, and a VISIBLE error — never a
+      # terminal verdict (a transport bug is not the target's permanent rejection).
+      assert reloaded.state == :failed
+      assert is_nil(reloaded.terminal_reason)
+      refute is_nil(reloaded.next_attempt_at)
+      assert is_nil(reloaded.claimed_at)
+      assert reloaded.last_error =~ "transport raised"
+    end
+
+    test "one connection's raise does not stop OTHER connections' rows from delivering", %{
+      owner: owner
+    } do
+      # Each connection is its own batch (partitioned by `connection_id`), so a raise
+      # confined to one batch must leave the others untouched — the healthy
+      # connection's row still delivers.
+      raising_conn = create_connection!(owner, base_url: "http://localhost:9999/raise")
+      healthy_conn = create_connection!(owner, base_url: "http://localhost:9999/ok")
+      raising = scheduled_delivery!(create_subscription!(raising_conn))
+      healthy = scheduled_delivery!(create_subscription!(healthy_conn))
+
+      # Both connections share the stubbed transport module, so key the behaviour off
+      # the request path: raise for the raising connection, succeed for the healthy one.
+      Req.Test.stub(AshIntegration.Outbound.Wire.Transports.Http, fn conn ->
+        if conn.request_path == "/raise" do
+          raise "boom: simulated transport bug"
+        else
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, Jason.encode!(%{status: "ok"}))
+        end
+      end)
+
+      drain_delivery!()
+
+      assert reload(healthy).state == :delivered
+      assert reload(raising).state == :failed
+    end
+  end
+
   describe "handle_batch/4 (Broadway contract)" do
     test "returns every received message, even on a mixed deliver + no-op batch", %{
       connection: conn
