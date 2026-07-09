@@ -134,24 +134,54 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
 
   def record_dispatch_errors(id_reasons) when is_list(id_reasons) do
     max_attempts = Stage.max_attempts()
+    reason_by_id = Map.new(id_reasons, fn {event_id, reason} -> {to_string(event_id), reason} end)
 
-    for {event_id, reason} <- id_reasons do
-      case Ash.get(AshIntegration.event_resource(), event_id, authorize?: false) do
-        {:ok, event} ->
-          event
-          |> Ash.Changeset.for_update(
-            :mark_dispatched,
-            %{dispatch_error: truncate(dispatch_error_for(event, reason, max_attempts))},
-            authorize?: false
-          )
-          |> Ash.update(authorize?: false)
-
-        _ ->
-          :ok
-      end
-    end
+    # One read for the whole failed batch instead of a `get` per event — a
+    # whole-batch infra failure otherwise turns the ack into N `get`s + N updates.
+    # Ids absent from the outbox simply don't come back (nothing to record).
+    AshIntegration.event_resource()
+    |> Ash.Query.filter(id in ^Map.keys(reason_by_id))
+    |> Ash.read!(authorize?: false)
+    |> Enum.map(fn event ->
+      reason = Map.fetch!(reason_by_id, to_string(event.id))
+      # Runs the poison side effects (operator log + telemetry) exactly once per
+      # terminal event, and yields this event's `dispatch_error` string.
+      {truncate(dispatch_error_for(event, reason, max_attempts)), event}
+    end)
+    # Group by the resolved message so each distinct `dispatch_error` is written in
+    # a single `bulk_update`. A whole-batch infra failure shares one reason across
+    # all (non-terminal) events, so it collapses to ONE update query.
+    |> Enum.group_by(fn {error, _event} -> error end, fn {_error, event} -> event end)
+    |> Enum.each(fn {dispatch_error, events} ->
+      record_group(events, dispatch_error)
+    end)
 
     :ok
+  end
+
+  defp record_group(events, dispatch_error) do
+    result =
+      Ash.bulk_update(events, :mark_dispatched, %{dispatch_error: dispatch_error},
+        # `:atomic_batches` writes each group in one `UPDATE ... WHERE id = ANY(...)`;
+        # `:stream` is the fallback if a host adds a non-atomic change to the seam.
+        strategy: [:atomic_batches, :stream],
+        return_records?: false,
+        return_errors?: true,
+        # Ack path: don't emit Ash notifications for a visibility-only error stamp.
+        notify?: false,
+        authorize?: false
+      )
+
+    case result.status do
+      :error ->
+        Logger.error(
+          "Outbound dispatch: recording dispatch_error failed for " <>
+            "#{length(events)} event(s): #{inspect(result.errors)}"
+        )
+
+      _ ->
+        :ok
+    end
   end
 
   # A terminal (poison) event — it has burned through every dispatch attempt, so

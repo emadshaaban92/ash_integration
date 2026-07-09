@@ -61,6 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The dispatch ack now records `dispatch_error`s in bulk.** On a failed dispatch
+  the acknowledger called `record_dispatch_errors/1`, which did a sequential
+  `Ash.get` + `Ash.update` per failed event — so a whole-batch infra failure over a
+  `batch_size`-of-N batch cost ~2·N queries in the ack path. It now loads the failed
+  events in one read and writes them with `Ash.bulk_update` grouped by the resolved
+  message, so a batch that fails with a shared reason collapses to a single `UPDATE`.
+  Behavior is unchanged: `dispatched_at` is still never stamped, the per-event
+  poison log + telemetry still fire exactly once, and the `mark_dispatched` host
+  seam is still the write path (a host's custom change falls back to per-record
+  streaming).
+
 - **OAuth2 `:basic` token-endpoint auth now form-urlencodes the client id and
   secret** before Base64-encoding them into the `Authorization` header, per RFC 6749
   §2.3.1. **Behavior change:** a `client_id`/`client_secret` containing `:`, `%`, `+`,
