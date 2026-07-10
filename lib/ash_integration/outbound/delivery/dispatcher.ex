@@ -72,21 +72,9 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
     # bump back with it — so a `:scheduled` row is never left leased-but-unemitted
     # (invisible until its lease expires, its `attempts` bumped for work never done). Any
     # failure yields [].
-    result =
-      Ash.transact(resource, fn ->
-        case repo.query(sql, [lease, limit], log: AshIntegration.query_log_level()) do
-          {:ok, %{rows: rows}} ->
-            case rows |> Enum.map(fn [id] -> id end) |> load_claimed() do
-              {:ok, deliveries} -> deliveries
-              {:error, error} -> {:error, error}
-            end
-
-          {:error, error} ->
-            {:error, error}
-        end
-      end)
-
-    case result do
+    resource
+    |> Ash.transact(fn -> claim_and_load(repo, sql, [lease, limit]) end)
+    |> case do
       {:ok, deliveries} ->
         deliveries
 
@@ -101,6 +89,17 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
     e ->
       Logger.error("Outbound delivery: claim failed: #{Exception.message(e)}")
       []
+  end
+
+  # Runs inside the claim transaction: lease UPDATE, then reload by id. Returns the bare
+  # loaded deliveries (so `Ash.transact` wraps them in `{:ok, _}`) or `{:error, reason}` on
+  # a UPDATE/reload failure (so `Ash.transact` rolls the lease back).
+  defp claim_and_load(repo, sql, params) do
+    with {:ok, %{rows: rows}} <-
+           repo.query(sql, params, log: AshIntegration.query_log_level()),
+         {:ok, deliveries} <- rows |> Enum.map(fn [id] -> id end) |> load_claimed() do
+      deliveries
+    end
   end
 
   defp load_claimed([]), do: {:ok, []}

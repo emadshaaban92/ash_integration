@@ -106,21 +106,9 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     # fails on a transient blip it returns `{:error, _}`, which rolls the lease + attempt
     # bump back with it — so the rows stay claimable instead of leased-but-unemitted. Any
     # failure yields [].
-    result =
-      Ash.transact(resource, fn ->
-        case repo.query(sql, [lease, max_attempts, limit], log: AshIntegration.query_log_level()) do
-          {:ok, %{rows: rows}} ->
-            case rows |> Enum.map(fn [id] -> id end) |> load_claimed() do
-              {:ok, events} -> events
-              {:error, error} -> {:error, error}
-            end
-
-          {:error, error} ->
-            {:error, error}
-        end
-      end)
-
-    case result do
+    resource
+    |> Ash.transact(fn -> claim_and_load(repo, sql, [lease, max_attempts, limit]) end)
+    |> case do
       {:ok, events} ->
         events
 
@@ -135,6 +123,17 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     e ->
       Logger.error("Outbound dispatch: claim failed: #{Exception.message(e)}")
       []
+  end
+
+  # Runs inside the claim transaction: lease UPDATE, then reload by id. Returns the bare
+  # loaded events (so `Ash.transact` wraps them in `{:ok, _}`) or `{:error, reason}` on a
+  # UPDATE/reload failure (so `Ash.transact` rolls the lease back).
+  defp claim_and_load(repo, sql, params) do
+    with {:ok, %{rows: rows}} <-
+           repo.query(sql, params, log: AshIntegration.query_log_level()),
+         {:ok, events} <- rows |> Enum.map(fn [id] -> id end) |> load_claimed() do
+      events
+    end
   end
 
   defp load_claimed([]), do: {:ok, []}
