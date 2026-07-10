@@ -17,14 +17,17 @@ defmodule Example.Outbound.DeliveryRelayTest do
     * the real async pipeline over an isolated `start_supervised!` instance.
   """
   use Example.DataCase, async: false
+  use Mimic
 
   require Ash.Query
   import Ash.Expr
   import Example.IntegrationHelpers, only: [stub_webhook_success: 0, stub_webhook_failure: 1]
 
+  alias AshIntegration.Outbound.Delivery.Acknowledger
   alias AshIntegration.Outbound.Delivery.Dispatcher
   alias AshIntegration.Outbound.Delivery.Health
   alias AshIntegration.Outbound.Delivery.Relay
+  alias AshIntegration.Outbound.Delivery.RelayProducer
   alias AshIntegration.Outbound.Delivery.Scheduler
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
   alias Example.Outbound.{Connection, Event, EventDelivery, Log, Subscription}
@@ -101,6 +104,60 @@ defmodule Example.Outbound.DeliveryRelayTest do
       assert [reclaimed] = Dispatcher.claim(10)
       assert reclaimed.id == d.id
       assert reload(d).attempts == 2
+    end
+
+    test "a reload failure rolls the lease + attempt bump back (no orphaned claim)", %{
+      connection: conn
+    } do
+      scheduled_delivery!(create_subscription!(conn))
+
+      # The lease UPDATE commits inside the claim transaction, then the reload blips. The
+      # reload shares that transaction, so its failure rolls the UPDATE back with it — the
+      # `:scheduled` row must be left exactly as it was (claimable, attempts still 0), not
+      # leased-but-unemitted until its lease expires.
+      stub(Ash, :read, fn _query, _opts ->
+        {:error, Ash.Error.Unknown.exception(errors: [%RuntimeError{message: "db blip"}])}
+      end)
+
+      assert [] = Dispatcher.claim(10)
+
+      # Assert via raw SQL — `Ash.read` is stubbed to fail for this process.
+      assert %{rows: [[nil, 0]]} =
+               Repo.query!("SELECT claimed_at, attempts FROM outbound_event_deliveries LIMIT 1")
+    end
+  end
+
+  describe "producer: a mid-drain claim failure never drops already-built messages" do
+    test "emits the messages from earlier chunks when a later chunk's claim raises" do
+      # Two due rows the mocked claim hands back one chunk at a time.
+      [d1, d2] = [
+        %EventDelivery{id: Ash.UUIDv7.generate(), event_id: Ash.UUIDv7.generate()},
+        %EventDelivery{id: Ash.UUIDv7.generate(), event_id: Ash.UUIDv7.generate()}
+      ]
+
+      # Chunk 1 claims + builds d1; chunk 2 raises (a reload blip that somehow escaped
+      # Dispatcher.claim). The producer must still emit d1: its row is already leased, so
+      # dropping the message would strand it invisible until its lease expires.
+      Dispatcher
+      |> expect(:claim, fn _ -> [d1] end)
+      |> expect(:claim, fn _ -> raise "reload blip" end)
+
+      {:noreply, messages, new_state} =
+        RelayProducer.handle_demand(2, producer_state(claim_limit: 1))
+
+      assert [%Broadway.Message{data: ^d1}] = messages
+      assert new_state.demand == 1
+      refute d2.id == d1.id
+    end
+
+    test "a claim failure on the very first chunk emits nothing and holds all demand" do
+      expect(Dispatcher, :claim, fn _ -> raise "reload blip" end)
+
+      {:noreply, messages, new_state} =
+        RelayProducer.handle_demand(3, producer_state(claim_limit: 2))
+
+      assert messages == []
+      assert new_state.demand == 3
     end
   end
 
@@ -780,4 +837,16 @@ defmodule Example.Outbound.DeliveryRelayTest do
   end
 
   defp reload(%resource{id: id}), do: Ash.get!(resource, id, authorize?: false)
+
+  # A minimal producer state for driving `handle_demand/2` directly (in-process, so the
+  # Mimic `Dispatcher.claim` stub applies). The poll timer is irrelevant here.
+  defp producer_state(opts) do
+    %{
+      demand: 0,
+      poll_interval: 60_000,
+      claim_limit: Keyword.fetch!(opts, :claim_limit),
+      poll_timer: nil,
+      draining: false
+    }
+  end
 end

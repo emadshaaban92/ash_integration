@@ -68,7 +68,9 @@ them; if you must change one, update this list and the relevant design doc.
    queue — relays poll the tables.
 2. **Delivery is at-least-once; consumers dedup by `event-id`.** Idempotency is on
    the consumer side by design; a lost claim just gets re-claimed after its lease
-   expires.
+   expires. A claim leases and reloads its rows **atomically** (one transaction), so a
+   reload blip after the lease `UPDATE` rolls the lease + attempt bump back rather than
+   orphaning a leased-but-unemitted row — see `design/outbound-architecture.md`.
 3. **Per-`(connection, event_key)` ordering is a hard database invariant.** A
    partial unique index (over `state IN ('scheduled','failed')`) guarantees at most
    one in-flight/failed row per lane. Ordering is *not* something a query has to get

@@ -84,16 +84,10 @@ defmodule AshIntegration.Outbound.Delivery.RelayProducer do
     {:noreply, [], %{state | draining: true, poll_timer: nil}}
   end
 
-  # Drain up to `demand` rows, claiming in chunks of `claim_limit`. A transient DB
-  # error during a claim must never crash the producer (which would tear down the
-  # whole pipeline) — log, hold the demand, and let the next demand/poll retry.
+  # Drain up to `demand` rows, claiming in chunks of `claim_limit`.
   defp produce(state) do
     {messages, remaining} = claim_messages(state.demand, state.claim_limit, [])
     {:noreply, messages, %{state | demand: remaining}}
-  rescue
-    e ->
-      Logger.error("Outbound delivery producer: claim failed: #{Exception.message(e)}")
-      {:noreply, [], state}
   end
 
   defp claim_messages(0, _limit, acc), do: {Enum.reverse(acc), 0}
@@ -107,6 +101,15 @@ defmodule AshIntegration.Outbound.Delivery.RelayProducer do
         messages = Enum.map(deliveries, &to_message/1)
         claim_messages(demand - length(deliveries), limit, Enum.reverse(messages, acc))
     end
+  rescue
+    # A transient DB error during a claim must never crash the producer (which would
+    # tear down the whole pipeline). `Dispatcher.claim/1` already rolls back + returns
+    # [] on a blip, so this pass should never raise — but if it somehow does, emit every
+    # message already built this pass (dropping them would strand their leased rows for a
+    # full lease window) and hold the unfilled demand for the next poll.
+    e ->
+      Logger.error("Outbound delivery producer: claim failed: #{Exception.message(e)}")
+      {Enum.reverse(acc), demand}
   end
 
   defp to_message(delivery) do

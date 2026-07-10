@@ -236,6 +236,15 @@ not as an ordering mechanism.
   `claim/1` filters `dispatched_at IS NULL`). The `EventDelivery (event_id,
   subscription_id)` unique identity is a passive backstop, not a skip-on-conflict
   code path.
+- *Claim-side* infra failures (the reload of full structs blips **after** the lease
+  `UPDATE` has committed) → the lease `UPDATE` and the reload share **one transaction**
+  (`Ash.transact`), so a failed reload rolls the lease + `dispatch_attempts` bump back
+  with it and `claim/1` yields `[]`. Without that atomicity a committed-but-unreloaded
+  row would sit leased-but-unemitted for a full lease window, its `dispatch_attempts`
+  silently burned toward the poison ceiling with no `dispatch_error` recorded — the same
+  bug on the delivery side, minus the ceiling. The relay producer independently emits any
+  messages it has already built this pass, so one chunk's blip never discards earlier
+  chunks' leased rows.
 
 **Terminal (poison) events — never auto-resolved.** Every claim bumps
 `Event.dispatch_attempts`; once it reaches the dispatch stage's `max_attempts` the
