@@ -68,13 +68,24 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
     RETURNING d.id::text
     """
 
-    # UPDATE (lease + bump) and reload share ONE Ash-owned transaction. If `load_claimed`
-    # fails on a transient blip it returns `{:error, _}`, which rolls the lease + attempt
-    # bump back with it — so a `:scheduled` row is never left leased-but-unemitted
-    # (invisible until its lease expires, its `attempts` bumped for work never done). Any
-    # failure yields [].
-    resource
-    |> Ash.transact(fn -> claim_and_load(repo, sql, [lease, limit]) end)
+    # UPDATE (lease + bump) and reload share ONE transaction, opened directly on the repo
+    # so we can pass `log:` — the begin/commit envelope then honours `query_log_level` just
+    # like the claim UPDATE (`Ash.transact` can't forward `:log`, so with it the bare
+    # begin/commit leaked at `:debug` even when the claim query was silenced). Ecto's
+    # `Repo.transaction` does NOT roll back on an `{:error, _}` return, only on a raise or an
+    # explicit `rollback/1`, so on a UPDATE/reload blip we call `repo.rollback(reason)`
+    # ourselves — that keeps the "never leased-but-unemitted" guarantee: the lease + attempt
+    # bump roll back with the reload, leaving a `:scheduled` row claimable. Any failure
+    # yields [].
+    repo.transaction(
+      fn ->
+        case claim_and_load(repo, sql, [lease, limit]) do
+          {:error, reason} -> repo.rollback(reason)
+          deliveries -> deliveries
+        end
+      end,
+      log: AshIntegration.query_log_level()
+    )
     |> case do
       {:ok, deliveries} ->
         deliveries
@@ -84,7 +95,7 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
         []
     end
   rescue
-    # `Ash.transact` re-raises if the function raises (e.g. a pool-checkout timeout on
+    # `Repo.transaction` re-raises if the function raises (e.g. a pool-checkout timeout on
     # the UPDATE itself); the transaction has already rolled back. A claim must never
     # crash the producer — hold the demand and let the next poll retry.
     e ->
@@ -93,8 +104,8 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   end
 
   # Runs inside the claim transaction: lease UPDATE, then reload by id. Returns the bare
-  # loaded deliveries (so `Ash.transact` wraps them in `{:ok, _}`) or `{:error, reason}` on
-  # a UPDATE/reload failure (so `Ash.transact` rolls the lease back).
+  # loaded deliveries (so the transaction commits and yields `{:ok, _}`) or `{:error, reason}`
+  # on a UPDATE/reload failure (the caller then `rollback/1`s to undo the lease).
   defp claim_and_load(repo, sql, params) do
     with {:ok, %{rows: rows}} <-
            repo.query(sql, params, log: AshIntegration.query_log_level()),

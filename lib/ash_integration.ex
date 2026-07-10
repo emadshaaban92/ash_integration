@@ -184,14 +184,17 @@ defmodule AshIntegration do
   @doc """
   Log level for the library's own internal poll/claim SQL — the housekeeping
   queries the dispatch relay, the delivery relay, and the scheduler issue on every
-  poll tick (the outbox claim `UPDATE … RETURNING` and the scheduler's lane scan),
-  whether or not there is work to do. On a busy *or idle* node these fire several
-  times a second, so at the repo's default `:debug` level they can dominate the log.
+  poll tick (the outbox claim `UPDATE … RETURNING`, the `begin`/`commit` of the
+  transaction that wraps it, and the scheduler's lane scan), whether or not there is
+  work to do. On a busy *or idle* node these fire several times a second, so at the
+  repo's default `:debug` level they can dominate the log.
 
-  The value is passed straight through as Ecto's `:log` option, so it accepts any
-  `Logger` level (e.g. `:debug`, `:info`) or `false` to silence these queries
-  entirely. Defaults to `:debug` — Ecto's own default, so behaviour is unchanged
-  until you set it. Set `query_log_level: false` to stop the poll-loop query spam.
+  The value is passed straight through as Ecto's `:log` option — on both the claim
+  query and its surrounding `Repo.transaction`, so the whole envelope is silenced,
+  not just the query inside it. It accepts any `Logger` level (e.g. `:debug`,
+  `:info`) or `false` to silence these queries entirely. Defaults to `:debug` —
+  Ecto's own default, so behaviour is unchanged until you set it. Set
+  `query_log_level: false` to stop the poll-loop query spam.
 
   The retention sweeper's bounded `DELETE`s (run once per `interval_ms`, default a
   minute) honour this too. They go through Ash (`Ash.bulk_destroy!`), which gives

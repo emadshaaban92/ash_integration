@@ -127,6 +127,51 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
+  # The claim opens its transaction directly on the repo with `log: query_log_level()`,
+  # so `false` silences not just the claim UPDATE but the `begin`/`commit` envelope too —
+  # the whole point: an idle poll (0 rows) leaves no trace in the host log. We drop the
+  # *primary* level to `:debug` to observe it (test env pins `:warning`, which would filter
+  # the `:debug` transaction log before any handler sees it). Safe only because this module
+  # is `async: false`.
+  describe "query_log_level (claim transaction envelope)" do
+    setup do
+      original = Application.fetch_env(:ash_integration, :query_log_level)
+      primary_level = Logger.level()
+
+      on_exit(fn ->
+        Logger.configure(level: primary_level)
+
+        case original do
+          {:ok, value} -> Application.put_env(:ash_integration, :query_log_level, value)
+          :error -> Application.delete_env(:ash_integration, :query_log_level)
+        end
+      end)
+
+      :ok
+    end
+
+    test "false silences the whole claim transaction, envelope included (idle poll)" do
+      Application.put_env(:ash_integration, :query_log_level, false)
+
+      {claimed, log} = claim_with_log()
+
+      assert claimed == [], "no :scheduled rows — the claim matches 0 rows"
+      refute log =~ "begin", "the transaction begin must be silenced, not just the UPDATE"
+      refute log =~ "commit", "the transaction commit must be silenced too"
+      refute log =~ "outbound_event_deliveries", "the claim UPDATE must be silenced"
+    end
+
+    test ":debug still logs the begin/commit envelope" do
+      Application.put_env(:ash_integration, :query_log_level, :debug)
+
+      {claimed, log} = claim_with_log()
+
+      assert claimed == []
+      assert log =~ "begin", "at :debug the transaction begin must still appear"
+      assert log =~ "commit", "at :debug the transaction commit must still appear"
+    end
+  end
+
   describe "producer: a mid-drain claim failure never drops already-built messages" do
     test "emits the messages from earlier chunks when a later chunk's claim raises" do
       # Two due rows the mocked claim hands back one chunk at a time.
@@ -649,6 +694,14 @@ defmodule Example.Outbound.DeliveryRelayTest do
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────
+
+  # Run a claim with the primary Logger level temporarily at :debug so the claim's
+  # transaction log is observable, returning `{claimed, captured_log}`. The primary
+  # level is restored by the "query_log_level" describe's `on_exit`.
+  defp claim_with_log do
+    Logger.configure(level: :debug)
+    ExUnit.CaptureLog.with_log(fn -> Dispatcher.claim(10) end)
+  end
 
   # Stub the webhook target to reply with an exact `body` (as `text/plain`, so Req
   # keeps it a raw binary — `body_to_string/1` then stores it byte-for-byte, letting
