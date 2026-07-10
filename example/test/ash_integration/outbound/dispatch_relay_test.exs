@@ -239,6 +239,41 @@ defmodule Example.Outbound.DispatchRelayTest do
       assert reloaded.dispatch_error == "transient blip"
       assert is_nil(reloaded.dispatched_at)
     end
+
+    test "records the error for a whole failed batch without stamping dispatched_at", %{
+      connection: conn
+    } do
+      create_subscription!(conn, "widget.updated")
+      for i <- 1..5, do: create_widget!(%{name: "w#{i}", stock: 1})
+      events = Ash.read!(Event, authorize?: false)
+      assert length(events) == 5
+
+      # A whole-batch infra failure: every event fails with the same reason. This
+      # is the path the bulk update targets — one query for the shared reason.
+      Dispatcher.record_dispatch_errors(Enum.map(events, &{&1.id, "connection refused"}))
+
+      for event <- events do
+        reloaded = reload(event)
+        assert reloaded.dispatch_error == "connection refused"
+        assert is_nil(reloaded.dispatched_at)
+      end
+    end
+
+    test "ignores ids that are not in the outbox", %{connection: conn} do
+      create_subscription!(conn, "widget.updated")
+      create_widget!(%{name: "w", stock: 1})
+      [event] = Ash.read!(Event, authorize?: false)
+
+      # A mix of a real event and a stale/unknown id — the unknown one is simply
+      # absent from the bulk read and recorded for no one.
+      assert :ok =
+               Dispatcher.record_dispatch_errors([
+                 {event.id, "real"},
+                 {Ash.UUIDv7.generate(), "ghost"}
+               ])
+
+      assert reload(event).dispatch_error == "real"
+    end
   end
 
   describe "Broadway glue (prepare_messages → handle_message → handle_batch → ack)" do
