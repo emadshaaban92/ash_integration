@@ -26,9 +26,10 @@ defmodule AshIntegration.Outbound.PoolCheck do
   oversubscribes it, and the failure mode is both nasty and hard to trace: under
   load the excess checkouts wait on `DBConnection`'s queue and time out, and those
   timeouts surface on the dispatch/delivery **failure** paths — where a dispatch
-  claim/transaction timeout is turned into `Broadway.Message.failed/2` and burns a
-  `dispatch_attempts` toward the poison ceiling (`Dispatch.Supervisor.max_attempts/0`)
-  for a row that was never actually poison.
+  claim/transaction timeout is turned into `Broadway.Message.failed/2`. Dispatch has
+  no attempt ceiling (the row is just re-emitted, its `dispatch_attempts` counter
+  bumped honestly), so this no longer risks false poison — but the queue timeouts
+  still stall throughput and spam the failure path, which is worth surfacing early.
 
   So this runs once at boot (from `AshIntegration.Supervisor`) and emits a loud,
   actionable `Logger.warning` when the concurrency total exceeds the pool.
@@ -111,8 +112,8 @@ defmodule AshIntegration.Outbound.PoolCheck do
     the scheduler, the health sweep, and the retention sweep all draw from the host \
     repo's pool. When they exceed it, the excess checkouts queue on DBConnection and \
     time out under load — and those timeouts land on the dispatch/delivery failure \
-    paths, so a queue timeout can burn a dispatch_attempts toward the poison ceiling \
-    for a row that was never poison.
+    paths, stalling throughput and spamming the failure path (dispatch simply \
+    re-emits the row; it has no attempt ceiling to falsely trip).
 
     Raise the repo's `pool_size` to at least #{demand}, or lower the `:concurrency` \
     knobs under `config :ash_integration, dispatch:/delivery:`. This is a conservative \

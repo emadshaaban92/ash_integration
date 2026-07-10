@@ -32,11 +32,14 @@ committed but nothing was written to the outbox.
 
 | Event | Measurements | Metadata |
 | --- | --- | --- |
-| `[:ash_integration, :dispatch, :poison]` | `attempts` | `event_id, event_type, event_key` |
+| `[:ash_integration, :dispatch, :expired]` | `count` | `max_dispatch_age_ms` |
 | `[:ash_integration, :coalesce, :events_dropped]` | `count` | `subscription_id, event_type, event_key` |
 
-`:dispatch :poison` — an Event hit the dispatch attempt ceiling; left
-undispatched, never auto-resolved. `:coalesce :events_dropped` — latest-state
+`:dispatch :expired` — the opt-in age sweep took N undispatched Events terminal
+(`dispatch_terminal_reason: :expired`); left undispatched, lane blocked, never
+auto-resolved. Dispatch has **no attempt ceiling** — `dispatch_attempts` is an
+honest counter, so a transient infra failure never poisons the backlog (see
+`design/dispatch-terminal-model.md`). `:coalesce :events_dropped` — latest-state
 coalescing collapsed superseded pending deliveries for a lane.
 
 ### Delivery (EventDelivery → transport)

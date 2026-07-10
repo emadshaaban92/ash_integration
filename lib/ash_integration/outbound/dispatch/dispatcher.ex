@@ -9,18 +9,27 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
   coalesces **atomically** with the `dispatched_at` stamp inside the batch
   transaction. This module provides the claim and bookkeeping around that action:
 
-    * `claim/1` — atomically lease undispatched `Event`s (`FOR UPDATE SKIP LOCKED`
-      + soft lease, oldest first, attempt-ceiling) for the relay's producer. The
-      atomic claim is what makes parallel/multi-node relays safe; `bulk_update`
-      gives no cross-node lease.
+    * `claim/1` — atomically lease undispatched, non-terminal `Event`s (`FOR UPDATE
+      SKIP LOCKED` + soft lease, oldest first) for the relay's producer. The atomic
+      claim is what makes parallel/multi-node relays safe; `bulk_update` gives no
+      cross-node lease.
     * `subscriptions_for/2` — the candidate subscriptions on a `(type, version)`,
       with the connection (+owner) loaded. Shared by the relay's `prepare_messages`.
     * `record_dispatch_errors/1` — record a `dispatch_error` on the *failed* path
-      (relay ack / poison), never stamping `dispatched_at`.
+      (relay ack), for visibility; never stamps `dispatched_at`, never decides
+      terminal-ness.
+    * `sweep_expired/0` — the opt-in age-based give-up: take undispatched Events
+      older than `max_dispatch_age_ms` terminal (`dispatch_terminal_reason:
+      :expired`). Driven by the `Retention` GenServer's tick; a no-op unless an age
+      is configured. See `design/dispatch-terminal-model.md`.
+    * `reset_terminal/0` — the bulk operator affordance: clear the terminal bit on
+      every stuck Event in one `:reset_dispatch` bulk update.
 
-  Un-sticking a poison event (operator recourse) is just the Event's
-  `:reset_dispatch` action (reset the bookkeeping so `claim/1` picks it up again);
-  the relay re-attempts it on its next poll.
+  Un-sticking a terminal (`:expired`) event (operator recourse) is the Event's
+  `:reset_dispatch` action (clear the terminal bit so `claim/1` picks it up again);
+  the relay re-attempts it on its next poll. There is **no attempt ceiling** —
+  `dispatch_attempts` is an honest, monotonic counter, never a verdict — so a
+  transient infra failure can never poison the backlog.
 
   Because the stamp and the deliveries commit together, a committed event is never
   re-claimed (`claim/1` filters `dispatched_at IS NULL`) and a rolled-back batch
@@ -60,31 +69,33 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
   Uses `... FOR UPDATE SKIP LOCKED` so multiple relay passes/nodes claim disjoint
   rows in parallel — **safe only because the scheduler high-water gate owns
   ordering correctness**, not claim order. Stamps a soft `claimed_at` lease and
-  bumps `dispatch_attempts` (the retry ceiling), then reloads the full structs by id
-  (so the host's `project/3` sees real `Event.t()` records).
+  bumps `dispatch_attempts` (an honest, monotonic counter — never a ceiling), then
+  reloads the full structs by id (so the host's `project/3` sees real `Event.t()`
+  records).
 
   The lease UPDATE and the reload run in **one transaction**: the UPDATE commits the
   lease + attempt bump, and if the reload then fails on a transient DB blip the whole
   claim rolls back. Without that, a committed-but-unreloaded row would be leased yet
   never emitted — invisible for a full lease window, its `dispatch_attempts` silently
-  burned toward the ceiling with no `dispatch_error` ever recorded. On any failure the
-  claim yields `[]` and the next poll retries cleanly.
+  bumped for work never done, with no `dispatch_error` ever recorded. On any failure
+  the claim yields `[]` and the next poll retries cleanly.
 
-  Events at/over `dispatch_max_attempts` are **never claimed again** — they are
-  terminal (poison). We deliberately do **not** auto-resolve them: the row stays in
-  the outbox (`dispatched_at` NULL) and its `(connection, event_key)` lane stays
-  blocked by the high-water gate until a human (or a host-app change) intervenes.
+  Terminal (`:expired`) events — `dispatch_terminal_reason IS NOT NULL` — are **never
+  claimed again**. We deliberately do **not** auto-resolve them: the row stays in the
+  outbox (`dispatched_at` NULL) and its `(connection, event_key)` lane stays blocked
+  by the high-water gate until an operator `:reset_dispatch`es it (or raises the age
+  policy). Terminal-ness comes only from the opt-in age sweep — never from an attempt
+  count — so infra flakiness can never make a row terminal.
   """
   def claim(limit) when is_integer(limit) and limit > 0 do
     repo = AshIntegration.repo()
     resource = AshIntegration.event_resource()
     table = AshPostgres.DataLayer.Info.table(resource)
     lease = Stage.lease_seconds()
-    max_attempts = Stage.max_attempts()
 
     # The inner SELECT picks the oldest claimable rows (unleased or lease-expired,
-    # still undispatched, under the attempt ceiling) and locks them SKIP LOCKED; the
-    # outer UPDATE stamps the lease + bumps the attempt counter, all in one statement
+    # still undispatched, not terminal) and locks them SKIP LOCKED; the outer UPDATE
+    # stamps the lease + bumps the (non-gating) attempt counter, all in one statement
     # so two claimers can never grab the same row.
     sql = """
     UPDATE #{table} AS e
@@ -92,10 +103,10 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     FROM (
       SELECT id FROM #{table}
       WHERE dispatched_at IS NULL
-        AND dispatch_attempts < $2
+        AND dispatch_terminal_reason IS NULL
         AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1))
       ORDER BY id ASC
-      LIMIT $3
+      LIMIT $2
       FOR UPDATE SKIP LOCKED
     ) AS claimable
     WHERE e.id = claimable.id
@@ -112,7 +123,7 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     # bump roll back with the reload, leaving the rows claimable. Any failure yields [].
     repo.transaction(
       fn ->
-        case claim_and_load(repo, sql, [lease, max_attempts, limit]) do
+        case claim_and_load(repo, sql, [lease, limit]) do
           {:error, reason} -> repo.rollback(reason)
           events -> events
         end
@@ -161,52 +172,37 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     end
   end
 
-  # ── Failed-path bookkeeping (dispatch_error + poison) ───────────────────────
+  # ── Failed-path bookkeeping (dispatch_error, visibility only) ───────────────
 
   @doc """
   Record a per-event `dispatch_error` for events whose dispatch failed at the infra
   level (left `dispatched_at` NULL → the lease expires → they are re-emitted).
-  Visibility only — it never stamps `dispatched_at`. Takes `[{event_id, reason}]`.
+  Visibility only — it never stamps `dispatched_at` and never decides terminal-ness.
+  Takes `[{event_id, reason}]`.
 
-  An event that has reached `dispatch_max_attempts` is **terminal**: `claim/1`
-  excludes it, so it won't be retried, and we record a poison-flavoured
-  `dispatch_error` + emit `[:ash_integration, :dispatch, :poison]` telemetry. This
-  fires exactly once — the attempt that crossed the ceiling. We still do **not**
-  stamp `dispatched_at`: the event stays stuck and its lane blocked, by design.
-  Find terminal events with `dispatched_at IS NULL AND dispatch_attempts >= N`.
+  Terminal-ness is not this path's job: with no attempt ceiling, a failed dispatch is
+  just re-emitted, and only the opt-in age sweep (`sweep_expired/0`) can take a row
+  terminal. So this simply stamps the raw reason on each row, coalescing a
+  shared-reason (whole-batch infra) failure into one `bulk_update`.
   """
   def record_dispatch_errors([]), do: :ok
 
   def record_dispatch_errors(id_reasons) when is_list(id_reasons) do
-    max_attempts = Stage.max_attempts()
-    reason_by_id = Map.new(id_reasons, fn {event_id, reason} -> {to_string(event_id), reason} end)
-
-    # One read for the whole failed batch instead of a `get` per event — a
-    # whole-batch infra failure otherwise turns the ack into N `get`s + N updates.
-    # Ids absent from the outbox simply don't come back (nothing to record).
-    AshIntegration.event_resource()
-    |> Ash.Query.filter(id in ^Map.keys(reason_by_id))
-    |> Ash.read!(authorize?: false)
-    |> Enum.map(fn event ->
-      reason = Map.fetch!(reason_by_id, to_string(event.id))
-      # Runs the poison side effects (operator log + telemetry) exactly once per
-      # terminal event, and yields this event's `dispatch_error` string.
-      {truncate(dispatch_error_for(event, reason, max_attempts)), event}
-    end)
-    # Group by the resolved message so each distinct `dispatch_error` is written in
-    # a single `bulk_update`. A whole-batch infra failure shares one reason across
-    # all (non-terminal) events, so it collapses to ONE update query.
-    |> Enum.group_by(fn {error, _event} -> error end, fn {_error, event} -> event end)
-    |> Enum.each(fn {dispatch_error, events} ->
-      record_group(events, dispatch_error)
-    end)
+    id_reasons
+    # Group by the reason so each distinct `dispatch_error` is written in a single
+    # `bulk_update`. A whole-batch infra failure shares one reason across all events,
+    # so it collapses to ONE update query.
+    |> Enum.group_by(fn {_id, reason} -> truncate(reason) end, fn {id, _reason} -> id end)
+    |> Enum.each(fn {dispatch_error, ids} -> record_group(ids, dispatch_error) end)
 
     :ok
   end
 
-  defp record_group(events, dispatch_error) do
+  defp record_group(ids, dispatch_error) do
     result =
-      Ash.bulk_update(events, :mark_dispatched, %{dispatch_error: dispatch_error},
+      AshIntegration.event_resource()
+      |> Ash.Query.filter(id in ^ids)
+      |> Ash.bulk_update(:mark_dispatched, %{dispatch_error: dispatch_error},
         # `:atomic_batches` writes each group in one `UPDATE ... WHERE id = ANY(...)`;
         # `:stream` is the fallback if a host adds a non-atomic change to the seam.
         strategy: [:atomic_batches, :stream],
@@ -221,7 +217,7 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
       :error ->
         Logger.error(
           "Outbound dispatch: recording dispatch_error failed for " <>
-            "#{length(events)} event(s): #{inspect(result.errors)}"
+            "#{length(ids)} event(s): #{inspect(result.errors)}"
         )
 
       _ ->
@@ -229,33 +225,99 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     end
   end
 
-  # A terminal (poison) event — it has burned through every dispatch attempt, so
-  # `claim/1` will never pick it up again. We surface it loudly (operator log +
-  # telemetry) and stamp a poison-flavoured `dispatch_error`, but deliberately leave
-  # `dispatched_at` NULL so the event stays stuck and its lane blocked until someone
-  # resolves it. We NEVER auto-resolve (correctness over liveness): silently stamping
-  # a never-dispatched event would drop it and let a newer same-key event deliver
-  # ahead of it. A host wanting different behaviour can add its own change on the
-  # `Event` resource — the library won't.
-  defp dispatch_error_for(%{dispatch_attempts: attempts} = event, reason, max_attempts)
-       when attempts >= max_attempts do
-    Logger.error(
-      "Outbound dispatch: poison event #{event.id} (#{event.event_type}, key " <>
-        "#{event.event_key}) stuck after #{attempts} dispatch attempts — left " <>
-        "undispatched, lane blocked (no auto-resolve); last error: #{reason}"
-    )
+  # ── Age-based give-up (opt-in `:expired`) + operator recovery ───────────────
 
-    :telemetry.execute(
-      [:ash_integration, :dispatch, :poison],
-      %{attempts: attempts},
-      %{event_id: event.id, event_type: event.event_type, event_key: event.event_key}
-    )
-
-    "poison: stuck after #{attempts} dispatch attempts (no auto-resolve; left " <>
-      "undispatched, lane blocked); last error: #{reason}"
+  @doc """
+  Opt-in give-up policy: take any undispatched, non-terminal Event whose age (from
+  `created_at`) exceeds `Supervisor.max_dispatch_age_ms/0` terminal — set
+  `dispatch_terminal_reason: :expired`, so `claim/1` stops picking it up and its
+  `(connection, event_key)` lane stays blocked like any terminal head. No-op unless
+  the age is configured (`nil` = never expire, the safe default). Idempotent (matches
+  only `dispatch_terminal_reason IS NULL`) and safe on every node. Driven by the
+  `Retention` GenServer's tick — mirrors how the delivery age sweep rides `Health`.
+  """
+  def sweep_expired do
+    case Stage.max_dispatch_age_ms() do
+      nil -> :ok
+      age_ms when is_integer(age_ms) and age_ms > 0 -> expire_older_than(age_ms)
+    end
   end
 
-  defp dispatch_error_for(_event, reason, _max_attempts), do: reason
+  # One bulk `:expire_dispatch` through Ash (not raw SQL) so `updated_at` bumps and
+  # host notifiers see the transition. The query-side guard (`dispatched_at IS NULL`,
+  # `dispatch_terminal_reason IS NULL`) is the action's precondition, pushed here the
+  # same way the delivery sweep pushes its `:failed`/`terminal_reason` guard;
+  # `SetAttribute` is atomic-capable, so `:atomic` runs this as a single UPDATE.
+  defp expire_older_than(age_ms) do
+    cutoff = DateTime.add(DateTime.utc_now(), -age_ms, :millisecond)
+
+    result =
+      AshIntegration.event_resource()
+      |> Ash.Query.filter(
+        is_nil(dispatched_at) and is_nil(dispatch_terminal_reason) and created_at < ^cutoff
+      )
+      |> Ash.bulk_update(:expire_dispatch, %{},
+        strategy: [:atomic, :stream],
+        authorize?: false,
+        return_records?: true,
+        return_errors?: true,
+        notify?: true
+      )
+
+    n =
+      case result do
+        %Ash.BulkResult{records: records} when is_list(records) ->
+          length(records)
+
+        %Ash.BulkResult{errors: errors} ->
+          Logger.error("Outbound dispatch: expiry sweep failed: #{inspect(errors)}")
+          0
+      end
+
+    if n > 0 do
+      Logger.warning(
+        "Outbound dispatch: expired #{n} undispatched event(s) older than #{age_ms}ms " <>
+          "— terminal (`:expired`), lanes blocked (no auto-resolve)."
+      )
+
+      :telemetry.execute([:ash_integration, :dispatch, :expired], %{count: n}, %{
+        max_dispatch_age_ms: age_ms
+      })
+    end
+
+    :ok
+  end
+
+  @doc """
+  Bulk operator affordance: clear the terminal bit on every stuck (`:expired`) Event
+  in one `:reset_dispatch` bulk update, so `claim/1` re-picks them up. Returns the
+  count reset. Use after resolving the cause of a mass stall (e.g. a long DB outage
+  that outlived the configured `max_dispatch_age_ms`) instead of resetting rows one
+  at a time. Leaves `dispatched_at` untouched, so it can never resurrect a dispatched
+  event.
+  """
+  def reset_terminal do
+    result =
+      AshIntegration.event_resource()
+      |> Ash.Query.filter(is_nil(dispatched_at) and not is_nil(dispatch_terminal_reason))
+      |> Ash.bulk_update(:reset_dispatch, %{},
+        # `:reset_dispatch` is a record-based (non-atomic) change, so `:stream`.
+        strategy: [:stream],
+        return_records?: true,
+        return_errors?: true,
+        notify?: false,
+        authorize?: false
+      )
+
+    case result do
+      %Ash.BulkResult{status: :success, records: records} ->
+        {:ok, length(records)}
+
+      %Ash.BulkResult{errors: errors} ->
+        Logger.error("Outbound dispatch: bulk reset_terminal failed: #{inspect(errors)}")
+        {:error, errors}
+    end
+  end
 
   # dispatch_error is a bounded string column; keep operator messages readable.
   defp truncate(reason) when is_binary(reason), do: String.slice(reason, 0, 500)

@@ -241,24 +241,27 @@ not as an ordering mechanism.
   (`Ash.transact`), so a failed reload rolls the lease + `dispatch_attempts` bump back
   with it and `claim/1` yields `[]`. Without that atomicity a committed-but-unreloaded
   row would sit leased-but-unemitted for a full lease window, its `dispatch_attempts`
-  silently burned toward the poison ceiling with no `dispatch_error` recorded — the same
-  bug on the delivery side, minus the ceiling. The relay producer independently emits any
-  messages it has already built this pass, so one chunk's blip never discards earlier
-  chunks' leased rows.
+  silently bumped for work never done, with no `dispatch_error` recorded. The relay
+  producer independently emits any messages it has already built this pass, so one
+  chunk's blip never discards earlier chunks' leased rows.
 
-**Terminal (poison) events — never auto-resolved.** Every claim bumps
-`Event.dispatch_attempts`; once it reaches the dispatch stage's `max_attempts` the
-claim query (`dispatch_attempts < max_attempts`) stops picking the row up. It is **left undispatched** (`dispatched_at` NULL), so its
-`(connection, event_key)` lane stays blocked by the high-water gate, and a poison
-`dispatch_error` + `[:ash_integration, :dispatch, :poison]` telemetry surfaces it
-once. We do **not** stamp it dispatched: silently dropping a never-delivered event
-and letting a newer same-key event jump ahead would break ordering/at-least-once —
-correctness over liveness. Recovery is an explicit operator action — the Event's
-`:reset_dispatch` action (clears the bookkeeping so `claim/1` picks the row up
-again, after the cause is fixed); a host wanting
-auto-resolution adds its own change on the `Event` resource (e.g. stamp
-`dispatched_at` when `dispatch_error` is set). Find stuck events with
-`dispatched_at IS NULL AND dispatch_attempts >= N`.
+**Terminal (`:expired`) events — never auto-resolved.** There is **no attempt
+ceiling**. Every claim bumps `Event.dispatch_attempts`, but that is an honest counter,
+never a verdict — a failed dispatch (almost always transient infra) is just re-emitted
+on the next lease, so a degraded DB can never poison the backlog. An event becomes
+terminal only through the **opt-in age sweep**: when `dispatch: [max_dispatch_age_ms:
+…]` is set, `Dispatcher.sweep_expired/0` (run on the `Retention` tick) stamps
+`dispatch_terminal_reason: :expired` on an undispatched Event older than that, and the
+claim query (`dispatch_terminal_reason IS NULL`) stops picking the row up. A terminal
+event is **left undispatched** (`dispatched_at` NULL), so its `(connection, event_key)`
+lane stays blocked by the high-water gate, and `[:ash_integration, :dispatch, :expired]`
+telemetry surfaces the sweep. We do **not** stamp it dispatched: silently dropping a
+never-delivered event and letting a newer same-key event jump ahead would break
+ordering/at-least-once — correctness over liveness. Recovery is an explicit operator
+action — the Event's `:reset_dispatch` action (clears the terminal bit so `claim/1`
+picks the row up again, after the cause is fixed), or `Dispatcher.reset_terminal/0` to
+clear them all at once. Find stuck events with `dispatched_at IS NULL AND
+dispatch_terminal_reason IS NOT NULL`. See `design/dispatch-terminal-model.md`.
 
 **Discovery is poll-only.** The producer claims new rows on its `poll_interval_ms`
 timer — there is no capture nudge. An in-process nudge would have helped only
@@ -633,7 +636,7 @@ erDiagram
 | Coalescing | Latest-state per `(subscription, event_key)`; opt out via `notify_on_every_change`; safe under the snapshot invariant. |
 | Suspension | Transport failures suspend the connection; response rejections suspend the subscription; success resets both. |
 | Schema stability | One schema per `(event_type, version)` — convention now, enforced later. |
-| Stuck events | A poison event stays undispatched and blocks its lane; a poison delivery (once `attempts` reaches `delivery: [max_attempts: …]`) stays `scheduled` and blocks its lane. Never auto-resolved. |
+| Stuck events | No attempt ceiling on either stage. A terminal event (`:expired`, via the opt-in `dispatch: [max_dispatch_age_ms: …]` sweep) stays undispatched and blocks its lane; a terminal delivery (`:permanent`, or `:expired` via `delivery: [max_delivery_age_ms: …]`) stays `:failed` and blocks its lane. Never auto-resolved. |
 
 ## 14. Alternatives & deferred work
 

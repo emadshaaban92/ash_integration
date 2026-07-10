@@ -5,7 +5,7 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
   # the base attributes; the host may add their own.
   use Spark.Dsl.Transformer
 
-  alias Ash.Resource.{Dsl, Info}
+  alias Ash.Resource.{Change, Dsl, Info}
   alias Spark.Dsl.Transformer
 
   @impl true
@@ -42,6 +42,16 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
        public?: true,
        default: 0
      )
+     # The dispatch terminal bit (poison). `nil` ⇒ not terminal — `claim/1` refuses
+     # an event iff this is set. Mirrors `EventDelivery.terminal_reason`, narrowed to
+     # a single reason: `:expired`, set by the opt-in age sweep. There is deliberately
+     # no attempt ceiling and no `:permanent` (a deterministic materialization failure
+     # is a bug to fix, not a terminal state) — see `design/dispatch-terminal-model.md`.
+     |> add_attribute_if_not_exists(:dispatch_terminal_reason, :atom,
+       allow_nil?: true,
+       public?: true,
+       constraints: [one_of: [:expired]]
+     )
      |> add_attribute_if_not_exists(:dispatch_error, :string,
        allow_nil?: true,
        public?: true
@@ -54,6 +64,7 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
      |> add_create_action_if_not_exists()
      |> add_mark_dispatched_action_if_not_exists()
      |> add_dispatch_action_if_not_exists()
+     |> add_expire_dispatch_action_if_not_exists()
      |> add_reset_dispatch_action_if_not_exists()
      |> add_index_action_if_not_exists()
      |> add_code_interface_if_not_exists()
@@ -274,13 +285,43 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
     end
   end
 
+  # ── Expire dispatch (opt-in age-based give-up; the terminal write) ────────
+  # The opt-in age sweep (`Dispatcher.sweep_expired/0`, driven by `Retention`): stamp
+  # `dispatch_terminal_reason: :expired` on an undispatched Event older than the
+  # configured `max_dispatch_age_ms`, taking it terminal (`claim/1` refuses it; its
+  # lane stays blocked). The caller pushes the `is_nil(dispatched_at) and
+  # is_nil(dispatch_terminal_reason) and created_at < cutoff` precondition into the
+  # query, keeping the action atomic-executable so the sweep is one bulk UPDATE
+  # through Ash (so `updated_at` bumps and host notifiers fire). Mirrors the delivery
+  # `:expire` action — see `design/dispatch-terminal-model.md`.
+  defp add_expire_dispatch_action_if_not_exists(dsl_state) do
+    if Info.action(dsl_state, :expire_dispatch) do
+      dsl_state
+    else
+      {:ok, action} =
+        Transformer.build_entity(Dsl, [:actions], :update,
+          name: :expire_dispatch,
+          accept: [],
+          changes: [
+            Transformer.build_entity!(Dsl, [:actions, :update], :change,
+              change:
+                {Change.SetAttribute, [attribute: :dispatch_terminal_reason, value: :expired]}
+            )
+          ]
+        )
+
+      Transformer.add_entity(dsl_state, [:actions], action, type: :append)
+    end
+  end
+
   # ── Reset dispatch (un-poison; operator recourse) ─────────────────────────
-  # Clears the relay bookkeeping so a stuck/poison Event (past the attempt ceiling,
-  # `claim/1` refuses it) becomes claimable again: `dispatch_attempts` → 0 (full
-  # retry budget), `claimed_at`/`dispatch_error` → nil. Does NOT touch
-  # `dispatched_at`, so an already-dispatched Event stays out of the outbox (the
-  # reset is then a harmless no-op). The relay re-claims on its next poll and does
-  # the actual fan-out.
+  # Clears the terminal bookkeeping so a stuck/poison (`:expired`) Event becomes
+  # claimable again: `dispatch_terminal_reason`/`claimed_at`/`dispatch_error` → nil.
+  # Deliberately does NOT reset `dispatch_attempts` — the count is a monotonic,
+  # honest history (mirrors `EventDelivery.attempts`), and with no attempt ceiling it
+  # no longer gates the claim. Does NOT touch `dispatched_at`, so an already-dispatched
+  # Event stays out of the outbox (the reset is then a harmless no-op). The relay
+  # re-claims on its next poll and does the actual fan-out.
   defp add_reset_dispatch_action_if_not_exists(dsl_state) do
     if Info.action(dsl_state, :reset_dispatch) do
       dsl_state

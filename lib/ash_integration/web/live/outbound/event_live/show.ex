@@ -2,8 +2,8 @@ defmodule AshIntegration.Web.Outbound.EventLive.Show do
   @moduledoc false
   # One immutable Event (the fact) and its fan-out: the EventDeliveries it produced,
   # one per subscription. This is the top of the runtime drill-down
-  # (Event → Delivery → Log). A stuck/poison event (undispatched past the attempt
-  # ceiling) can be re-dispatched here by an operator once its cause is fixed.
+  # (Event → Delivery → Log). A stuck/terminal event (undispatched, taken `:expired`
+  # by the age sweep) can be re-dispatched here by an operator once its cause is fixed.
   use AshIntegration.Web, :live_view
 
   alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
@@ -76,8 +76,6 @@ defmodule AshIntegration.Web.Outbound.EventLive.Show do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, max_attempts: max_attempts())
-
     ~H"""
     <div class="p-4 sm:p-6">
       <.outbound_nav active={:events} />
@@ -92,11 +90,11 @@ defmodule AshIntegration.Web.Outbound.EventLive.Show do
       <.page_header>
         {@event.event_type} <span class="text-base-content/50 text-base">v{@event.version}</span>
         <:subtitle>
-          <EventHelpers.outbox_badge event={@event} max_attempts={@max_attempts} />
+          <EventHelpers.outbox_badge event={@event} />
         </:subtitle>
         <:actions>
           <button
-            :if={EventHelpers.stuck?(@event, @max_attempts) and @can_redispatch}
+            :if={EventHelpers.stuck?(@event) and @can_redispatch}
             class="btn btn-warning btn-sm"
             phx-click="redispatch"
             data-confirm="Re-dispatch this stuck event? Do this only after fixing the underlying cause."
@@ -117,6 +115,9 @@ defmodule AshIntegration.Web.Outbound.EventLive.Show do
           <.field label="Source">{@event.source_resource} · {@event.source_action}</.field>
           <.field label="Subject (source id)" mono>{@event.source_resource_id}</.field>
           <.field label="Dispatch attempts">{@event.dispatch_attempts}</.field>
+          <.field :if={@event.dispatch_terminal_reason} label="Terminal">
+            {@event.dispatch_terminal_reason}
+          </.field>
         </div>
       </div>
 
@@ -163,8 +164,6 @@ defmodule AshIntegration.Web.Outbound.EventLive.Show do
     </div>
     """
   end
-
-  defp max_attempts, do: AshIntegration.Outbound.Dispatch.Supervisor.max_attempts()
 
   defp path(:index), do: base() <> "/events"
   defp base, do: AshIntegration.Web.base_path()

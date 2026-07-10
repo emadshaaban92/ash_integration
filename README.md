@@ -127,14 +127,14 @@ config :ash_integration,
     concurrency: System.schedulers_online(), # parallel fan-out (default: scheduler count)
     poll_interval_ms: 250,       # outbox poll cadence ≈ idle latency (default: 250)
     batch_size: 100,             # events claimed + fanned out per round (default: 100)
-    max_attempts: 20             # claim attempts before an Event is poison (default: 20)
+    max_dispatch_age_ms: nil     # opt-in age give-up before an Event is :expired; nil = never (no ceiling)
   ],
   # Delivery stage — claim :scheduled EventDelivery rows and send them over their transport.
   delivery: [
     concurrency: 25,             # parallel in-flight sends — higher: delivery is I/O-bound (default: 25)
     poll_interval_ms: 250,       # outbox poll cadence ≈ idle latency (default: 250)
     batch_size: 100,             # rows claimed per round (default: 100)
-    max_attempts: 20,            # claim attempts before a delivery is poison (default: 20)
+    max_delivery_age_ms: nil,    # opt-in age give-up before a delivery is :expired; nil = never (no ceiling)
     backoff_base_ms: 1_000,      # base of the durable exponential retry backoff (default: 1s)
     backoff_max_ms: 300_000      # backoff cap (default: 5 min)
   ],
@@ -610,7 +610,7 @@ A broken transform/`project` **parks** its deliveries (build failure) — that i
 
 - **Claimer crash mid-delivery**: the delivery relay bumps `attempts` on the *claim* and stamps a soft lease, so a crashed/lost claim just lets the lease expire and another pass re-claims the still-`scheduled` row — idempotent (consumers dedup by `event-id`), no orphan-reconciliation job needed. The lease is derived from the transport timeout so it always outlives the slowest send.
 - **Retryable failure**: the row stays `scheduled` (lane held) with a durable exponential backoff (`next_attempt_at`); the relay re-claims it once the backoff elapses.
-- **Poison delivery**: after `delivery: [max_attempts: …]` claims (default 20) a delivery stops being retried and is left `scheduled` with its lane blocked — loud telemetry, never auto-resolved (mirrors dispatch); recover with `reprocess`/`reset_to_pending`
+- **Terminal delivery**: there is no attempt ceiling. A non-retryable response (an HTTP 4xx) is taken terminal immediately (`terminal_reason: :permanent`); an opt-in `delivery: [max_delivery_age_ms: …]` age sweep takes a still-retrying delivery terminal (`:expired`). Either way it is left `:failed` with its lane blocked — loud telemetry, never auto-resolved; recover with `reprocess`/`reset_to_pending`. Dispatch mirrors this: no ceiling, only an opt-in `dispatch: [max_dispatch_age_ms: …]` age give-up (`:expired`).
 - **Lua script bug**: the delivery is created `parked` with `delivery: nil` and `last_error` set; reprocess after fixing the script
 
 See the [Delivery Pipeline guide](guides/delivery-pipeline.md) for the full model, including the event key snapshot invariant and head-of-line blocking tradeoffs.

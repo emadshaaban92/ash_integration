@@ -297,47 +297,36 @@ defmodule Example.Outbound.DispatchRelayTest do
     end
   end
 
-  describe "terminal (poison) events — never auto-resolved" do
-    test "an event at the attempt ceiling is never re-claimed and stays stuck", %{
-      connection: conn
-    } do
+  describe "terminal (`:expired`) events — never auto-resolved" do
+    test "a terminal event is never re-claimed and stays stuck", %{connection: conn} do
       create_subscription!(conn, "widget.updated")
-      poison = create_poison_event!()
+      terminal = create_terminal_event!()
 
       assert [] = Dispatcher.claim(10)
       drain_dispatch!()
 
-      reloaded = reload(poison)
+      reloaded = reload(terminal)
       assert is_nil(reloaded.dispatched_at)
+      assert reloaded.dispatch_terminal_reason == :expired
       assert Ash.count!(EventDelivery, authorize?: false) == 0
     end
 
-    test "recording a failure on a terminal event surfaces it but never stamps dispatched_at",
+    test "recording a failure is visibility-only: raw error, no terminal verdict, no ceiling",
          %{connection: conn} do
-      create_subscription!(conn, "widget.updated")
-      poison = create_poison_event!()
-
-      ref =
-        :telemetry_test.attach_event_handlers(self(), [[:ash_integration, :dispatch, :poison]])
-
-      Dispatcher.record_dispatch_errors([{poison.id, "connection refused"}])
-
-      assert_received {[:ash_integration, :dispatch, :poison], ^ref, %{attempts: _}, %{}}
-      reloaded = reload(poison)
-      assert reloaded.dispatch_error =~ "poison"
-      assert reloaded.dispatch_error =~ "connection refused"
-      assert is_nil(reloaded.dispatched_at)
-    end
-
-    test "an undispatched event below the ceiling records the raw error", %{connection: conn} do
       create_subscription!(conn, "widget.updated")
       create_widget!(%{name: "w", stock: 1})
       [event] = Ash.read!(Event, authorize?: false)
 
-      Dispatcher.record_dispatch_errors([{event.id, "transient blip"}])
+      Dispatcher.record_dispatch_errors([{event.id, "connection refused"}])
+
       reloaded = reload(event)
-      assert reloaded.dispatch_error == "transient blip"
+      # The failed path records the raw reason and nothing else — no "poison"
+      # flavouring, no terminal bit, no `dispatched_at` stamp. Only the age sweep
+      # can make a row terminal, and `dispatch_attempts` is bumped only on claim.
+      assert reloaded.dispatch_error == "connection refused"
+      assert is_nil(reloaded.dispatch_terminal_reason)
       assert is_nil(reloaded.dispatched_at)
+      assert reloaded.dispatch_attempts == 0
     end
 
     test "records the error for a whole failed batch without stamping dispatched_at", %{
@@ -373,6 +362,77 @@ defmodule Example.Outbound.DispatchRelayTest do
                ])
 
       assert reload(event).dispatch_error == "real"
+    end
+  end
+
+  describe "age-based expiry sweep + operator recovery" do
+    test "sweep_expired is a no-op when no age is configured (the safe default)", %{
+      connection: conn
+    } do
+      create_subscription!(conn, "widget.updated")
+      old = seed_old_event!(days_ago: 30)
+
+      assert :ok = Dispatcher.sweep_expired()
+      assert is_nil(reload(old).dispatch_terminal_reason)
+      # Still claimable — nothing was made terminal.
+      assert [_] = Dispatcher.claim(10)
+    end
+
+    test "sweep_expired takes undispatched events older than max_dispatch_age_ms terminal", %{
+      connection: conn
+    } do
+      create_subscription!(conn, "widget.updated")
+      old = seed_old_event!(days_ago: 30)
+      recent = seed_old_event!(days_ago: 0)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [[:ash_integration, :dispatch, :expired]])
+
+      with_max_dispatch_age(:timer.hours(24), fn ->
+        assert :ok = Dispatcher.sweep_expired()
+      end)
+
+      # The old event is terminal (`:expired`) and no longer claimable...
+      assert reload(old).dispatch_terminal_reason == :expired
+      # ...the recent one is untouched and still claimable.
+      assert is_nil(reload(recent).dispatch_terminal_reason)
+      assert_received {[:ash_integration, :dispatch, :expired], ^ref, %{count: 1}, %{}}
+
+      claimed = Enum.map(Dispatcher.claim(10), & &1.id)
+      assert recent.id in claimed
+      refute old.id in claimed
+    end
+
+    test "reset_dispatch un-sticks a terminal event without zeroing its honest attempt count",
+         %{connection: conn} do
+      create_subscription!(conn, "widget.updated")
+      terminal = create_terminal_event!(dispatch_attempts: 7)
+
+      Ash.update!(
+        Ash.Changeset.for_update(terminal, :reset_dispatch, %{}, authorize?: false),
+        authorize?: false
+      )
+
+      reloaded = reload(terminal)
+      assert is_nil(reloaded.dispatch_terminal_reason)
+      assert is_nil(reloaded.claimed_at)
+      # Monotonic: reset clears the terminal bit but does NOT reset the counter.
+      assert reloaded.dispatch_attempts == 7
+      # Claimable again.
+      assert [claimed] = Dispatcher.claim(10)
+      assert claimed.id == terminal.id
+    end
+
+    test "reset_terminal bulk-clears every stuck event in one call", %{connection: conn} do
+      create_subscription!(conn, "widget.updated")
+      t1 = create_terminal_event!()
+      t2 = create_terminal_event!()
+      # A healthy undispatched event is left alone (it isn't terminal).
+      create_widget!(%{name: "healthy", stock: 1})
+
+      assert {:ok, 2} = Dispatcher.reset_terminal()
+      assert is_nil(reload(t1).dispatch_terminal_reason)
+      assert is_nil(reload(t2).dispatch_terminal_reason)
     end
   end
 
@@ -640,17 +700,17 @@ defmodule Example.Outbound.DispatchRelayTest do
     |> Ash.create!(authorize?: false)
   end
 
-  # An Event past the attempt ceiling without dispatching — the terminal poison
-  # case the relay must leave stuck. `dispatch_attempts` isn't in the create accept,
-  # so force it.
-  defp create_poison_event! do
+  # A terminal (`:expired`) undispatched Event — the stuck case the relay must leave
+  # alone. `dispatch_terminal_reason`/`dispatch_attempts` aren't in the create accept,
+  # so force them.
+  defp create_terminal_event!(opts \\ []) do
     Event
     |> Ash.Changeset.for_create(
       :create,
       %{
         event_type: "widget.updated",
         version: 1,
-        event_key: "poison-key",
+        event_key: "terminal-key-#{System.unique_integer([:positive])}",
         source_resource: "widget",
         source_resource_id: "r1",
         source_action: "update",
@@ -658,11 +718,43 @@ defmodule Example.Outbound.DispatchRelayTest do
       },
       authorize?: false
     )
+    |> Ash.Changeset.force_change_attribute(:dispatch_terminal_reason, :expired)
     |> Ash.Changeset.force_change_attribute(
       :dispatch_attempts,
-      AshIntegration.Outbound.Dispatch.Supervisor.max_attempts()
+      Keyword.get(opts, :dispatch_attempts, 1)
     )
     |> Ash.create!(authorize?: false)
+  end
+
+  # An undispatched Event whose `created_at` is backdated, so the age sweep can act on
+  # it. `created_at` isn't accepted on create, so seed it directly.
+  defp seed_old_event!(opts) do
+    days_ago = Keyword.fetch!(opts, :days_ago)
+
+    Ash.Seed.seed!(Event, %{
+      event_type: "widget.updated",
+      version: 1,
+      event_key: "aged-key-#{System.unique_integer([:positive])}",
+      source_resource: "widget",
+      source_resource_id: "r1",
+      source_action: "update",
+      data: %{"id" => "r1"},
+      created_at: DateTime.add(DateTime.utc_now(), -days_ago, :day)
+    })
+  end
+
+  # Publish the dispatch stage's `max_dispatch_age_ms` to `:persistent_term` for the
+  # duration of `fun` — the sweep reads it cross-tree, and the stage supervisor isn't
+  # running under the test runtime (enabled?: false), so there's nothing to publish it.
+  defp with_max_dispatch_age(ms, fun) do
+    key = {AshIntegration.Outbound.Dispatch.Supervisor, :max_dispatch_age_ms}
+    :persistent_term.put(key, ms)
+
+    try do
+      fun.()
+    after
+      :persistent_term.erase(key)
+    end
   end
 
   defp events_for(subscription) do

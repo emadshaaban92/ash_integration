@@ -35,7 +35,7 @@ defmodule AshIntegration.Supervisor do
       # scheduler, health, and retention all share the host repo's connection pool.
       # Warn loudly (never crash) if their total exceeds `pool_size`, so an
       # oversubscription surfaces here rather than as DBConnection queue timeouts that
-      # land on the failure paths and burn the dispatch poison budget.
+      # land on the failure paths and stall dispatch/delivery throughput.
       AshIntegration.Outbound.PoolCheck.warn_if_oversubscribed()
 
       children = [
