@@ -20,8 +20,9 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   claiming and is never forced or reset (terminal-ness lives in `terminal_reason`).
   A retryable failure retries forever, paced by `next_attempt_at` backoff and bounded
   operationally by suspension + probe (and, if configured, the age-based `:expired`
-  sweep). The derived lease (`Supervisor.lease_seconds/0`, sized ≫ the transport
-  timeout) bounds duplicate concurrent sends. See `design/delivery-retry-model.md`.
+  sweep). The lease (`Supervisor.lease_seconds/0`, default-derived from `max_demand ×
+  http_max_timeout_ms` so it outlives a row's wait in the in-flight buffer, or a host
+  override) bounds duplicate concurrent sends. See `design/delivery-retry-model.md`.
   """
 
   require Ash.Query

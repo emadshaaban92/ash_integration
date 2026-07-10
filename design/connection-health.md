@@ -79,7 +79,7 @@ wrong is how the naive versions fail.
 |------|--------|-------------|
 | A "lane" is `(connection_id, event_key)`, created dynamically, **at most one in-flight** (`:scheduled`) row each. | partial unique index `(connection_id, event_key) WHERE state = 'scheduled'` | There is **no bound on the number of lanes**, only on per-lane concurrency. |
 | The real concurrency ceiling is the delivery relay's Broadway `concurrency` — **default 25**. | `Delivery.Supervisor` opts (`concurrency`) | At most ~25 sends in flight *for the whole system*. This is the scarce resource everything competes for. |
-| The relay claims `:scheduled` rows **oldest-first**. | `Dispatcher.claim/1` (`ORDER BY event_id ASC`) | A failing connection's backlog is the *oldest* work, so it is claimed *first* — and a dead-but-hanging endpoint holds its slot for the full lease (`http_max_timeout + 30s`). Unbounded probing of sick connections **starves** healthy traffic. |
+| The relay claims `:scheduled` rows **oldest-first**. | `Dispatcher.claim/1` (`ORDER BY event_id ASC`) | A failing connection's backlog is the *oldest* work, so it is claimed *first* — and a dead-but-hanging endpoint holds its slot for the full lease (default `max_demand × http_max_timeout + 30s`). Unbounded probing of sick connections **starves** healthy traffic. |
 
 **The gap in today's behavior.** Suspension is enforced *only* in the scheduler
 (`find_schedulable_events` filters `d.suspended = false`), which gates
@@ -547,15 +547,19 @@ config :ash_integration,
 
 `recompute_interval_ms` must comfortably exceed the **worst-case probe
 duration** — not "typical" latency but the soft-lease window,
-`Delivery.Supervisor.lease_seconds/0 = http_max_timeout + 30s` (§2). A probe that
+`Delivery.Supervisor.lease_seconds/0` (§2). By default that lease is derived as
+`max_demand × http_max_timeout + margin` (a claimed row can wait in the in-flight
+buffer behind other sends, so the lease is sized from the buffer depth, not a single
+timeout); a host may also override `lease_seconds` outright. A probe that
 opens just before a slow endpoint's timeout can take the full lease to resolve; if
 `recompute_interval_ms` were shorter, the recompute could fire while that probe is
 still in flight and hold the entity suspended for another whole interval. (This is
 purely *recovery latency*, never a mis-flip: with no success logged yet, the entity
 correctly stays suspended.) Because of this, the **default is derived, not a
 free-standing constant**: `recompute_interval_ms` defaults to
-`lease_seconds * 1000 + 30s`, so it scales with the host's `http_max_timeout`
-instead of assuming a sub-30s timeout (which a flat 60s default silently would).
+`lease_seconds * 1000 + 30s`, so it scales with the host's `http_max_timeout` (and
+`max_demand`, which the derived lease folds in) instead of assuming a sub-30s timeout
+(which a flat 60s default silently would).
 Note the same recompute cadence also **paces trip *detection***, not just recovery:
 the suspended set is only recomputed each interval, so a host that picks a large
 `http_max_timeout` (and thus a long derived interval) waits proportionally longer

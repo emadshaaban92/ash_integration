@@ -43,7 +43,10 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   guard), so a stale claimer (its lease expired and another pass re-claimed the row)
   can never resurrect or double-finalize it — its write matches nothing and is a
   clean no-op. At-least-once still holds (consumers dedup by `event-id`); the
-  derived lease (≫ the transport timeout) makes this window rare in the first place.
+  derived lease keeps this window rare — but that rests on the in-flight buffer
+  staying shallow, so it is sized from `max_demand × http_max_timeout_ms`, not the
+  bare timeout (a claimed row waits in the buffer behind other sends, not just its
+  own). See `Delivery.Supervisor`'s lease moduledoc for the buffer↔lease coupling.
 
   Deployment: one pipeline per node (each claims via `SKIP LOCKED`). The whole
   runtime is gated by `AshIntegration.enabled?/0`; tests run with it off and start
@@ -84,6 +87,12 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
       processors: [
         default: [
           concurrency: config[:concurrency],
+          # Cap how many `:scheduled` rows each processor prefetches from the producer.
+          # Below Broadway's default of 10 on purpose: a delivery message costs a whole
+          # transport round-trip and there's no send-batching to fill, so prefetch only
+          # holds rows leased-but-idle. `max_demand × concurrency` is the standing
+          # in-flight buffer the derived lease is sized from — see `Stage`'s moduledoc.
+          max_demand: config[:max_demand],
           # Group a connection's rows onto one processor so a future per-connection
           # transport batch forms there. Not an ordering mechanism — the scheduler
           # owns that; distinct lane heads can run in any order.
