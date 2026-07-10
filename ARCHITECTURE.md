@@ -65,7 +65,11 @@ them; if you must change one, update this list and the relevant design doc.
 
 1. **The `Event` log is the immutable source of truth / transactional outbox.**
    `dispatched_at = NULL` means "still in the outbox." There is no separate job
-   queue — relays poll the tables.
+   queue — relays poll the tables. Dispatch has **no attempt ceiling**:
+   `Event.dispatch_attempts` is an honest counter, and terminal-ness lives in
+   `dispatch_terminal_reason` (`:expired`), set only by the opt-in age sweep — so a
+   transient infra failure can never poison the backlog. See
+   `design/dispatch-terminal-model.md`.
 2. **Delivery is at-least-once; consumers dedup by `event-id`.** Idempotency is on
    the consumer side by design; a lost claim just gets re-claimed after its lease
    expires. A claim leases and reloads its rows **atomically** (one transaction), so a
@@ -108,6 +112,7 @@ shaped this way. The `guides/` docs are user-facing *how-to*.
 |-----|--------|
 | `design/outbound-architecture.md` | The six load-bearing concepts (event type, producer, connection, subscription, event key, Event vs EventDelivery). **Start here.** |
 | `design/delivery-retry-model.md` | Retry timing, backoff, terminal semantics, the `:failed` state, one-field-one-fact. |
+| `design/dispatch-terminal-model.md` | The dispatch give-up policy: age-based `:expired` terminal, not an attempt ceiling; why `dispatch_attempts` is an honest counter. |
 | `design/connection-health.md` | Derived/windowed suspension, park-on-suspend, bounded recovery probe. |
 | `design/content-suppression.md` | Content-addressed dedup, field-level subscription, `suppress_unchanged?`. |
 | `design/configurable-signing.md` | Author-controlled signing schemes; the two signing invariants. |

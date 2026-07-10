@@ -24,18 +24,18 @@ defmodule AshIntegration do
 
       config :ash_integration,
         dispatch: [
-          concurrency:      System.schedulers_online(),
-          poll_interval_ms: 250,
-          batch_size:       100,
-          max_attempts:     20
+          concurrency:         System.schedulers_online(),
+          poll_interval_ms:    250,
+          batch_size:          100,
+          max_dispatch_age_ms: nil   # opt-in age give-up; nil = never (no attempt ceiling)
         ],
         delivery: [
-          concurrency:      25,
-          poll_interval_ms: 250,
-          batch_size:       100,
-          max_attempts:     20,
-          backoff_base_ms:    1_000,
-          backoff_max_ms:   300_000
+          concurrency:         25,
+          poll_interval_ms:    250,
+          batch_size:          100,
+          max_delivery_age_ms: nil,  # opt-in age give-up; nil = never (no attempt ceiling)
+          backoff_base_ms:     1_000,
+          backoff_max_ms:      300_000
         ],
         retention: [
           interval_ms:   :timer.minutes(1),
@@ -219,9 +219,9 @@ defmodule AshIntegration do
 
   # ── Dispatch & delivery stages ────────────────────────────────────────────
   # Each pipeline stage owns and validates its own configuration under a nested key
-  # — see `AshIntegration.Outbound.Dispatch.Supervisor` (`:dispatch`) and
-  # `AshIntegration.Outbound.Delivery.Supervisor` (`:delivery`, which also owns the
-  # delivery poison ceiling `max_attempts` and the durable backoff knobs). They are
-  # intentionally NOT surfaced here: this module doesn't become a god-module of every
-  # knob.
+  # — see `AshIntegration.Outbound.Dispatch.Supervisor` (`:dispatch`, incl. the opt-in
+  # `max_dispatch_age_ms` give-up) and `AshIntegration.Outbound.Delivery.Supervisor`
+  # (`:delivery`, incl. the opt-in `max_delivery_age_ms` give-up and the durable
+  # backoff knobs). Neither stage has an attempt ceiling. They are intentionally NOT
+  # surfaced here: this module doesn't become a god-module of every knob.
 end

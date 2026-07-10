@@ -61,16 +61,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dispatch now uses an age-based terminal model, not an attempt ceiling.** An
+  undispatched `Event` no longer becomes poison after `max_attempts` claims; instead
+  `Event.dispatch_attempts` is an honest, monotonic counter that never gates the
+  claim, and terminal-ness lives in a new `dispatch_terminal_reason` field
+  (`:expired`), set **only** by an opt-in age sweep. This fixes the failure mode
+  where the attempt ceiling counted infra flakiness — with `max_attempts: 20` and a
+  60s lease, ~20 minutes of degraded-DB operation could poison the entire outbox
+  backlog, each event then needing a manual `:reset_dispatch`. With the new default
+  (`max_dispatch_age_ms: nil`, never expire), a transient infra failure can never
+  make a row terminal — it is simply re-emitted, one row per lane, until it succeeds.
+  See `design/dispatch-terminal-model.md`.
+  - **Config:** the `dispatch: [max_attempts: 20]` knob is **removed**, replaced by
+    `dispatch: [max_dispatch_age_ms: nil]` (opt-in; mirrors delivery's
+    `max_delivery_age_ms`).
+  - **Schema:** new nullable `dispatch_terminal_reason` column on the Event resource
+    (migration `add_dispatch_terminal_reason`).
+  - **Telemetry:** `[:ash_integration, :dispatch, :poison]` is **removed**, replaced
+    by `[:ash_integration, :dispatch, :expired]` (`%{count}`), emitted by the sweep.
+  - **Behavior:** `:reset_dispatch` now clears `dispatch_terminal_reason` and no
+    longer zeroes `dispatch_attempts` (the counter stays honest). New
+    `Dispatcher.reset_terminal/0` bulk-clears every stuck event in one call. The
+    opt-in age sweep runs on the `Retention` GenServer's periodic tick.
+
 - **The dispatch ack now records `dispatch_error`s in bulk.** On a failed dispatch
   the acknowledger called `record_dispatch_errors/1`, which did a sequential
   `Ash.get` + `Ash.update` per failed event — so a whole-batch infra failure over a
-  `batch_size`-of-N batch cost ~2·N queries in the ack path. It now loads the failed
-  events in one read and writes them with `Ash.bulk_update` grouped by the resolved
-  message, so a batch that fails with a shared reason collapses to a single `UPDATE`.
-  Behavior is unchanged: `dispatched_at` is still never stamped, the per-event
-  poison log + telemetry still fire exactly once, and the `mark_dispatched` host
-  seam is still the write path (a host's custom change falls back to per-record
-  streaming).
+  `batch_size`-of-N batch cost ~2·N queries in the ack path. It now writes the failed
+  events with `Ash.bulk_update` grouped by the resolved reason, so a batch that fails
+  with a shared reason collapses to a single `UPDATE`. The failed path is now
+  visibility-only (it records the raw `dispatch_error` and nothing else — no terminal
+  verdict, since dispatch has no attempt ceiling); `dispatched_at` is still never
+  stamped, and the `mark_dispatched` host seam is still the write path.
 
 - **OAuth2 `:basic` token-endpoint auth now form-urlencodes the client id and
   secret** before Base64-encoding them into the `Authorization` header, per RFC 6749

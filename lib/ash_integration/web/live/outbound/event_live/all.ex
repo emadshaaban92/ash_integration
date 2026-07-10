@@ -2,10 +2,11 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
   @moduledoc false
   # The immutable Event browser — the transactional outbox. One row per captured
   # fact (independent of how many subscriptions it fans out to).
-  # `dispatched_at IS NULL` means still in the outbox; a fact whose
-  # `dispatch_attempts` has hit the ceiling is **stuck/poison** — left undispatched
-  # on purpose, blocking its lane, never auto-resolved. The per-subscription
-  # delivery state machine lives under /deliveries.
+  # `dispatched_at IS NULL` means still in the outbox; a fact that is terminal
+  # (`dispatch_terminal_reason` set — the opt-in age sweep gave up on it) is
+  # **stuck** — left undispatched on purpose, blocking its lane, never auto-resolved.
+  # There is no attempt ceiling. The per-subscription delivery state machine lives
+  # under /deliveries.
   use AshIntegration.Web, :live_view
 
   require Ash.Query
@@ -54,7 +55,7 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
   defp apply_outbox(query, :dispatched), do: Ash.Query.filter(query, not is_nil(dispatched_at))
 
   defp apply_outbox(query, :stuck),
-    do: Ash.Query.filter(query, is_nil(dispatched_at) and dispatch_attempts >= ^max_attempts())
+    do: Ash.Query.filter(query, is_nil(dispatched_at) and not is_nil(dispatch_terminal_reason))
 
   defp apply_outbox(query, _), do: query
 
@@ -119,7 +120,7 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
             </td>
             <td class="font-mono text-xs">{event.event_key}</td>
             <td class="text-sm">{event.source_resource} · {event.source_action}</td>
-            <td><EventHelpers.outbox_badge event={event} max_attempts={max_attempts()} /></td>
+            <td><EventHelpers.outbox_badge event={event} /></td>
             <td class="text-sm text-base-content/60">{Helpers.format_datetime(event.created_at)}</td>
             <td class="text-right">
               <.link navigate={path(:show, event.id)} class="btn btn-ghost btn-xs">View</.link>
@@ -134,7 +135,7 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
 
   defp outbox_label("in_outbox"), do: "In outbox"
   defp outbox_label("dispatched"), do: "Dispatched"
-  defp outbox_label("stuck"), do: "Stuck (poison)"
+  defp outbox_label("stuck"), do: "Stuck (expired)"
   defp outbox_label(other), do: other
 
   defp empty_filters, do: %{event_type: nil, outbox: nil}
@@ -148,8 +149,6 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
 
   defp normalize_outbox(state) when state in @outbox_states, do: String.to_existing_atom(state)
   defp normalize_outbox(_), do: nil
-
-  defp max_attempts, do: AshIntegration.Outbound.Dispatch.Supervisor.max_attempts()
 
   defp path(:show, id), do: base() <> "/events/#{id}"
 

@@ -27,8 +27,10 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
   all-or-nothing; if it fails (infra), we retry each event in its own single-row
   `bulk_update` so a poison row fails alone and the rest still dispatch. Whatever
   still fails is marked `Broadway.Message.failed/2`; the ack records the error and
-  leaves it undispatched for the lease to re-emit (the `dispatch_attempts` ceiling
-  eventually leaves it stuck — never auto-resolved).
+  leaves it undispatched for the lease to re-emit. There is no attempt ceiling —
+  `dispatch_attempts` is bumped honestly on each claim but never makes a row terminal;
+  only the opt-in age sweep (`Dispatcher.sweep_expired/0`) can (`:expired`, lane
+  blocked, never auto-resolved). See `design/dispatch-terminal-model.md`.
 
   **Ordering correctness is not this pipeline's job.** The scheduler high-water gate
   owns it, so dispatch may run unordered, parallel, and multi-node. The

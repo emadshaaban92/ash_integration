@@ -8,12 +8,14 @@ defmodule AshIntegration.Outbound.Capture.Event.PolicyTransformer do
   # `:reset_dispatch` is the library-internal un-poison write (driven by the operator
   # dashboard under `authorize?: false`, gated on the separate `:mark_dispatched`
   # permission) — so hard-denying `:reset_dispatch` for actor-bearing callers does
-  # not break the operator gate.
+  # not break the operator gate. `:expire_dispatch` is the library-internal terminal
+  # write (driven only by the age sweep under `authorize?: false`), never an
+  # actor-facing action — so it is hard-denied for authorized callers too.
   use Spark.Dsl.Transformer
 
   alias AshIntegration.Outbound.SystemActionPolicy
 
-  @system_actions [:reset_dispatch]
+  @system_actions [:reset_dispatch, :expire_dispatch]
 
   @impl true
   def after?(_), do: true

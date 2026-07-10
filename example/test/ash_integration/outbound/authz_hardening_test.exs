@@ -118,6 +118,21 @@ defmodule Example.Outbound.AuthzHardeningTest do
                |> Ash.Changeset.for_update(:reset_dispatch, %{}, authorize?: false)
                |> Ash.update(authorize?: false)
     end
+
+    test "Event.expire_dispatch is forbidden for an actor but allowed under system authority",
+         ctx do
+      assert {:error, %Ash.Error.Forbidden{}} =
+               ctx.event
+               |> Ash.Changeset.for_update(:expire_dispatch, %{}, actor: ctx.user)
+               |> Ash.update(actor: ctx.user)
+
+      assert {:ok, event} =
+               ctx.event
+               |> Ash.Changeset.for_update(:expire_dispatch, %{}, authorize?: false)
+               |> Ash.update(authorize?: false)
+
+      assert event.dispatch_terminal_reason == :expired
+    end
   end
 
   # ── helpers ───────────────────────────────────────────────────────────────

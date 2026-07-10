@@ -17,7 +17,9 @@ defmodule AshIntegration.Telemetry do
 
     * `[:ash_integration, :capture, :isolated_failure]` — an isolated `capture`
       raise; the change never reached the outbox.
-    * `[:ash_integration, :dispatch, :poison]` — an Event hit the dispatch ceiling.
+    * `[:ash_integration, :dispatch, :expired]` — the opt-in age sweep took N
+      undispatched Events terminal (`dispatch_terminal_reason: :expired`). There is
+      no attempt-ceiling poison event — dispatch has no attempt ceiling.
     * `[:ash_integration, :coalesce, :events_dropped]` — pending deliveries
       collapsed by latest-state coalescing.
     * `[:ash_integration, :delivery, :parked]` — a build failure parked a delivery
@@ -43,7 +45,7 @@ defmodule AshIntegration.Telemetry do
 
   @events [
     [:ash_integration, :capture, :isolated_failure],
-    [:ash_integration, :dispatch, :poison],
+    [:ash_integration, :dispatch, :expired],
     [:ash_integration, :coalesce, :events_dropped],
     [:ash_integration, :delivery, :parked],
     [:ash_integration, :delivery, :delivered],

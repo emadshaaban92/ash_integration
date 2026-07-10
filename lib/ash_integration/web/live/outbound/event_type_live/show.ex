@@ -71,8 +71,6 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, max_attempts: max_attempts())
-
     ~H"""
     <div class="p-4 sm:p-6">
       <.outbound_nav active={:event_types} />
@@ -158,7 +156,7 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
         <tbody>
           <tr :for={event <- @recent_events}>
             <td class="font-mono text-xs">{event.event_key}</td>
-            <td><EventHelpers.outbox_badge event={event} max_attempts={@max_attempts} /></td>
+            <td><EventHelpers.outbox_badge event={event} /></td>
             <td class="text-sm text-base-content/60">{Helpers.format_datetime(event.created_at)}</td>
             <td class="text-right">
               <.link navigate={base() <> "/events/#{event.id}"} class="btn btn-ghost btn-xs">
@@ -171,8 +169,6 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
     </div>
     """
   end
-
-  defp max_attempts, do: AshIntegration.Outbound.Dispatch.Supervisor.max_attempts()
 
   defp path(:index), do: base() <> "/event-types"
   defp base, do: AshIntegration.Web.base_path()

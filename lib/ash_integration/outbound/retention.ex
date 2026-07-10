@@ -37,6 +37,18 @@ defmodule AshIntegration.Outbound.Retention do
   keep only a generic `:destroy`, while this module owns the filters and runs the
   deletes through Ash (`Ash.bulk_destroy`).
 
+  ## Dispatch expiry sweep (opt-in)
+
+  The periodic tick also runs `Dispatch.Dispatcher.sweep_expired/0` — the opt-in
+  age-based dispatch give-up. It takes an undispatched Event older than
+  `dispatch: [max_dispatch_age_ms: …]` terminal (`dispatch_terminal_reason:
+  :expired`), leaving it stuck with its lane blocked (a `:expired` Event keeps
+  `dispatched_at` NULL, so the `dispatched_at IS NOT NULL` event-delete guard already
+  never reaps it — its lane is never silently unblocked). A no-op unless the age is
+  configured. Configuration is owned by the dispatch stage; this stage only provides
+  the timer, mirroring how the delivery age-sweep rides the `Health` tick. See
+  `design/dispatch-terminal-model.md`.
+
   ## Config — one nested key, owned by this stage
 
       config :ash_integration,
@@ -143,6 +155,17 @@ defmodule AshIntegration.Outbound.Retention do
       sweep()
     rescue
       e -> Logger.error("AshIntegration retention sweep failed: #{Exception.message(e)}")
+    end
+
+    # Piggyback the opt-in dispatch age-sweep on this same periodic tick — it owns
+    # the Event table's age policy, so "take an undispatched Event terminal when it's
+    # too old to dispatch" sits beside "delete a dispatched Event past its window."
+    # A no-op unless `dispatch: [max_dispatch_age_ms: …]` is set. This mirrors how the
+    # delivery age-sweep rides the `Health` tick — see `design/dispatch-terminal-model.md`.
+    try do
+      AshIntegration.Outbound.Dispatch.Dispatcher.sweep_expired()
+    rescue
+      e -> Logger.error("AshIntegration dispatch expiry sweep failed: #{Exception.message(e)}")
     end
 
     schedule(state.interval)

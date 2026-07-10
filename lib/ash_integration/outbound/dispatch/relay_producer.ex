@@ -58,9 +58,9 @@ defmodule AshIntegration.Outbound.Dispatch.RelayProducer do
 
   @impl GenStage
   # The sole discovery trigger: pick up newly-committed events (from this node or
-  # any other). Reschedules itself. (It does NOT reap poison rows: a
-  # terminally-stuck event is left undispatched and keeps its lane blocked by
-  # design until a human/host resolves it; we never auto-resolve.)
+  # any other). Reschedules itself. (It does NOT reap terminal rows: a terminally-stuck
+  # (`:expired`) event is left undispatched and keeps its lane blocked by design until
+  # a human/host resolves it; we never auto-resolve.)
   #
   # A `:poll` already sitting in the mailbox when draining begins lands here after
   # `prepare_for_draining/1` flipped the flag — swallow it (don't reschedule, don't

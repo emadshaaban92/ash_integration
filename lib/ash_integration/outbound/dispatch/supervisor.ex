@@ -8,18 +8,18 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
     1. reads the host's `:dispatch` config slice,
     2. validates it against `opts_schema/0` (NimbleOptions) — unknown keys and bad
        types fail the boot loudly (fail-fast on config, not lazily at first use),
-    3. publishes the value read from *outside* this process tree (`:max_attempts`)
-       into `:persistent_term`, and
+    3. publishes the value read from *outside* this process tree
+       (`:max_dispatch_age_ms`) into `:persistent_term`, and
     4. starts the Broadway relay pipeline.
 
   ## Config — one nested key, owned by this stage
 
       config :ash_integration,
         dispatch: [
-          concurrency:      System.schedulers_online(),
-          poll_interval_ms: 250,
-          batch_size:       100,
-          max_attempts:     20
+          concurrency:        System.schedulers_online(),
+          poll_interval_ms:   250,
+          batch_size:         100,
+          max_dispatch_age_ms: nil
         ]
 
   Whether this runs at all is the single `AshIntegration.enabled?/0` switch; there
@@ -34,10 +34,10 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
   In-tree knobs (`concurrency`, `poll_interval_ms`, `batch_size`) are passed
   **down** to the relay and producer as start args — nothing reaches back into
   `Application.get_env`. The two values read from *outside* the pipeline tree
-  (`Dispatcher.claim/1` on the reprocess paths, the dashboard "is this poison?"
-  view) are read via `max_attempts/0` and `lease_seconds/0`, backed by
-  `:persistent_term` for lock-free O(1) reads, falling back to the schema default
-  when the stage isn't running.
+  (`Dispatcher.sweep_expired/0`, the dashboard "is this poison?" view) are read via
+  `max_dispatch_age_ms/0` and `lease_seconds/0`, backed by `:persistent_term` for
+  lock-free O(1) reads, falling back to the schema default when the stage isn't
+  running.
   """
   use Supervisor
 
@@ -85,11 +85,11 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
         doc:
           "Max events claimed from the outbox and fanned out per round. This is ALSO the dispatch transaction size: the relay pins Ash's bulk-update `batch_size` to the batch length so the whole fan-out (stamps + delivery inserts + coalesce UPDATEs) commits atomically, which means one transaction holds locks proportional to batch_size × subscriptions. Keep it modest (hundreds, not tens of thousands) — a very large value trades atomicity for long-held row locks."
       ],
-      max_attempts: [
-        type: :pos_integer,
-        default: 20,
+      max_dispatch_age_ms: [
+        type: {:or, [:pos_integer, {:in, [nil]}]},
+        default: nil,
         doc:
-          "Claim attempts before an undispatched Event becomes terminal (poison): left stuck, lane blocked, never auto-resolved."
+          "Opt-in give-up policy: an undispatched Event older than this (from `created_at`) is taken terminal (`dispatch_terminal_reason: :expired`) by the age sweep, leaving it stuck with its `(connection, event_key)` lane blocked. `nil` (default) = never expire — a dispatch that keeps failing (almost always transient infra) retries forever, one row per lane, so a degraded DB never poisons the backlog. There is deliberately no attempt ceiling: `dispatch_attempts` is an honest counter, not a verdict. See `design/dispatch-terminal-model.md`."
       ]
     ]
   end
@@ -106,17 +106,18 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
     config = validate!(Application.get_env(:ash_integration, @config_key, []))
 
     # Publish the cross-tree-read knob for lock-free reads from outside this tree
-    # (Dispatcher.claim on the reprocess paths, the dashboard poison view).
-    put_config(:max_attempts, config[:max_attempts])
+    # (the age sweep in Dispatcher.sweep_expired, the dashboard poison view).
+    put_config(:max_dispatch_age_ms, config[:max_dispatch_age_ms])
 
     Supervisor.init([{Relay, relay_opts(config)}], strategy: :one_for_one)
   end
 
   @doc """
-  Terminal retry ceiling (poison) for dispatch. Cross-tree read; falls back to the
+  Opt-in max dispatch age (ms) before an undispatched Event is taken terminal
+  (`:expired`) by the age sweep; `nil` = never. Cross-tree read; falls back to the
   schema default when the stage supervisor isn't running.
   """
-  def max_attempts, do: get_config(:max_attempts)
+  def max_dispatch_age_ms, do: get_config(:max_dispatch_age_ms)
 
   @doc """
   Soft-lease window (seconds) a claimed Event is reserved for before reclaim. An
@@ -141,7 +142,7 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
 
   # ── internals ──────────────────────────────────────────────────────────────
 
-  # Only the in-tree knobs are handed to the pipeline; lease/max_attempts are
+  # Only the in-tree knobs are handed to the pipeline; lease/max_dispatch_age_ms are
   # read cross-tree via persistent_term, not threaded through the relay.
   defp relay_opts(config),
     do: Keyword.take(config, [:concurrency, :poll_interval_ms, :batch_size])

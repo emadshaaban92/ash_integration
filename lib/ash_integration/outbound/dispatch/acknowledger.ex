@@ -5,9 +5,9 @@ defmodule AshIntegration.Outbound.Dispatch.Acknowledger do
   # The stamp happens inside the `:dispatch` transaction (handle_batch), atomic with
   # materialization — so a successful message is already dispatched by the time we
   # ack. The ack's remaining jobs are: record a `dispatch_error` for any failed
-  # message (it stays undispatched; the lease re-emits, and the `dispatch_attempts`
-  # ceiling eventually leaves it stuck — never auto-resolved), and notify the
-  # scheduler so lanes waiting on these events get re-evaluated.
+  # message (visibility only — it stays undispatched and the lease re-emits it; there
+  # is no attempt ceiling, so only the opt-in age sweep can ever leave it stuck), and
+  # notify the scheduler so lanes waiting on these events get re-evaluated.
   @behaviour Broadway.Acknowledger
 
   alias AshIntegration.Outbound.Dispatch.Dispatcher

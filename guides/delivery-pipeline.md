@@ -145,16 +145,20 @@ Outcomes:
 - **Infra failure mid-materialize** (DB unavailable) → `dispatched_at` is left
   NULL; the lease expires and the relay re-emits the event. Re-materialization is
   idempotent via the `(event_id, subscription_id)` unique identity.
-- **Terminal (poison) events**: every claim bumps `Event.dispatch_attempts`; past
-  the ceiling (default 20) the relay stops retrying the event. It is **left
-  undispatched** with a `dispatch_error` (logged + telemetry) — it is **never**
-  auto-resolved, so its lane stays blocked until you fix the cause and reprocess
-  (`Dispatcher.dispatch_event!/1`). This is deliberate: silently stamping a
-  never-delivered event and letting a newer same-key event jump ahead would break
-  ordering. A host that wants different behaviour can add a change on the `Event`
-  resource (e.g. stamp `dispatched_at` once `dispatch_error` is set) — the library
-  never does it automatically. Find stuck events with `dispatched_at IS NULL AND
-  dispatch_attempts >= 20`.
+- **Terminal (`:expired`) events**: there is **no attempt ceiling**. Every claim
+  bumps `Event.dispatch_attempts`, but that is an honest counter, never a verdict —
+  a failed dispatch (almost always transient infra) is just re-emitted on the next
+  lease, one row per lane, so a degraded DB can never poison the backlog. An event
+  becomes terminal only via the **opt-in age sweep**: set `dispatch:
+  [max_dispatch_age_ms: …]` and an undispatched Event older than that is taken
+  terminal (`dispatch_terminal_reason: :expired`, logged + `[:ash_integration,
+  :dispatch, :expired]` telemetry). A terminal event is **left undispatched** and
+  **never** auto-resolved, so its lane stays blocked until you fix the cause and
+  `:reset_dispatch` it (or `Dispatcher.reset_terminal/0` to clear them all at once).
+  This is deliberate: silently stamping a never-delivered event and letting a newer
+  same-key event jump ahead would break ordering. Find stuck events with
+  `dispatched_at IS NULL AND dispatch_terminal_reason IS NOT NULL`. See
+  `design/dispatch-terminal-model.md`.
 
 Deliveries are created **even for suspended** subscriptions/connections, so
 suspension never loses data. Only `active = false` (deactivation) stops delivery
