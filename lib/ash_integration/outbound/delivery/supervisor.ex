@@ -22,35 +22,58 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
       config :ash_integration,
         delivery: [
           concurrency:    25,
+          max_demand:      4,
           poll_interval_ms: 250,
           batch_size:     100,
           backoff_base_ms:   1_000,
           backoff_max_ms:  300_000,
-          max_delivery_age_ms: nil
+          max_delivery_age_ms: nil,
+          lease_seconds:   nil
         ]
 
   Whether this runs at all is the single `AshIntegration.enabled?/0` switch; there
   is no per-stage on/off.
 
-  ## Lease is derived, not configured
+  ## Lease: derived-safe by default, overridable
 
-  Unlike dispatch (whose lease is an internal node-liveness constant), the delivery
-  lease IS derivable: delivery work has a host-configured, globally-capped timeout
+  A claimed delivery holds its lease from claim until its send finishes — *including*
+  the time it waits in Broadway's in-flight buffer behind other sends. That buffer is
+  ≈ `max_demand × concurrency` deep and drains `concurrency` sends at a time, so the
+  worst-case claim→send wait is ≈ `max_demand × http_max_timeout_ms` (the concurrency
+  cancels). The lease has to outlive THAT: if a healthy node's own still-buffered row
+  outlives its lease, another pass re-claims it — a duplicate send to the customer
+  plus an inflated `attempts` (which distorts the backoff exponent).
+
+  So the derived default of `lease_seconds/0` keys off BOTH the (globally-capped)
+  transport timeout AND `max_demand`: `max_demand × http_max_timeout_ms + margin`
   (`AshIntegration.http_max_timeout_ms/0`; a per-connection `timeout_ms` is validated
-  ≤ it). So `lease_seconds/0` is `http_max_timeout_ms + margin`, guaranteeing the
-  lease always outlives the slowest attempt — there is deliberately no
-  `lease_seconds` knob. A lease sized ≫ the transport timeout bounds both
-  duplicate concurrent sends and false poisoning under the soft-lease model.
+  ≤ it). This is worst-case-safe — it assumes every buffered send ahead burns the
+  full timeout — so out of the box a buffered row is never falsely re-claimed. The two
+  knobs are a single decision: a deeper buffer (`max_demand`) forces a longer lease,
+  which also slows crash recovery (a dead node's in-flight rows wait the lease before
+  re-claim) and lengthens the health recompute cadence (`recompute_interval_ms`
+  defaults to `lease + 30s`). Keep `max_demand` small — a delivery message is a whole
+  transport round-trip, so prefetch buys no batching today (`transport_batch_size` is
+  1); raise it only once a batchable transport lands and you want fuller batches.
+
+  Unlike dispatch (whose lease is an internal node-liveness constant), `lease_seconds`
+  IS a host knob — but it defaults to `nil`, meaning "use the derived-safe value
+  above". An operator who would rather size the lease off *typical* (not worst-case)
+  send latency — accepting the consumer-side `event-id` dedup for the rare buffer
+  overrun in exchange for faster failover and a tighter health cadence — can set it
+  explicitly.
 
   ## How values reach their readers
 
-  In-tree knobs (`concurrency`, `poll_interval_ms`, `batch_size`) are passed
-  **down** to the relay and producer as start args — nothing reaches back into
-  `Application.get_env`. The values read from *outside* the pipeline tree
-  (the backoff computation on the failure path, the age-based `:expired` sweep) are
-  read via `backoff_base_ms/0` / `backoff_max_ms/0` / `max_delivery_age_ms/0`, backed
-  by `:persistent_term` for lock-free O(1) reads, falling back to the schema default
-  when the stage isn't running.
+  In-tree knobs (`concurrency`, `max_demand`, `poll_interval_ms`, `batch_size`) are
+  passed **down** to the relay and producer as start args. The values read from
+  *outside* the pipeline tree (the backoff computation on the failure path, the
+  age-based `:expired` sweep) are read via `backoff_base_ms/0` / `backoff_max_ms/0` /
+  `max_delivery_age_ms/0`, backed by `:persistent_term` for lock-free O(1) reads,
+  falling back to the schema default when the stage isn't running. The derived
+  `lease_seconds/0` (read by the producer's claim and the health recompute cadence)
+  and `concurrency/0` (the boot-time pool check) instead re-read and re-validate the
+  config live — both run outside the hot path.
   """
   use Supervisor
 
@@ -94,6 +117,18 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
         doc:
           "How many deliveries are sent in parallel. Higher than dispatch — delivery is I/O-bound."
       ],
+      max_demand: [
+        type: :pos_integer,
+        # Broadway's own default is 10; this pipeline wants it lower. `handle_message`
+        # is trivial (just routing to the batcher), so each processor forwards its
+        # prefetched rows straight through and they stand leased in the batcher queue
+        # behind the slow sends. `max_demand × concurrency` is the standing in-flight
+        # buffer and thus the driver of the derived lease — keep it small (see the
+        # moduledoc). 4 is a modest buffer; there is no send-batching to fill today.
+        default: 4,
+        doc:
+          "Broadway processor `max_demand`: `:scheduled` rows each processor prefetches from the producer. Sets the standing in-flight buffer (≈ `max_demand × concurrency`) and hence the derived `lease_seconds` default. Keep small — a delivery is a whole transport round-trip, so prefetch buys no batching today (`transport_batch_size` is 1)."
+      ],
       poll_interval_ms: [
         type: :pos_integer,
         default: 250,
@@ -120,6 +155,12 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
         default: nil,
         doc:
           "Opt-in give-up policy: a `:failed` delivery still retrying after this age (from `created_at`) is taken terminal (`terminal_reason: :expired`) by the health sweep, blocking its lane like any terminal head. `nil` (default) = never expire — a persistently-failing but retryable delivery retries forever, paced by backoff and bounded operationally by suspension + probe. There is deliberately no attempt ceiling."
+      ],
+      lease_seconds: [
+        type: {:or, [:pos_integer, {:in, [nil]}]},
+        default: nil,
+        doc:
+          "Soft-lease window (seconds) a claimed delivery is reserved before another pass/node may re-claim it. `nil` (default) DERIVES a worst-case-safe value — `max_demand × http_max_timeout_ms + margin` — so the lease outlives the deepest legitimate claim→send wait and a healthy node's buffered row is never falsely re-claimed (no duplicate send). Set an explicit value to override: a shorter lease sized off *typical* send latency trades that safety margin for faster crash recovery and a tighter health cadence, leaning on the consumer-side `event-id` dedup for the rare overrun. The lease also paces `recompute_interval_ms` (defaults to `lease + 30s`)."
       ]
     ]
   end
@@ -166,19 +207,28 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
   (`:deliver` / `:record_failure`). Read fresh (validated) from config; consumed by
   the boot-time pool check (`AshIntegration.Outbound.PoolCheck`).
   """
-  def concurrency do
-    Application.get_env(:ash_integration, @config_key, [])
-    |> validate!()
-    |> Keyword.fetch!(:concurrency)
-  end
+  def concurrency, do: Keyword.fetch!(live_config(), :concurrency)
 
   @doc """
   Soft-lease window (seconds) a claimed delivery is reserved before reclaim.
-  DERIVED from the (globally-capped) transport timeout plus a fixed margin — not a
-  host knob — so the lease always outlives the slowest attempt.
+
+  A host knob (`:lease_seconds`) that defaults to `nil`, meaning DERIVE a
+  worst-case-safe value from the (globally-capped) transport timeout AND the
+  in-flight buffer depth: `max_demand × http_max_timeout_ms + margin`, so the lease
+  always outlives the deepest legitimate claim→send wait (see the moduledoc). An
+  explicit `:lease_seconds` overrides the derivation.
   """
   def lease_seconds do
-    ceil((AshIntegration.http_max_timeout_ms() + @lease_margin_ms) / 1000)
+    config = live_config()
+
+    case config[:lease_seconds] do
+      nil -> derived_lease_seconds(config[:max_demand])
+      seconds -> seconds
+    end
+  end
+
+  defp derived_lease_seconds(max_demand) do
+    ceil((max_demand * AshIntegration.http_max_timeout_ms() + @lease_margin_ms) / 1000)
   end
 
   @doc false
@@ -189,10 +239,15 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
 
   # ── internals ──────────────────────────────────────────────────────────────
 
-  # Only the in-tree knobs are handed to the pipeline; max_attempts/backoff/lease are
-  # read cross-tree via persistent_term / derivation, not threaded through the relay.
+  # Only the in-tree knobs are handed to the pipeline; backoff/lease are read
+  # cross-tree via persistent_term / derivation, not threaded through the relay.
   defp relay_opts(config),
-    do: Keyword.take(config, [:concurrency, :poll_interval_ms, :batch_size])
+    do: Keyword.take(config, [:concurrency, :max_demand, :poll_interval_ms, :batch_size])
+
+  # Re-read and re-validate the `:delivery` config live (fills defaults). Used by the
+  # cross-tree readers that run outside the pipeline tree (`lease_seconds/0`,
+  # `concurrency/0`) — not a hot path, so no persistent_term needed.
+  defp live_config, do: validate!(Application.get_env(:ash_integration, @config_key, []))
 
   defp get_config(key), do: :persistent_term.get({__MODULE__, key}, default(key))
 
