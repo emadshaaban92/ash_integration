@@ -19,12 +19,14 @@ defmodule Example.Outbound.DispatchRelayTest do
     * the real async pipeline over an isolated `start_supervised!` instance.
   """
   use Example.DataCase, async: false
+  use Mimic
 
   require Ash.Query
 
   alias AshIntegration.Outbound.Dispatch.Acknowledger
   alias AshIntegration.Outbound.Dispatch.Relay
   alias AshIntegration.Outbound.Dispatch.Dispatcher
+  alias AshIntegration.Outbound.Dispatch.RelayProducer
   alias Example.Catalog.Widget
   alias Example.Outbound.{Connection, Event, EventDelivery, ProjectProbe, Subscription}
 
@@ -194,6 +196,59 @@ defmodule Example.Outbound.DispatchRelayTest do
 
       drain_dispatch!()
       assert [] = Dispatcher.claim(10)
+    end
+
+    test "a reload failure rolls the lease + attempt bump back (no orphaned claim)", %{
+      connection: conn
+    } do
+      create_subscription!(conn, "widget.updated")
+      create_widget!(%{name: "w", stock: 1})
+
+      # The lease UPDATE commits inside the claim transaction, then the reload blips. The
+      # reload shares that transaction, so its failure rolls the UPDATE back with it — the
+      # row must be left exactly as it was (claimable, attempts still 0), not leased-but-
+      # unemitted for a full lease window with `dispatch_attempts` silently burned.
+      stub(Ash, :read, fn _query, _opts ->
+        {:error, Ash.Error.Unknown.exception(errors: [%RuntimeError{message: "db blip"}])}
+      end)
+
+      assert [] = Dispatcher.claim(10)
+
+      # Assert via raw SQL — `Ash.read` is stubbed to fail for this process.
+      assert %{rows: [[nil, 0]]} =
+               Repo.query!("SELECT claimed_at, dispatch_attempts FROM outbound_events LIMIT 1")
+    end
+  end
+
+  describe "producer: a mid-drain claim failure never drops already-built messages" do
+    test "emits the messages from earlier chunks when a later chunk's claim raises" do
+      # Two undispatched events the mocked claim hands back one chunk at a time.
+      [e1, e2] = [%Event{id: Ash.UUIDv7.generate()}, %Event{id: Ash.UUIDv7.generate()}]
+
+      # Chunk 1 claims + builds e1; chunk 2 raises (a reload blip that somehow escaped
+      # Dispatcher.claim). The producer must still emit e1: its row is already leased, so
+      # dropping the message would strand it invisible for a full lease window.
+      Dispatcher
+      |> expect(:claim, fn _ -> [e1] end)
+      |> expect(:claim, fn _ -> raise "reload blip" end)
+
+      {:noreply, messages, new_state} =
+        RelayProducer.handle_demand(2, producer_state(claim_limit: 1))
+
+      assert [%Broadway.Message{data: ^e1}] = messages
+      # The unclaimed demand is held for the next poll, not lost.
+      assert new_state.demand == 1
+      refute e2.id == e1.id
+    end
+
+    test "a claim failure on the very first chunk emits nothing and holds all demand" do
+      expect(Dispatcher, :claim, fn _ -> raise "reload blip" end)
+
+      {:noreply, messages, new_state} =
+        RelayProducer.handle_demand(3, producer_state(claim_limit: 2))
+
+      assert messages == []
+      assert new_state.demand == 3
     end
   end
 
@@ -566,4 +621,16 @@ defmodule Example.Outbound.DispatchRelayTest do
   end
 
   defp reload(%resource{id: id}), do: Ash.get!(resource, id, authorize?: false)
+
+  # A minimal producer state for driving `handle_demand/2` directly (in-process, so the
+  # Mimic `Dispatcher.claim` stub applies). The poll timer is irrelevant here.
+  defp producer_state(opts) do
+    %{
+      demand: 0,
+      poll_interval: 60_000,
+      claim_limit: Keyword.fetch!(opts, :claim_limit),
+      poll_timer: nil,
+      draining: false
+    }
+  end
 end

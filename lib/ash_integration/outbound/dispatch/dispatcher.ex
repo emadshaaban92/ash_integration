@@ -63,6 +63,13 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
   bumps `dispatch_attempts` (the retry ceiling), then reloads the full structs by id
   (so the host's `project/3` sees real `Event.t()` records).
 
+  The lease UPDATE and the reload run in **one transaction**: the UPDATE commits the
+  lease + attempt bump, and if the reload then fails on a transient DB blip the whole
+  claim rolls back. Without that, a committed-but-unreloaded row would be leased yet
+  never emitted — invisible for a full lease window, its `dispatch_attempts` silently
+  burned toward the ceiling with no `dispatch_error` ever recorded. On any failure the
+  claim yields `[]` and the next poll retries cleanly.
+
   Events at/over `dispatch_max_attempts` are **never claimed again** — they are
   terminal (poison). We deliberately do **not** auto-resolve them: the row stays in
   the outbox (`dispatched_at` NULL) and its `(connection, event_key)` lane stays
@@ -70,7 +77,8 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
   """
   def claim(limit) when is_integer(limit) and limit > 0 do
     repo = AshIntegration.repo()
-    table = AshPostgres.DataLayer.Info.table(AshIntegration.event_resource())
+    resource = AshIntegration.event_resource()
+    table = AshPostgres.DataLayer.Info.table(resource)
     lease = Stage.lease_seconds()
     max_attempts = Stage.max_attempts()
 
@@ -94,26 +102,53 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     RETURNING e.id::text
     """
 
-    case repo.query(sql, [lease, max_attempts, limit], log: AshIntegration.query_log_level()) do
-      {:ok, %{rows: rows}} ->
-        ids = Enum.map(rows, fn [id] -> id end)
-        load_claimed(ids)
+    # UPDATE (lease + bump) and reload share ONE Ash-owned transaction. If `load_claimed`
+    # fails on a transient blip it returns `{:error, _}`, which rolls the lease + attempt
+    # bump back with it — so the rows stay claimable instead of leased-but-unemitted. Any
+    # failure yields [].
+    result =
+      Ash.transact(resource, fn ->
+        case repo.query(sql, [lease, max_attempts, limit], log: AshIntegration.query_log_level()) do
+          {:ok, %{rows: rows}} ->
+            case rows |> Enum.map(fn [id] -> id end) |> load_claimed() do
+              {:ok, events} -> events
+              {:error, error} -> {:error, error}
+            end
+
+          {:error, error} ->
+            {:error, error}
+        end
+      end)
+
+    case result do
+      {:ok, events} ->
+        events
 
       {:error, error} ->
-        Logger.error("Outbound dispatch: claim query failed: #{inspect(error)}")
+        Logger.error("Outbound dispatch: claim failed: #{inspect(error)}")
         []
     end
+  rescue
+    # `Ash.transact` re-raises if the function raises (e.g. a pool-checkout timeout on
+    # the UPDATE itself); the transaction has already rolled back. A claim must never
+    # crash the producer — hold the demand and let the next poll retry.
+    e ->
+      Logger.error("Outbound dispatch: claim failed: #{Exception.message(e)}")
+      []
   end
 
-  defp load_claimed([]), do: []
+  defp load_claimed([]), do: {:ok, []}
 
   defp load_claimed(ids) do
     AshIntegration.event_resource()
     |> Ash.Query.filter(id in ^ids)
-    |> Ash.read!(authorize?: false)
-    # Preserve the claim's FIFO order (the read does not guarantee it), so the
-    # relay's batches tend to see events in id (occurrence) order.
-    |> Enum.sort_by(& &1.id)
+    |> Ash.read(authorize?: false)
+    |> case do
+      # Preserve the claim's FIFO order (the read does not guarantee it), so the
+      # relay's batches tend to see events in id (occurrence) order.
+      {:ok, events} -> {:ok, Enum.sort_by(events, & &1.id)}
+      {:error, error} -> {:error, error}
+    end
   end
 
   # ── Failed-path bookkeeping (dispatch_error + poison) ───────────────────────

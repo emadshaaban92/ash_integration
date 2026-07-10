@@ -48,7 +48,8 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   """
   def claim(limit) when is_integer(limit) and limit > 0 do
     repo = AshIntegration.repo()
-    table = AshPostgres.DataLayer.Info.table(AshIntegration.event_delivery_resource())
+    resource = AshIntegration.event_delivery_resource()
+    table = AshPostgres.DataLayer.Info.table(resource)
     lease = Stage.lease_seconds()
 
     sql = """
@@ -66,18 +67,43 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
     RETURNING d.id::text
     """
 
-    case repo.query(sql, [lease, limit], log: AshIntegration.query_log_level()) do
-      {:ok, %{rows: rows}} ->
-        ids = Enum.map(rows, fn [id] -> id end)
-        load_claimed(ids)
+    # UPDATE (lease + bump) and reload share ONE Ash-owned transaction. If `load_claimed`
+    # fails on a transient blip it returns `{:error, _}`, which rolls the lease + attempt
+    # bump back with it — so a `:scheduled` row is never left leased-but-unemitted
+    # (invisible until its lease expires, its `attempts` bumped for work never done). Any
+    # failure yields [].
+    result =
+      Ash.transact(resource, fn ->
+        case repo.query(sql, [lease, limit], log: AshIntegration.query_log_level()) do
+          {:ok, %{rows: rows}} ->
+            case rows |> Enum.map(fn [id] -> id end) |> load_claimed() do
+              {:ok, deliveries} -> deliveries
+              {:error, error} -> {:error, error}
+            end
+
+          {:error, error} ->
+            {:error, error}
+        end
+      end)
+
+    case result do
+      {:ok, deliveries} ->
+        deliveries
 
       {:error, error} ->
-        Logger.error("Outbound delivery: claim query failed: #{inspect(error)}")
+        Logger.error("Outbound delivery: claim failed: #{inspect(error)}")
         []
     end
+  rescue
+    # `Ash.transact` re-raises if the function raises (e.g. a pool-checkout timeout on
+    # the UPDATE itself); the transaction has already rolled back. A claim must never
+    # crash the producer — hold the demand and let the next poll retry.
+    e ->
+      Logger.error("Outbound delivery: claim failed: #{Exception.message(e)}")
+      []
   end
 
-  defp load_claimed([]), do: []
+  defp load_claimed([]), do: {:ok, []}
 
   defp load_claimed(ids) do
     # Load only the source Event's `created_at` (not its payload) so the relay can
@@ -87,10 +113,13 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
     AshIntegration.event_delivery_resource()
     |> Ash.Query.filter(id in ^ids)
     |> Ash.Query.load([:connection, :subscription, event: event_query])
-    |> Ash.read!(authorize?: false)
-    # Preserve the claim's FIFO (event occurrence) order — the read does not
-    # guarantee it.
-    |> Enum.sort_by(& &1.event_id)
+    |> Ash.read(authorize?: false)
+    |> case do
+      # Preserve the claim's FIFO (event occurrence) order — the read does not
+      # guarantee it.
+      {:ok, deliveries} -> {:ok, Enum.sort_by(deliveries, & &1.event_id)}
+      {:error, error} -> {:error, error}
+    end
   end
 
   # ── Durable backoff (next_attempt_at) ───────────────────────────────────────
