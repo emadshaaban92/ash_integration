@@ -1,5 +1,18 @@
 # Project Rules
 
+## Architecture map
+
+- **Read [ARCHITECTURE.md](ARCHITECTURE.md) first** when orienting in this
+  codebase. It is the fast-start map: the mental model, the pipeline, entry
+  points, load-bearing invariants, and a "where do I look for X" subsystem table.
+  It points to the deeper `design/` (the *why*) and `guides/` (the *how*) docs.
+- **Always keep ARCHITECTURE.md up to date.** Whenever a change adds, moves,
+  renames, or removes a subsystem, entry point, transport, or load-bearing
+  invariant, update ARCHITECTURE.md in the **same** change — a stale map is worse
+  than none. Keep entries at the subsystem/file level, not the line level, so the
+  map ages slowly. A structural change that leaves ARCHITECTURE.md untouched is
+  incomplete.
+
 ## daisyUI
 
 - This project uses **daisyUI 5** (not v4). Before writing or modifying any
