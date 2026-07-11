@@ -75,7 +75,7 @@ defmodule Example.Outbound.DispatchRelayTest do
     end
   end
 
-  describe "batched project (open question)" do
+  describe "batched project (grouped per type, no partition)" do
     setup do
       start_supervised!(ProjectProbe)
       :ok
@@ -89,10 +89,40 @@ defmodule Example.Outbound.DispatchRelayTest do
 
       drain_dispatch!()
 
-      # The processor `{type, version}` partition groups all three onto one
-      # prepare_messages call → a single `project` invocation with the whole batch.
+      # `prepare_messages` groups its chunk by `{type, version}` and runs `project`
+      # once per group — batching that comes from the grouping, NOT a processor
+      # partition (there is none). All three `test.batched` events land in one group
+      # → a single `project` invocation with the whole batch.
       assert ProjectProbe.batches() == [3]
       assert Ash.count!(EventDelivery, authorize?: false) == 3
+    end
+
+    test "a mixed chunk (two type/version groups) still batches project once per group", %{
+      connection: conn
+    } do
+      # Without a partition a single processor chunk can carry more than one
+      # `{type, version}` — the case the partition used to prevent. `prepare_messages`
+      # must still collapse each group to one `project` call.
+      create_subscription!(conn, "test.batched")
+      create_subscription!(conn, "widget.updated")
+
+      for _ <- 1..3, do: create_widget!(%{name: "w", stock: 1})
+
+      # Claim every event and hand the whole mixed chunk to one `prepare_messages`
+      # call (exactly what a processor does when nothing pins types to processors).
+      claimed = Dispatcher.claim(100)
+
+      claimed
+      |> Enum.map(&message_for/1)
+      |> Relay.prepare_messages(%{})
+      |> Enum.map(&Relay.handle_message(:default, &1, %{}))
+      |> then(&Relay.handle_batch(:default, &1, %{}, %{}))
+
+      # The `test.batched` group (3 events) is projected exactly once, batched — even
+      # though the chunk also carried the `widget.updated` group.
+      assert ProjectProbe.batches() == [3]
+      # 3 test.batched + 3 widget.updated deliveries all materialized.
+      assert Ash.count!(EventDelivery, authorize?: false) == 6
     end
   end
 

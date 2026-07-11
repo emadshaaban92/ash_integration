@@ -193,8 +193,9 @@ handle_message → handle_batch → ack`):
 
   ```
   Producer (claim WHERE dispatched_at IS NULL, FOR UPDATE SKIP LOCKED + lease)
-    → Processors (partition_by {event_type, version} — so project batches per group)
-        prepare_messages: load subscriptions + run batched project/3
+    → Processors (no partition — events spread across all processors)
+        prepare_messages: group the chunk by {event_type, version},
+                          load subscriptions + run batched project/3 per group
         handle_message:   run the Lua transform → build delivery specs
     → Batcher
         handle_batch: stamp Event.dispatched_at + materialize + coalesce,
@@ -220,9 +221,15 @@ For each `(event_type, version)` batch the core:
 
 **Ordering correctness is not the relay's job.** The scheduler high-water gate (§8)
 owns it, so dispatch may run unordered, parallel, and multi-node — one pipeline per
-node, each claiming via `SKIP LOCKED`, no leader election. The `partition_by
-{event_type, version}` on processors exists only so `project/3` runs once per group,
-not as an ordering mechanism.
+node, each claiming via `SKIP LOCKED`, no leader election. Because ordering lives
+elsewhere, the processors carry **no `partition_by`**: events of a given
+`(event_type, version)` may run on any processor, so effective dispatch concurrency
+is the `concurrency` knob rather than the number of hot event types. `project/3`
+still batches — `prepare_messages` groups its chunk by `(event_type, version)` and
+runs `project/3` once per group — and since a chunk is only ever one demand's worth
+(≤ `max_demand`), a partition would not have grown the group, only pinned a whole type
+onto one processor. Spreading costs a few extra `project/3` calls and duplicate
+subscription reads per chunk; both are cheap.
 
 **Failure handling.**
 
