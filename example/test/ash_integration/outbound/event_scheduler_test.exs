@@ -188,6 +188,89 @@ defmodule Example.Outbound.EventSchedulerTest do
     end
   end
 
+  describe "bulk promotion of non-suppressible :pending heads" do
+    test "pending heads with no body_hash are bulk-scheduled in one sweep",
+         %{connection: dest} do
+      s1 = create_subscription!(dest, "widget.updated")
+
+      # Non-suppressible heads (body_hash nil — the subscription never opted into
+      # suppress_unchanged), each on its own lane so all are schedulable at once.
+      heads = for i <- 1..5, do: create_event!(s1, event_key: "bulk-#{i}")
+      assert Enum.all?(heads, &is_nil(reload(&1).body_hash))
+
+      Scheduler.sweep()
+
+      assert Enum.all?(heads, &(reload(&1).state == :scheduled))
+    end
+
+    test "a mixed batch promotes failed, non-suppressible pending, and suppressible pending heads",
+         %{connection: dest} do
+      s1 = create_subscription!(dest, "widget.updated")
+
+      # 1. A due :failed head → bulk :schedule (retry re-promotion).
+      failed = create_event!(s1, event_key: "failed", state: :failed)
+
+      # 2. A :pending head with no body_hash → bulk :schedule.
+      plain = create_event!(s1, event_key: "plain")
+
+      # 3. A suppressible :pending head whose body equals its lane's last delivered
+      #    body → per-row promote/1 → :suppressed. Seed the :delivered baseline
+      #    FIRST (smaller event_id) so it is the lane's last-delivered row.
+      _baseline = create_event!(s1, event_key: "sup", state: :delivered, body_hash: "H")
+      suppressed = create_event!(s1, event_key: "sup", body_hash: "H")
+
+      # 4. A suppressible :pending head whose body has no matching baseline → per-row
+      #    promote/1 → :scheduled (suppression must never withhold a genuine change).
+      changed = create_event!(s1, event_key: "changed", body_hash: "X")
+
+      Scheduler.sweep()
+
+      assert reload(failed).state == :scheduled
+      assert reload(plain).state == :scheduled
+      assert reload(suppressed).state == :suppressed
+      assert reload(changed).state == :scheduled
+    end
+  end
+
+  describe "guarded :pending-head promotion closes the read→write race" do
+    test "a head that raced to :scheduled between read and write is skipped",
+         %{connection: dest} do
+      s1 = create_subscription!(dest, "widget.updated")
+
+      raced = create_event!(s1, event_key: "raced")
+
+      # Another node promoted it after this sweep read it eligible. The stale batch's
+      # guarded write (`state == :pending`) must now match nothing — a clean no-op,
+      # not a second promotion.
+      Ash.update!(
+        Ash.Changeset.for_update(reload(raced), :schedule, %{}, authorize?: false),
+        authorize?: false
+      )
+
+      assert reload(raced).state == :scheduled
+      assert Scheduler.bulk_schedule_pending([raced.id]) == 0
+      assert reload(raced).state == :scheduled
+    end
+
+    test "a head that raced to a terminal state between read and write is skipped",
+         %{connection: dest} do
+      s1 = create_subscription!(dest, "widget.updated")
+
+      raced = create_event!(s1, event_key: "raced")
+
+      # Cancelled out from under the sweep (terminal). The write guard's
+      # `state == :pending` closes the race — no resurrect.
+      Ash.update!(
+        Ash.Changeset.for_update(reload(raced), :cancel, %{}, authorize?: false),
+        authorize?: false
+      )
+
+      assert reload(raced).state == :cancelled
+      assert Scheduler.bulk_schedule_pending([raced.id]) == 0
+      assert reload(raced).state == :cancelled
+    end
+  end
+
   describe "guarded :failed-head promotion replays backoff (multi-node race)" do
     test "does not re-promote a re-failed head whose fresh backoff is still in the future",
          %{connection: dest} do

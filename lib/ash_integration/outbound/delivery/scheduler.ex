@@ -113,9 +113,18 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
 
   `find_schedulable_events/1` already excludes blocked lanes (parked or
   suspended head, in-flight slot taken), so every head it returns is promotable.
-  `:failed` heads (retry re-promotions — always a real `:schedule`, never
-  content-suppressed) are promoted in ONE guarded bulk update; `:pending` heads
-  go one-by-one because each needs the per-row content-suppression decision.
+  Heads are promoted in as few round-trips as possible:
+
+    * `:failed` heads (retry re-promotions — always a real `:schedule`, never
+      content-suppressed) go through ONE guarded bulk update;
+    * `:pending` heads with **no** `body_hash` — their subscription never opted
+      into `suppress_unchanged`, the common case — can never be suppressed, so
+      they too go through ONE guarded bulk update (a mirror of the `:failed`
+      path, replaying the per-row eligibility guard);
+    * only `:pending` heads that **carry** a `body_hash` (suppression-eligible)
+      keep the per-row `promote/1` path, because each needs its own
+      content-suppression decision.
+
   We loop only while a full batch came back **and** we made progress, so a
   persistent failure can't spin.
 
@@ -128,10 +137,15 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   def sweep do
     heads = find_schedulable_events(@batch_size)
     {failed, pending} = Enum.split_with(heads, &(&1.state == :failed))
+    # A `:pending` head with a `body_hash` MAY be `:suppressed` instead of
+    # `:scheduled`, so it needs the per-row decision; one with no `body_hash`
+    # never can, so it bulk-schedules like a `:failed` head.
+    {suppressible, bulk_pending} = Enum.split_with(pending, &is_binary(&1.body_hash))
 
     progress =
       bulk_schedule_failed(Enum.map(failed, & &1.id)) +
-        Enum.count(pending, &(promote(&1.id) in [:scheduled, :suppressed]))
+        bulk_schedule_pending(Enum.map(bulk_pending, & &1.id)) +
+        Enum.count(suppressible, &(promote(&1.id) in [:scheduled, :suppressed]))
 
     if length(heads) >= @batch_size and progress > 0, do: sweep(), else: :ok
   end
@@ -172,6 +186,44 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
 
       %Ash.BulkResult{errors: errors} ->
         Logger.error("Scheduler: bulk :failed-head promotion failed: #{inspect(errors)}")
+        0
+    end
+  end
+
+  @doc false
+  # Bulk-promote the batch's non-suppressible `:pending` heads (`body_hash IS NULL`
+  # — the subscription never opted into `suppress_unchanged`, so there is no per-row
+  # content-suppression decision to make) in ONE guarded bulk UPDATE instead of a
+  # get(+baseline)+update round-trip per head. The query-side guard replays EXACTLY
+  # the eligibility the per-row path enforces (`apply_promotion/2`): still `:pending`
+  # AND still non-terminal — so a row that raced away (coalesced, grabbed by another
+  # scheduler, taken `:expired` by the age sweep, or advanced to `:parked`) matches
+  # nothing: a clean no-op, not a resurrect. The `{scheduled,failed}` partial unique
+  # index remains the hard backstop — the batch holds at most one head per lane
+  # (`lane_heads` is `DISTINCT ON (connection_id, event_key)`) and every lane's slot
+  # was read free, so no two rows here contend for a lane. `:schedule`'s changes
+  # (`SetAttribute` + `ClearClaim`) are atomic-capable, so `:atomic` runs this as a
+  # single UPDATE; `notify?: true` fires host notifications exactly as the per-row
+  # `Ash.update` does. Public (`@doc false`) only so the write-time guard is
+  # unit-testable.
+  def bulk_schedule_pending([]), do: 0
+
+  def bulk_schedule_pending(ids) do
+    AshIntegration.event_delivery_resource()
+    |> Ash.Query.filter(id in ^ids and state == :pending and is_nil(terminal_reason))
+    |> Ash.bulk_update(:schedule, %{},
+      strategy: [:atomic, :stream],
+      authorize?: false,
+      return_records?: true,
+      return_errors?: true,
+      notify?: true
+    )
+    |> case do
+      %Ash.BulkResult{records: records} when is_list(records) ->
+        length(records)
+
+      %Ash.BulkResult{errors: errors} ->
+        Logger.error("Scheduler: bulk :pending-head promotion failed: #{inspect(errors)}")
         0
     end
   end
@@ -362,9 +414,15 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
       where: ^suspension,
       where: not exists(slot_taken()),
       where: not exists(older_undispatched()),
-      # `state` rides along so the sweep can split `:failed` heads (bulk-promoted)
-      # from `:pending` ones (per-row suppression decision) without a re-read.
-      select: %{id: fragment("?::text", head.id), state: head.state}
+      # `state` and `body_hash` ride along so the sweep can split heads without a
+      # re-read: `:failed` (bulk-promoted) from `:pending`, and within `:pending`
+      # the non-suppressible ones (`body_hash IS NULL` — also bulk-promoted) from
+      # the suppression-eligible ones (per-row decision).
+      select: %{
+        id: fragment("?::text", head.id),
+        state: head.state,
+        body_hash: head.body_hash
+      }
     )
   end
 
@@ -397,7 +455,8 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
   # `(connection_id, event_key)`. `:failed` is in the pool because a waiting-to-retry
   # or terminal row IS its lane's held head — if it's the oldest, it (re-)promotes or
   # blocks the lane; a younger row must never jump ahead of it. `terminal_reason` and
-  # `next_attempt_at` are selected so `schedulable_heads/2` can gate a `:failed` head.
+  # `next_attempt_at` are selected so `schedulable_heads/2` can gate a `:failed` head;
+  # `body_hash` so it can split suppression-eligible `:pending` heads from the rest.
   defp lane_heads do
     {tbl, res} = source(AshIntegration.event_delivery_resource())
 
@@ -413,7 +472,8 @@ defmodule AshIntegration.Outbound.Delivery.Scheduler do
         subscription_id: e.subscription_id,
         event_id: e.event_id,
         terminal_reason: e.terminal_reason,
-        next_attempt_at: e.next_attempt_at
+        next_attempt_at: e.next_attempt_at,
+        body_hash: e.body_hash
       }
     )
   end

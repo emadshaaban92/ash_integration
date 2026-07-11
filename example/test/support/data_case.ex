@@ -95,6 +95,9 @@ defmodule Example.DataCase do
         version: subscription.version,
         event_key: event_key,
         delivery: Map.get(o, :delivery, %{"x" => 1}),
+        # Present only for `suppress_unchanged` subscriptions; drives the scheduler's
+        # per-row-vs-bulk split for `:pending` heads. Nil (the common case) otherwise.
+        body_hash: Map.get(o, :body_hash),
         state: state,
         last_error: Map.get(o, :last_error),
         subscription_id: subscription.id,
