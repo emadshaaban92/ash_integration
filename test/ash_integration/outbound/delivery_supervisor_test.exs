@@ -24,6 +24,14 @@ defmodule AshIntegration.Outbound.Delivery.SupervisorTest do
       defaults = NimbleOptions.validate!([], Stage.opts_schema())
       assert defaults[:lease_seconds] == nil
     end
+
+    test "max_in_flight_per_connection defaults to a fairness cap below concurrency" do
+      defaults = NimbleOptions.validate!([], Stage.opts_schema())
+      # A positive default (a cap), and strictly below the default concurrency (25) so
+      # no single connection can monopolize every batch processor.
+      assert is_integer(defaults[:max_in_flight_per_connection])
+      assert defaults[:max_in_flight_per_connection] < defaults[:concurrency]
+    end
   end
 
   describe "validate!/1" do
@@ -31,10 +39,19 @@ defmodule AshIntegration.Outbound.Delivery.SupervisorTest do
       assert_raise NimbleOptions.ValidationError, fn -> Stage.validate!(nonsense: 1) end
       assert_raise NimbleOptions.ValidationError, fn -> Stage.validate!(max_demand: 0) end
       assert_raise NimbleOptions.ValidationError, fn -> Stage.validate!(lease_seconds: 0) end
+
+      assert_raise NimbleOptions.ValidationError, fn ->
+        Stage.validate!(max_in_flight_per_connection: 0)
+      end
     end
 
     test "accepts nil lease_seconds (the derive sentinel)" do
       assert %{lease_seconds: nil} = Stage.validate!(lease_seconds: nil) |> Map.new()
+    end
+
+    test "accepts nil max_in_flight_per_connection (the uncapped sentinel)" do
+      assert %{max_in_flight_per_connection: nil} =
+               Stage.validate!(max_in_flight_per_connection: nil) |> Map.new()
     end
   end
 

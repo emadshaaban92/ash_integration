@@ -25,6 +25,7 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
           max_demand:      4,
           poll_interval_ms: 250,
           batch_size:     100,
+          max_in_flight_per_connection: 10,
           backoff_base_ms:   1_000,
           backoff_max_ms:  300_000,
           max_delivery_age_ms: nil,
@@ -63,10 +64,29 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
   overrun in exchange for faster failover and a tighter health cadence — can set it
   explicitly.
 
+  ## Per-connection in-flight cap (fairness)
+
+  The relay's processors `partition_by` `connection_id`, but that only *groups* a
+  connection's messages onto one processor — the batchers (batch size 1) pull work by
+  demand, so a connection's leased rows still fan out across ALL `concurrency`
+  batchers. A single connection with many lanes and a slow-but-not-failing endpoint
+  (steady sub-`http_max_timeout_ms` latency — nothing ever fails, so the health
+  windows / suspension / backoff never trip) could therefore occupy every batcher at
+  once and starve every other connection for the duration. Backoff and suspension only
+  gate *failures*; slowness is invisible to them.
+
+  `max_in_flight_per_connection` (`K`) closes that gap by capping, at CLAIM time, how
+  many of a connection's rows are leased at once. `Dispatcher.claim/2` skips a
+  connection already holding `≥ K` live-lease rows — a single atomic SQL statement, so
+  the count-and-lease can't race two claimers past `K`, and it composes across nodes
+  for free (the count lives in the DB). See `Dispatcher.claim/2` for the SQL and its
+  fairness/atomicity guarantees. `nil` disables the cap.
+
   ## How values reach their readers
 
-  In-tree knobs (`concurrency`, `max_demand`, `poll_interval_ms`, `batch_size`) are
-  passed **down** to the relay and producer as start args. The values read from
+  In-tree knobs (`concurrency`, `max_demand`, `poll_interval_ms`, `batch_size`,
+  `max_in_flight_per_connection`) are passed **down** to the relay and producer as
+  start args (the cap reaches `Dispatcher.claim/2` via the producer). The values read from
   *outside* the pipeline tree (the backoff computation on the failure path, the
   age-based `:expired` sweep) are read via `backoff_base_ms/0` / `backoff_max_ms/0` /
   `max_delivery_age_ms/0`, backed by `:persistent_term` for lock-free O(1) reads,
@@ -139,6 +159,22 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
         type: :pos_integer,
         default: 100,
         doc: "Max `:scheduled` rows claimed per round."
+      ],
+      max_in_flight_per_connection: [
+        type: {:or, [:pos_integer, {:in, [nil]}]},
+        # A single connection with many lanes and a slow-but-not-failing endpoint
+        # (steady sub-timeout latency — nothing ever *fails*, so suspension/backoff
+        # never trip) can otherwise occupy ALL `concurrency` batch processors at once
+        # and starve every other connection. This caps how many of a connection's rows
+        # the claim will lease concurrently, guaranteeing headroom for the rest. Sized
+        # against `concurrency` (default 25): at 10, no single connection can hold more
+        # than 10 of the 25 slots, so ≥ 15 always remain for others. Lower it for
+        # stricter fairness (at the cost of throttling a legitimately-busy lone
+        # connection when the relay is otherwise idle — a claim-time cap can leave
+        # processors idle); raise it toward `concurrency` to loosen the guarantee.
+        default: 10,
+        doc:
+          "Max concurrently-leased (in-flight) `:scheduled` rows per connection the claim will admit — a fairness cap so one slow-but-not-failing connection cannot monopolize the `concurrency` batch processors. Enforced atomically at claim time (see `Dispatcher.claim/2`). `nil` disables the cap (a connection may take up to `concurrency` slots)."
       ],
       backoff_base_ms: [
         type: :pos_integer,
@@ -242,7 +278,14 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
   # Only the in-tree knobs are handed to the pipeline; backoff/lease are read
   # cross-tree via persistent_term / derivation, not threaded through the relay.
   defp relay_opts(config),
-    do: Keyword.take(config, [:concurrency, :max_demand, :poll_interval_ms, :batch_size])
+    do:
+      Keyword.take(config, [
+        :concurrency,
+        :max_demand,
+        :poll_interval_ms,
+        :batch_size,
+        :max_in_flight_per_connection
+      ])
 
   # Re-read and re-validate the `:delivery` config live (fills defaults). Used by the
   # cross-tree readers that run outside the pipeline tree (`lease_seconds/0`,
