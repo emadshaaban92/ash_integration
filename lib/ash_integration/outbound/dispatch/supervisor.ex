@@ -17,6 +17,7 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
       config :ash_integration,
         dispatch: [
           concurrency:        System.schedulers_online(),
+          max_demand:          2,
           poll_interval_ms:   250,
           batch_size:         100,
           max_dispatch_age_ms: nil
@@ -25,14 +26,34 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
   Whether this runs at all is the single `AshIntegration.enabled?/0` switch; there
   is no per-stage on/off.
 
-  Every knob names an intent (parallelism, latency, durability policy), never a
-  pipeline mechanism (no processor/batcher/demand/partition knobs) — so the
-  Broadway implementation behind it can change without touching this contract.
+  Every knob names an intent (parallelism, latency, durability policy), not a raw
+  pipeline mechanism, so the Broadway implementation behind it can change without
+  touching this contract. The one knob that touches Broadway's demand — `max_demand`
+  — earns its place by naming a *durability* intent: it caps the standing in-flight
+  buffer so a claimed event finishes within its fixed lease (see below), not the
+  batcher/partition wiring behind it.
+
+  ## Buffer vs lease
+
+  A claimed event holds its lease (`lease_seconds/0`, a fixed node-liveness constant)
+  from claim until its fan-out commits — *including* the time it waits buffered in the
+  processor stage behind other events' `project/3` + Lua transforms. That buffer is
+  ≈ `max_demand × concurrency` deep. If a healthy node's own still-buffered event
+  outlives its lease, another pass/node re-claims it and fans it out again —
+  duplicate work absorbed only by the `dispatched_at IS NULL` fence (the `StaleRecord`
+  drop in `Changes.DispatchEvent`), the exact path that comment flags as undocumented
+  Ash behavior. So the buffer must stay shallow enough to comfortably clear the lease.
+
+  Unlike delivery — whose lease is *derived from* `max_demand` because its per-message
+  work is a whole transport round-trip — dispatch keeps the lease a constant and sizes
+  the buffer to fit it: `max_demand` defaults to 2 (below Broadway's default of 10),
+  so even a slow host `project/3` + heavy transform leaves the buffer comfortably
+  inside the 60s lease. Raise it only if you have measured headroom against the lease.
 
   ## How values reach their readers
 
-  In-tree knobs (`concurrency`, `poll_interval_ms`, `batch_size`) are passed
-  **down** to the relay and producer as start args — nothing reaches back into
+  In-tree knobs (`concurrency`, `max_demand`, `poll_interval_ms`, `batch_size`) are
+  passed **down** to the relay and producer as start args — nothing reaches back into
   `Application.get_env`. The two values read from *outside* the pipeline tree
   (`Dispatcher.sweep_expired/0`, the dashboard "is this poison?" view) are read via
   `max_dispatch_age_ms/0` and `lease_seconds/0`, backed by `:persistent_term` for
@@ -72,6 +93,20 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
         default: System.schedulers_online(),
         doc:
           "How many events are fanned out in parallel. Dispatch is DB-bound, so the scheduler count is a sensible default."
+      ],
+      max_demand: [
+        type: :pos_integer,
+        # Broadway's own default is 10; this pipeline wants it lower. A claimed event
+        # stands leased under the FIXED `@lease_seconds` window while it waits in the
+        # processor buffer behind other events' `project/3` + sequential per-subscription
+        # Lua transforms. `max_demand × concurrency` is the standing in-flight buffer;
+        # keep it shallow so a buffered event comfortably clears the lease and is never
+        # re-claimed (duplicate fan-out absorbed only by the `dispatched_at IS NULL`
+        # fence). Unlike delivery, dispatch's lease is a constant — the buffer is sized
+        # to FIT the lease, not the other way round. 2 is a shallow buffer.
+        default: 2,
+        doc:
+          "Broadway processor `max_demand`: undispatched events each processor prefetches from the producer. Sets the standing in-flight buffer (≈ `max_demand × concurrency`), which must clear the fixed `lease_seconds` window — keep small so a claimed event finishes its fan-out (`project/3` + Lua transform + the batch txn) inside its lease and is never re-claimed."
       ],
       poll_interval_ms: [
         type: :pos_integer,
@@ -145,7 +180,7 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
   # Only the in-tree knobs are handed to the pipeline; lease/max_dispatch_age_ms are
   # read cross-tree via persistent_term, not threaded through the relay.
   defp relay_opts(config),
-    do: Keyword.take(config, [:concurrency, :poll_interval_ms, :batch_size])
+    do: Keyword.take(config, [:concurrency, :max_demand, :poll_interval_ms, :batch_size])
 
   defp get_config(key), do: :persistent_term.get({__MODULE__, key}, default(key))
 

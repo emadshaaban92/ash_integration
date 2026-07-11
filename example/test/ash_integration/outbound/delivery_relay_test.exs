@@ -30,6 +30,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
   alias AshIntegration.Outbound.Delivery.RelayProducer
   alias AshIntegration.Outbound.Delivery.Scheduler
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
+  alias AshIntegration.Outbound.Wire.Transport
   alias Example.Outbound.{Connection, Event, EventDelivery, Log, Subscription}
 
   setup do
@@ -474,7 +475,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
-  describe "transport raise (a bug) is recorded, not silently retried forever" do
+  describe "transport crash (raise/exit/throw) is recorded, not silently retried forever" do
     test "a raising transport records the row :failed with backoff instead of crashing the batch",
          %{connection: conn} do
       # A transport bug: instead of honoring the `{:ok, _}` / `{:error, _}` tuple
@@ -530,6 +531,51 @@ defmodule Example.Outbound.DeliveryRelayTest do
 
       assert reload(healthy).state == :delivered
       assert reload(raising).state == :failed
+    end
+
+    test "a transport that EXITS records the row :failed with backoff (rescue misses exits)",
+         %{connection: conn} do
+      # `rescue` catches only a raise; an `:exit` (a `GenServer.call` timeout into a
+      # transport process, a linked `:brod`/Kafka client dying) would sail past it and
+      # crash the batcher. The relay's `catch kind, reason` must turn it into the SAME
+      # synthetic per-row retryable failure as a raise. Stub the transport boundary
+      # directly so the exit originates inside `Transport.deliver_batch/2`.
+      stub(Transport, :deliver_batch, fn _connection, _deliveries ->
+        exit(:simulated_transport_exit)
+      end)
+
+      d = scheduled_delivery!(create_subscription!(conn))
+
+      # The drain must complete — a caught exit never propagates out of the batch.
+      drain_delivery!()
+
+      reloaded = reload(d)
+      assert reloaded.state == :failed
+      assert is_nil(reloaded.terminal_reason)
+      refute is_nil(reloaded.next_attempt_at)
+      assert is_nil(reloaded.claimed_at)
+      # The stored error names the crash class so the dashboard shows which it was.
+      assert reloaded.last_error =~ "transport exit"
+    end
+
+    test "a transport that THROWS records the row :failed with backoff (rescue misses throws)",
+         %{connection: conn} do
+      # Same guarantee for a `throw` (a non-local return escaping a library): the
+      # `catch` clause funnels it into the normal `record_failure` path.
+      stub(Transport, :deliver_batch, fn _connection, _deliveries ->
+        throw(:simulated_transport_throw)
+      end)
+
+      d = scheduled_delivery!(create_subscription!(conn))
+
+      drain_delivery!()
+
+      reloaded = reload(d)
+      assert reloaded.state == :failed
+      assert is_nil(reloaded.terminal_reason)
+      refute is_nil(reloaded.next_attempt_at)
+      assert is_nil(reloaded.claimed_at)
+      assert reloaded.last_error =~ "transport throw"
     end
   end
 

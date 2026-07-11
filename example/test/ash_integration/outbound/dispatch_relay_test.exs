@@ -436,6 +436,81 @@ defmodule Example.Outbound.DispatchRelayTest do
     end
   end
 
+  describe "the expiry sweep skips lease-held rows (item 2)" do
+    test "an old but still-leased event is NOT expired (it may be mid-dispatch)", %{
+      connection: conn
+    } do
+      create_subscription!(conn, "widget.updated")
+      old = seed_old_event!(days_ago: 30)
+
+      # Claim it — stamps `claimed_at = now()`, so it is inside the fixed lease window.
+      # After an outage recovery the relay can be fanning out exactly such an old row.
+      assert [claimed] = Dispatcher.claim(10)
+      assert claimed.id == old.id
+
+      with_max_dispatch_age(:timer.hours(24), fn ->
+        assert :ok = Dispatcher.sweep_expired()
+      end)
+
+      # Skipped: expiring a live-leased row concurrently with its fan-out could leave it
+      # BOTH dispatched AND `:expired`. The lease has to drop first.
+      assert is_nil(reload(old).dispatch_terminal_reason)
+    end
+
+    test "an old event whose lease has expired IS taken terminal (no live claimer)", %{
+      connection: conn
+    } do
+      create_subscription!(conn, "widget.updated")
+      # `claimed_at` older than the 60s lease → the claimer is presumed gone → a give-up
+      # candidate again, exactly like an unleased row.
+      stale =
+        seed_old_event!(
+          days_ago: 30,
+          claimed_at: DateTime.add(DateTime.utc_now(), -120, :second)
+        )
+
+      with_max_dispatch_age(:timer.hours(24), fn ->
+        assert :ok = Dispatcher.sweep_expired()
+      end)
+
+      assert reload(stale).dispatch_terminal_reason == :expired
+    end
+  end
+
+  describe "dispatch clears a concurrently-set terminal bit (item 2)" do
+    test "a fan-out over an event the sweep just marked :expired clears the stale bit", %{
+      connection: conn
+    } do
+      s1 = create_subscription!(conn, "widget.updated")
+      create_widget!(%{name: "w", stock: 1})
+      [event] = claimed_events()
+
+      # Simulate the sweep winning the race AFTER the claim but BEFORE the dispatch txn:
+      # take the (still-claimed, still-undispatched) row terminal out-of-band. Without
+      # the batch_change clearing the bit, the dispatch UPDATE below would leave the row
+      # BOTH dispatched AND `:expired`.
+      Ash.update!(
+        Ash.Changeset.for_update(event, :expire_dispatch, %{}, authorize?: false),
+        authorize?: false
+      )
+
+      assert reload(event).dispatch_terminal_reason == :expired
+
+      # Dispatch the pre-terminal claimed struct: `batch_change` stamps `dispatched_at`
+      # AND force-clears `dispatch_terminal_reason` in the same UPDATE.
+      run_batch([event])
+
+      reloaded = reload(event)
+      refute is_nil(reloaded.dispatched_at)
+
+      assert is_nil(reloaded.dispatch_terminal_reason),
+             "a dispatched row must never carry a stale terminal reason"
+
+      # The fan-out still happened (the terminal bit didn't divert it).
+      assert [_delivery] = events_for(s1)
+    end
+  end
+
   describe "Broadway glue (prepare_messages → handle_message → handle_batch → ack)" do
     test "prepare_messages attaches per-event specs; handle_message routes to :default", %{
       connection: conn
@@ -727,7 +802,9 @@ defmodule Example.Outbound.DispatchRelayTest do
   end
 
   # An undispatched Event whose `created_at` is backdated, so the age sweep can act on
-  # it. `created_at` isn't accepted on create, so seed it directly.
+  # it. `created_at` isn't accepted on create, so seed it directly. An optional
+  # `:claimed_at` seeds the soft lease so a test can stand up a still-leased (skipped by
+  # the sweep) or a lease-expired (swept) old event.
   defp seed_old_event!(opts) do
     days_ago = Keyword.fetch!(opts, :days_ago)
 
@@ -739,7 +816,8 @@ defmodule Example.Outbound.DispatchRelayTest do
       source_resource_id: "r1",
       source_action: "update",
       data: %{"id" => "r1"},
-      created_at: DateTime.add(DateTime.utc_now(), -days_ago, :day)
+      created_at: DateTime.add(DateTime.utc_now(), -days_ago, :day),
+      claimed_at: Keyword.get(opts, :claimed_at)
     })
   end
 

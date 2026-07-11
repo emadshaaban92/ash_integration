@@ -228,13 +228,16 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
   # ── Age-based give-up (opt-in `:expired`) + operator recovery ───────────────
 
   @doc """
-  Opt-in give-up policy: take any undispatched, non-terminal Event whose age (from
-  `created_at`) exceeds `Supervisor.max_dispatch_age_ms/0` terminal — set
+  Opt-in give-up policy: take any undispatched, non-terminal, **unleased** Event whose
+  age (from `created_at`) exceeds `Supervisor.max_dispatch_age_ms/0` terminal — set
   `dispatch_terminal_reason: :expired`, so `claim/1` stops picking it up and its
-  `(connection, event_key)` lane stays blocked like any terminal head. No-op unless
-  the age is configured (`nil` = never expire, the safe default). Idempotent (matches
-  only `dispatch_terminal_reason IS NULL`) and safe on every node. Driven by the
-  `Retention` GenServer's tick — mirrors how the delivery age sweep rides `Health`.
+  `(connection, event_key)` lane stays blocked like any terminal head. A row still
+  inside its `lease_seconds` window is skipped: it may be mid-fan-out on another
+  pass/node, and expiring it concurrently could leave it BOTH dispatched AND
+  `:expired`. No-op unless the age is configured (`nil` = never expire, the safe
+  default). Idempotent (matches only `dispatch_terminal_reason IS NULL`) and safe on
+  every node. Driven by the `Retention` GenServer's tick — mirrors how the delivery
+  age sweep rides `Health`.
   """
   def sweep_expired do
     case Stage.max_dispatch_age_ms() do
@@ -248,13 +251,25 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
   # `dispatch_terminal_reason IS NULL`) is the action's precondition, pushed here the
   # same way the delivery sweep pushes its `:failed`/`terminal_reason` guard;
   # `SetAttribute` is atomic-capable, so `:atomic` runs this as a single UPDATE.
+  #
+  # It ALSO skips lease-held rows (`claimed_at` still inside `lease_seconds`): after an
+  # outage recovery the relay can be actively fanning out an old, still-leased event
+  # while this sweep runs, and expiring it mid-dispatch would leave a row BOTH
+  # dispatched AND `:expired` if the dispatch txn then wins. Only an unleased or
+  # lease-expired row (no live claimer) is a give-up candidate. `DispatchEvent`'s
+  # `batch_change` force-clears the terminal bit as the other end of this belt-and-
+  # braces, so even a claim landing in the narrow post-filter window can't leave the
+  # stale artifact behind.
   defp expire_older_than(age_ms) do
-    cutoff = DateTime.add(DateTime.utc_now(), -age_ms, :millisecond)
+    now = DateTime.utc_now()
+    cutoff = DateTime.add(now, -age_ms, :millisecond)
+    lease_cutoff = DateTime.add(now, -Stage.lease_seconds(), :second)
 
     result =
       AshIntegration.event_resource()
       |> Ash.Query.filter(
-        is_nil(dispatched_at) and is_nil(dispatch_terminal_reason) and created_at < ^cutoff
+        is_nil(dispatched_at) and is_nil(dispatch_terminal_reason) and created_at < ^cutoff and
+          (is_nil(claimed_at) or claimed_at < ^lease_cutoff)
       )
       |> Ash.bulk_update(:expire_dispatch, %{},
         strategy: [:atomic, :stream],
