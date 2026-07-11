@@ -3,7 +3,8 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   The delivery **relay**: a Broadway pipeline that claims `:scheduled`
   `EventDelivery` rows and executes each one over its transport.
 
-      Producer (claim WHERE state='scheduled', SKIP LOCKED + lease)
+      Producer (claim WHERE state='scheduled', SKIP LOCKED + lease,
+                capped at max_in_flight_per_connection rows per connection)
         → Processors  (partition_by connection_id)
             handle_message: route to the batcher, keyed by connection
         → Batcher
@@ -48,12 +49,21 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   bare timeout (a claimed row waits in the buffer behind other sends, not just its
   own). See `Delivery.Supervisor`'s lease moduledoc for the buffer↔lease coupling.
 
+  **Per-connection fairness.** `partition_by connection_id` only groups a connection's
+  messages onto one *processor*; the batchers pull work by demand, so a connection's
+  leased rows still spread across all `concurrency` batchers. So a single connection
+  with many lanes and a slow-but-not-failing endpoint (steady sub-timeout latency —
+  nothing fails, so suspension/backoff never trip) could occupy every batcher and
+  starve the others. The producer's claim caps this: `max_in_flight_per_connection`
+  bounds how many of a connection's rows are leased at once (enforced atomically in
+  `Dispatcher.claim/2`, cross-node via the DB). `nil` disables it.
+
   Deployment: one pipeline per node (each claims via `SKIP LOCKED`). The whole
   runtime is gated by `AshIntegration.enabled?/0`; tests run with it off and start
   isolated instances via `start_supervised!/1`. Configuration is owned and validated
   by `AshIntegration.Outbound.Delivery.Supervisor`, which passes the in-tree knobs
-  (`concurrency`, `poll_interval_ms`, `batch_size`) down to `start_link/1` — this
-  module never reads `Application.get_env`.
+  (`concurrency`, `poll_interval_ms`, `batch_size`, `max_in_flight_per_connection`)
+  down to `start_link/1` — this module never reads `Application.get_env`.
   """
   use Broadway
 
@@ -81,7 +91,9 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
       producer: [
         module:
           {RelayProducer,
-           poll_interval_ms: config[:poll_interval_ms], claim_limit: config[:batch_size]},
+           poll_interval_ms: config[:poll_interval_ms],
+           claim_limit: config[:batch_size],
+           max_in_flight_per_connection: config[:max_in_flight_per_connection]},
         concurrency: 1
       ],
       processors: [

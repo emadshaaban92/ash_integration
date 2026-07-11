@@ -197,7 +197,8 @@ scheduler's **brain**: the scheduler chooses lane heads and promotes them to
 Its producer claims DUE `:scheduled` rows (`FOR UPDATE SKIP LOCKED` + a soft
 `claimed_at` lease, oldest `event_id` first), partitioned by `connection_id`. The
 claim **bumps `attempts`** (so a relay that crashes mid-send still increments and
-can't loop forever — `attempts` counts claims). It needs no backoff gate: the
+can't loop forever — `attempts` counts claims). It also enforces a **per-connection
+in-flight cap** (see below). It needs no backoff gate: the
 scheduler only promotes a row once its `next_attempt_at` has elapsed, so a
 `:scheduled` row is by construction due. For each claimed row the relay calls the
 transport (`Transport.deliver_batch/2` — per-row results; `batch_size` is 1 today,
@@ -233,6 +234,53 @@ the terminal verdict cleared) or **skip** (`cancel` — frees the lane for young
 events). Both are offered on the delivery's dashboard page; the dashboard home also
 counts standing terminal rows. Find them with `state = 'failed' AND terminal_reason
 IS NOT NULL`.
+
+### Per-connection in-flight cap (fairness)
+
+Backoff and suspension only gate **failures**. A connection whose endpoint is
+**slow but not failing** — say steady ~50s responses under the 60s
+`http_max_timeout_ms`, so nothing ever errors — trips none of them. With many lanes
+it could then lease **all** `concurrency` (default 25) batch processors at once and
+starve every other connection for the duration. `partition_by connection_id` does
+**not** prevent this: it only groups a connection's messages onto one *processor*;
+the batchers pull work by demand, so the slow connection's leased rows still fan out
+across all batchers.
+
+`max_in_flight_per_connection` (`K`, default `10`; `nil` disables) closes the gap. It
+is enforced at **claim time** in
+[`Dispatcher.claim/2`](../lib/ash_integration/outbound/delivery/dispatcher.ex): a
+connection already holding `≥ K` live-lease rows (i.e. `:scheduled` rows with an
+unexpired `claimed_at`) is skipped this round, so no single connection can lease more
+than `K` of the batch processors. Because the cap lives in the DB it composes across
+nodes for free, and — unlike a node-local semaphore in `handle_batch` — it never
+leaves a row *claimed but unrunnable* waiting out its lease.
+
+Three properties, all in **one atomic SQL statement** (so two claimers can't race
+past `K`):
+
+- **No over-admission.** One statement is one snapshot: the per-connection live-lease
+  count and the claimable candidates are read at the same instant. Each connection's
+  candidates are ranked by `event_id`, and only its lowest `K − in_flight` rows are
+  eligible — so every claimer independently targets the *same* deterministic prefix.
+  `SKIP LOCKED` plus a re-checked lease-freshness qual then **split** that bounded
+  prefix between concurrent claimers instead of doubling it. (The only way real
+  in-flight briefly exceeds `K` is a lease-expiry re-claim of an abandoned row — the
+  same at-least-once window that already permits a duplicate send.)
+- **Fairness — no shadowing.** The cap is applied **before** the global
+  `ORDER BY event_id … LIMIT`, so a slow connection's older-but-over-cap rows are
+  removed from the candidate set and never consume the round's claim budget. Younger
+  connections' rows are claimed in the same round; the slow connection's surplus
+  simply waits for its in-flight rows to finish.
+- **Cost.** A claim-time cap can leave processors idle: if `K` is small and only one
+  connection has work, the relay won't lease more than `K` of its rows even with
+  batchers free. Size `K` against `concurrency` — the default `10` keeps ≥ 15 of the
+  25 slots available to other connections while letting a lone busy connection use a
+  healthy chunk.
+
+A **rejected alternative**: a node-local semaphore in `handle_batch` would still let
+the producer *claim* rows past the cap (they'd sit leased-but-blocked, waiting out
+their lease before another node could take them) and wouldn't compose across nodes.
+Capping at claim time avoids both problems.
 
 ### No guardian needed
 

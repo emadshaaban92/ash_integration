@@ -128,6 +128,99 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
   end
 
+  describe "claim/2 — per-connection in-flight cap (fairness)" do
+    test "a saturated connection is capped, leaving capacity for other connections", %{
+      owner: owner,
+      connection: conn_a
+    } do
+      # conn_a is the slow monopolizer: 8 scheduled lanes, all older (created first, so
+      # lower `event_id`) than conn_b's. Without the cap its rows would fill the claim.
+      sa = create_subscription!(conn_a)
+      a_ids = for i <- 1..8, do: scheduled_delivery!(sa, "a#{i}").id
+
+      conn_b = create_connection!(owner)
+      sb = create_subscription!(conn_b)
+      b_ids = for i <- 1..3, do: scheduled_delivery!(sb, "b#{i}").id
+
+      claimed = Dispatcher.claim(100, 3)
+      claimed_ids = MapSet.new(claimed, & &1.id)
+
+      # conn_a admitted exactly K=3 of its 8; the cap is per-connection, so conn_b — a
+      # DIFFERENT connection — is entirely unaffected and all its rows are claimed.
+      assert Enum.count(a_ids, &MapSet.member?(claimed_ids, &1)) == 3
+      assert Enum.all?(b_ids, &MapSet.member?(claimed_ids, &1))
+    end
+
+    test "a capped connection's older rows do not shadow a younger connection under LIMIT", %{
+      owner: owner,
+      connection: conn_a
+    } do
+      # The fairness crux: conn_a's rows are the OLDEST, so a plain oldest-first claim
+      # with a tight LIMIT would hand the whole round to conn_a and starve conn_b. The
+      # cap is applied BEFORE the LIMIT, so conn_a offers only K rows and conn_b's
+      # younger rows still make the cut.
+      sa = create_subscription!(conn_a)
+      for i <- 1..8, do: scheduled_delivery!(sa, "a#{i}")
+
+      conn_b = create_connection!(owner)
+      sb = create_subscription!(conn_b)
+      b_ids = for i <- 1..3, do: scheduled_delivery!(sb, "b#{i}").id
+
+      # LIMIT 5, K 3: conn_a fills 3, leaving 2 of the budget for conn_b's oldest two.
+      claimed = Dispatcher.claim(5, 3)
+      claimed_ids = MapSet.new(claimed, & &1.id)
+
+      assert length(claimed) == 5
+      assert Enum.count(claimed, &(&1.connection_id == conn_a.id)) == 3
+      # conn_b is not shadowed — despite every conn_a row being older, some conn_b rows
+      # are claimed this very round.
+      assert Enum.count(b_ids, &MapSet.member?(claimed_ids, &1)) == 2
+    end
+
+    test "the cap releases as in-flight leases finish", %{connection: conn} do
+      s = create_subscription!(conn)
+      for i <- 1..6, do: scheduled_delivery!(s, "k#{i}")
+
+      # First round: only K=2 of the 6 lanes admitted.
+      first = Dispatcher.claim(100, 2)
+      assert length(first) == 2
+
+      # Still saturated — the two are leased (`:scheduled` + fresh `claimed_at`), so a
+      # second claim admits nothing more for this connection.
+      assert [] == Dispatcher.claim(100, 2)
+
+      # The two in-flight rows finish (delivered → lease gone), freeing their slots.
+      Enum.each(first, fn d -> set_fields!(d, state: :delivered, claimed_at: nil) end)
+
+      second = Dispatcher.claim(100, 2)
+      assert length(second) == 2
+      # The freed capacity claimed DIFFERENT rows, not the finished ones.
+      assert MapSet.disjoint?(MapSet.new(first, & &1.id), MapSet.new(second, & &1.id))
+    end
+
+    test "an existing live lease reduces the remaining budget below K", %{connection: conn} do
+      s = create_subscription!(conn)
+      for i <- 1..6, do: scheduled_delivery!(s, "k#{i}")
+
+      # Lease exactly one row (a tight LIMIT, not the cap), leaving it in-flight.
+      assert [_one] = Dispatcher.claim(1, 4)
+
+      # K=4 total, 1 already leased ⇒ only 3 more admitted this round, never 4.
+      assert length(Dispatcher.claim(100, 4)) == 3
+      assert [] == Dispatcher.claim(100, 4)
+    end
+
+    test "nil disables the cap — a connection may take all its rows at once", %{connection: conn} do
+      s = create_subscription!(conn)
+      ids = for i <- 1..8, do: scheduled_delivery!(s, "k#{i}").id
+
+      claimed = Dispatcher.claim(100, nil)
+
+      # Uncapped: every one of the connection's 8 rows is claimed in a single round.
+      assert MapSet.new(claimed, & &1.id) == MapSet.new(ids)
+    end
+  end
+
   # The claim opens its transaction directly on the repo with `log: query_log_level()`,
   # so `false` silences not just the claim UPDATE but the `begin`/`commit` envelope too —
   # the whole point: an idle poll (0 rows) leaves no trace in the host log. We drop the
@@ -185,8 +278,8 @@ defmodule Example.Outbound.DeliveryRelayTest do
       # Dispatcher.claim). The producer must still emit d1: its row is already leased, so
       # dropping the message would strand it invisible until its lease expires.
       Dispatcher
-      |> expect(:claim, fn _ -> [d1] end)
-      |> expect(:claim, fn _ -> raise "reload blip" end)
+      |> expect(:claim, fn _, _ -> [d1] end)
+      |> expect(:claim, fn _, _ -> raise "reload blip" end)
 
       {:noreply, messages, new_state} =
         RelayProducer.handle_demand(2, producer_state(claim_limit: 1))
@@ -197,7 +290,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
     end
 
     test "a claim failure on the very first chunk emits nothing and holds all demand" do
-      expect(Dispatcher, :claim, fn _ -> raise "reload blip" end)
+      expect(Dispatcher, :claim, fn _, _ -> raise "reload blip" end)
 
       {:noreply, messages, new_state} =
         RelayProducer.handle_demand(3, producer_state(claim_limit: 2))
@@ -944,6 +1037,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
       demand: 0,
       poll_interval: 60_000,
       claim_limit: Keyword.fetch!(opts, :claim_limit),
+      max_in_flight_per_connection: Keyword.get(opts, :max_in_flight_per_connection),
       poll_timer: nil,
       draining: false
     }

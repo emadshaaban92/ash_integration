@@ -3,11 +3,12 @@ defmodule AshIntegration.Outbound.Delivery.RelayProducer do
   # Custom GenStage producer for the delivery relay — the delivery-side mirror of
   # `AshIntegration.Outbound.Dispatch.RelayProducer`.
   #
-  # Claims DUE `:scheduled` `EventDelivery` rows (`Dispatcher.claim/1` — `FOR UPDATE
-  # SKIP LOCKED` + soft lease, oldest first, honoring `next_attempt_at` backoff and
-  # the poison ceiling) up to outstanding demand and emits them as Broadway
-  # messages. Demand it can't immediately fill is held until the next `:poll`
-  # re-checks. Discovery is poll-only: end-to-end idle latency ≈ the poll interval.
+  # Claims DUE `:scheduled` `EventDelivery` rows (`Dispatcher.claim/2` — `FOR UPDATE
+  # SKIP LOCKED` + soft lease, oldest `event_id` first, capped at
+  # `max_in_flight_per_connection` live-lease rows per connection for fairness) up to
+  # outstanding demand and emits them as Broadway messages. Demand it can't immediately
+  # fill is held until the next `:poll` re-checks. Discovery is poll-only: end-to-end
+  # idle latency ≈ the poll interval.
   #
   # `SKIP LOCKED` parallel claim is safe because the scheduler owns ordering (only
   # one `:scheduled` row per `(connection, event_key)` exists — the partial unique
@@ -29,8 +30,9 @@ defmodule AshIntegration.Outbound.Delivery.RelayProducer do
 
   @impl GenStage
   # Tuning is passed down from the stage supervisor via the relay's producer spec
-  # (`{RelayProducer, poll_interval_ms: …, claim_limit: …}`) — the producer never
-  # reads `Application.get_env` itself.
+  # (`{RelayProducer, poll_interval_ms: …, claim_limit: …,
+  # max_in_flight_per_connection: …}`) — the producer never reads
+  # `Application.get_env` itself.
   def init(opts) do
     poll_interval = Keyword.fetch!(opts, :poll_interval_ms)
     timer = schedule_poll(poll_interval)
@@ -40,6 +42,10 @@ defmodule AshIntegration.Outbound.Delivery.RelayProducer do
        demand: 0,
        poll_interval: poll_interval,
        claim_limit: Keyword.fetch!(opts, :claim_limit),
+       # The per-connection in-flight fairness cap, handed to `Dispatcher.claim/2` so one
+       # slow-but-not-failing connection can't lease every batch processor. Threaded from
+       # the stage config via the relay's producer spec; absent/`nil` = uncapped.
+       max_in_flight_per_connection: Keyword.get(opts, :max_in_flight_per_connection),
        poll_timer: timer,
        draining: false
      }}
@@ -86,24 +92,26 @@ defmodule AshIntegration.Outbound.Delivery.RelayProducer do
 
   # Drain up to `demand` rows, claiming in chunks of `claim_limit`.
   defp produce(state) do
-    {messages, remaining} = claim_messages(state.demand, state.claim_limit, [])
+    {messages, remaining} =
+      claim_messages(state.demand, state.claim_limit, state.max_in_flight_per_connection, [])
+
     {:noreply, messages, %{state | demand: remaining}}
   end
 
-  defp claim_messages(0, _limit, acc), do: {Enum.reverse(acc), 0}
+  defp claim_messages(0, _limit, _cap, acc), do: {Enum.reverse(acc), 0}
 
-  defp claim_messages(demand, limit, acc) do
-    case Dispatcher.claim(min(demand, limit)) do
+  defp claim_messages(demand, limit, cap, acc) do
+    case Dispatcher.claim(min(demand, limit), cap) do
       [] ->
         {Enum.reverse(acc), demand}
 
       deliveries ->
         messages = Enum.map(deliveries, &to_message/1)
-        claim_messages(demand - length(deliveries), limit, Enum.reverse(messages, acc))
+        claim_messages(demand - length(deliveries), limit, cap, Enum.reverse(messages, acc))
     end
   rescue
     # A transient DB error during a claim must never crash the producer (which would
-    # tear down the whole pipeline). `Dispatcher.claim/1` already rolls back + returns
+    # tear down the whole pipeline). `Dispatcher.claim/2` already rolls back + returns
     # [] on a blip, so this pass should never raise — but if it somehow does, emit every
     # message already built this pass (dropping them would strand their leased rows for a
     # full lease window) and hold the unfilled demand for the next poll.
