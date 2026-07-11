@@ -60,6 +60,21 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
       |> Ash.Changeset.filter(expr(is_nil(dispatched_at)))
       |> Ash.Changeset.force_change_attribute(:dispatched_at, DateTime.utc_now())
       |> Ash.Changeset.force_change_attribute(:dispatch_error, nil)
+      # Also clear any terminal bit set concurrently by the age sweep. The claim gated
+      # on `dispatch_terminal_reason IS NULL`, but a stale claimer (lease expired) can
+      # be mid-fan-out when the sweep takes the same row `:expired`; if this UPDATE then
+      # wins the row would be BOTH dispatched AND `:expired` — a confusing
+      # dashboard/telemetry artifact (harmless: `claim/1` gates on `dispatched_at`,
+      # `reset_terminal` filters `is_nil(dispatched_at)`). The sweep's other end
+      # (skipping lease-held rows) makes the collision rare; this closes it entirely.
+      #
+      # It MUST be an `atomic_update`, not `force_change_attribute`: the claimed struct
+      # this changeset carries was loaded BEFORE the sweep, so its in-memory
+      # `dispatch_terminal_reason` is already nil — `force_change_attribute(_, nil)`
+      # would diff to a no-op (Ash drops an attribute whose data value and new value are
+      # both nil) and never reach the SET. An atomic `nil` is emitted unconditionally,
+      # so the UPDATE always clears whatever the sweep committed.
+      |> Ash.Changeset.atomic_update(:dispatch_terminal_reason, expr(nil))
     end)
   end
 

@@ -42,8 +42,8 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
   it off and start their own isolated instance via `start_supervised!/1`.
 
   Configuration is owned and validated by `AshIntegration.Outbound.Dispatch.Supervisor`,
-  which passes the in-tree knobs (`concurrency`, `poll_interval_ms`, `batch_size`)
-  down to `start_link/1` — this module never reads `Application.get_env`.
+  which passes the in-tree knobs (`concurrency`, `max_demand`, `poll_interval_ms`,
+  `batch_size`) down to `start_link/1` — this module never reads `Application.get_env`.
   """
   use Broadway
 
@@ -78,6 +78,13 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
       processors: [
         default: [
           concurrency: config[:concurrency],
+          # Cap how many undispatched events each processor prefetches from the producer.
+          # Below Broadway's default of 10 on purpose: a claimed event stands leased under
+          # the fixed dispatch lease while it waits in the processor buffer behind other
+          # events' `project/3` + Lua transforms, so a deep buffer risks a buffered event
+          # outliving its lease and being re-claimed. `max_demand × concurrency` is the
+          # standing in-flight buffer, sized to fit the lease — see `Stage`'s moduledoc.
+          max_demand: config[:max_demand],
           # Group same-(type, version) onto one processor so `prepare_messages`
           # can run `project/3` once over the group. Not an ordering mechanism —
           # the scheduler gate owns that.

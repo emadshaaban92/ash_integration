@@ -7,6 +7,10 @@ Mimic.copy(AshIntegration.Outbound.Dispatch.Dispatcher)
 Mimic.copy(AshIntegration.Outbound.Delivery.Dispatcher)
 Mimic.copy(Ash)
 
+# Copied so the delivery-relay tests can stub the transport boundary to crash
+# (raise/exit/throw) and assert the batcher survives it (see "transport crash").
+Mimic.copy(AshIntegration.Outbound.Wire.Transport)
+
 # Under coverage, also instrument the :ash_integration dependency — the library
 # under test, exercised only through this app. Plain `mix test` skips this.
 if Process.whereis(:cover_server) do
