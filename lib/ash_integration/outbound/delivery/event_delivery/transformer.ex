@@ -879,10 +879,26 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   end
 
   # Serves the delivery relay's claim — `WHERE state = 'scheduled' … ORDER BY
-  # event_id … FOR UPDATE SKIP LOCKED`, partitioned by connection — without scanning
-  # delivered/cancelled history. Partial on the in-flight frontier (normally small);
-  # leads with `connection_id` (the batch/partition key) then `event_id` (the FIFO
-  # claim order).
+  # event_id ASC LIMIT … FOR UPDATE SKIP LOCKED` (`Dispatcher.claim/1,2`). The claim is
+  # a GLOBAL FIFO over `event_id` (the parent Event's occurrence-ordered UUIDv7), NOT
+  # partitioned by connection, so the index leads with `event_id` alone: the uncapped
+  # `claim/1` is then an ordered index scan that terminates early at `LIMIT` instead of
+  # scanning + sorting the whole scheduled frontier every poll — the cost that mattered
+  # exactly during a backlog. Mirrors the dispatch side's `idx_events_outbox_claim (id)
+  # WHERE dispatched_at IS NULL`.
+  #
+  # The per-connection-capped `claim/2` ranks candidates with `row_number() OVER
+  # (PARTITION BY connection_id ORDER BY event_id)` and then re-orders by `event_id` for
+  # the global `LIMIT` — a window over the whole frontier that Postgres sorts by
+  # `(connection_id, event_id)` regardless of the index (the `claimed_at` freshness qual
+  # isn't indexed, so no index ordering survives to the window). Leading with
+  # `connection_id` therefore bought the capped path nothing, while it forced the
+  # uncapped path to sort; this partial index simply enumerates the `:scheduled`
+  # frontier for the capped path. Partial on `state = 'scheduled'` keeps it off
+  # delivered/cancelled history. The lane's in-flight-slot probe (`slot_taken`) and the
+  # `(connection_id, event_key)` lookups are served by
+  # `idx_one_scheduled_per_connection_event_key`, so nothing else needs a
+  # `connection_id`-leading claim index.
   defp add_delivery_claim_index_if_not_exists(dsl_state) do
     index_name = "idx_event_deliveries_delivery_claim"
 
@@ -897,7 +913,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
       {:ok, index} =
         Transformer.build_entity(AshPostgres.DataLayer, [:postgres, :custom_indexes], :index,
           name: index_name,
-          fields: [:connection_id, :event_id],
+          fields: [:event_id],
           where: "state = 'scheduled'"
         )
 
