@@ -4,9 +4,10 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
   fans each out into `EventDelivery` rows.
 
       Producer (claim WHERE dispatched_at IS NULL, SKIP LOCKED + lease)
-        → Processors  (partition_by {type, version})
-            prepare_messages: load subscriptions + run batched `project/3`  (no txn)
-            handle_message:   run the Lua transform → build delivery specs   (no txn)
+        → Processors  (no partition — every event spreads across all processors)
+            prepare_messages: group the chunk by {type, version}, load subscriptions
+                              + run batched `project/3` per group                (no txn)
+            handle_message:   run the Lua transform → build delivery specs        (no txn)
         → Batcher
             handle_batch:     Ash.bulk_update(:dispatch) — stamp dispatched_at +
                               materialize deliveries + coalesce, ALL in ONE
@@ -33,9 +34,14 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
   blocked, never auto-resolved). See `design/dispatch-terminal-model.md`.
 
   **Ordering correctness is not this pipeline's job.** The scheduler high-water gate
-  owns it, so dispatch may run unordered, parallel, and multi-node. The
-  `{type, version}` partition exists so `project/3` runs once per group, not for
-  ordering.
+  owns it, so dispatch may run unordered, parallel, and multi-node — that is why the
+  processors carry **no `partition_by`**: events of a given `(type, version)` may run
+  on any processor, so effective dispatch concurrency is the `concurrency` knob, not
+  the number of hot event types. `project/3` still batches: `prepare_messages` groups
+  its chunk by `(type, version)` and runs `project/3` once per group. The chunk is only
+  ever one demand's worth (≤ `max_demand`), so partitioning would not have grown the
+  group — it only pinned a whole type to one processor. Spreading costs a few extra
+  `project/3` calls and duplicate `subscriptions_for` reads per chunk; both are cheap.
 
   Deployment: one pipeline per node (each claims via `SKIP LOCKED`). The whole
   runtime is gated by the single `AshIntegration.enabled?/0` switch; tests run with
@@ -84,11 +90,13 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
           # events' `project/3` + Lua transforms, so a deep buffer risks a buffered event
           # outliving its lease and being re-claimed. `max_demand × concurrency` is the
           # standing in-flight buffer, sized to fit the lease — see `Stage`'s moduledoc.
-          max_demand: config[:max_demand],
-          # Group same-(type, version) onto one processor so `prepare_messages`
-          # can run `project/3` once over the group. Not an ordering mechanism —
-          # the scheduler gate owns that.
-          partition_by: &partition_by_type_version/1
+          max_demand: config[:max_demand]
+          # No `partition_by`: events spread across every processor so dispatch
+          # concurrency is the `concurrency` knob, not the count of hot event types.
+          # `project/3` still batches — `prepare_messages` groups its chunk by
+          # {type, version} — and the chunk is only ever ≤ max_demand deep, so a
+          # partition would not have grown the group, only pinned a type to one
+          # processor. The scheduler high-water gate owns ordering, not this stage.
         ]
       ],
       batchers: [
@@ -104,8 +112,10 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
   # ── Processor stage (no transaction) ───────────────────────────────────────
 
   @impl true
-  # Batched prep: per `(type, version)` group, load the candidate subscriptions and
-  # run `project/3` once, attaching each event's per-event outcome to its message.
+  # Batched prep: group this chunk by `(type, version)`, then per group load the
+  # candidate subscriptions and run `project/3` once, attaching each event's per-event
+  # outcome to its message. With no partition a chunk can hold several groups, so the
+  # grouping here (not the pipeline partition) is what keeps `project/3` per-group.
   # Runs in the processor — outside any transaction.
   def prepare_messages(messages, _context) do
     messages
@@ -277,9 +287,4 @@ defmodule AshIntegration.Outbound.Dispatch.Relay do
       other -> inspect(other)
     end)
   end
-
-  # Broadway hashes the partition with `rem/2`, so this must be a non-negative
-  # integer. Same `(type, version)` → same processor (so `project` batches).
-  defp partition_by_type_version(%Message{data: %{event_type: t, version: v}}),
-    do: :erlang.phash2({t, v})
 end

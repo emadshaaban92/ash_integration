@@ -104,6 +104,18 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
         # re-claimed (duplicate fan-out absorbed only by the `dispatched_at IS NULL`
         # fence). Unlike delivery, dispatch's lease is a constant — the buffer is sized
         # to FIT the lease, not the other way round. 2 is a shallow buffer.
+        #
+        # SECONDARY EFFECT — this is ALSO the `project/3` batch-size knob. A processor
+        # chunk is `≤ max_demand` events, and `prepare_messages` groups that chunk by
+        # `{type, version}` and runs `project/3` once per group, so `max_demand` caps
+        # how many events a single `project/3` call can amortize over. (The `batch_size`
+        # claim is bigger, but it's chopped into `max_demand` chunks before it reaches a
+        # processor, so it does NOT grow `project/3` batches — only `max_demand` does.)
+        # Since the processors carry no `partition_by` (events spread for concurrency —
+        # see `Relay`), raising this is the lever to grow `project/3` batches back. But
+        # the LEASE bounds it: a bigger chunk deepens `max_demand × concurrency` and
+        # risks a buffered event outliving its lease. So treat batch size as a
+        # side-benefit, never a reason to exceed the lease headroom above.
         default: 2,
         doc:
           "Broadway processor `max_demand`: undispatched events each processor prefetches from the producer. Sets the standing in-flight buffer (≈ `max_demand × concurrency`), which must clear the fixed `lease_seconds` window — keep small so a claimed event finishes its fan-out (`project/3` + Lua transform + the batch txn) inside its lease and is never re-claimed."
