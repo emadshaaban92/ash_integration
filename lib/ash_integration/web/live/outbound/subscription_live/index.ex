@@ -2,6 +2,8 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
   @moduledoc false
   use AshIntegration.Web, :live_view
 
+  require Ash.Query
+
   alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
   alias AshIntegration.Web.Outbound.Helpers
   alias AshIntegration.Web.Outbound.SubscriptionLive.FormComponent
@@ -14,6 +16,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
        connections: [],
        can_create: false,
        perms: %{},
+       filters: %{suspended: nil},
        page: %{offset: 0, limit: 20, count: 0}
      )}
   end
@@ -26,6 +29,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
   defp apply_action(socket, :index, params) do
     socket
     |> assign(page_title: "Subscriptions")
+    |> assign(filters: %{suspended: normalize_suspended(params["suspended"])})
     |> load_subscriptions(Helpers.parse_int(params["offset"], 0))
   end
 
@@ -42,6 +46,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
     page =
       AshIntegration.subscription_resource()
       |> Ash.Query.load([:connection, :last_delivered_at, :parked_count, :oldest_parked_at])
+      |> apply_suspended(socket.assigns.filters.suspended)
       |> Helpers.read_page!(actor: actor, page: [limit: 20, offset: offset, count: true])
 
     assign(socket,
@@ -97,6 +102,17 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
     {:noreply, load_subscriptions(socket, Helpers.parse_int(offset, 0))}
   end
 
+  def handle_event("filter", params, socket) do
+    {:noreply, push_patch(socket, to: path(:index, normalize_suspended(params["suspended"])))}
+  end
+
+  defp apply_suspended(query, nil), do: query
+  defp apply_suspended(query, value), do: Ash.Query.filter(query, suspended == ^value)
+
+  defp normalize_suspended("true"), do: true
+  defp normalize_suspended("false"), do: false
+  defp normalize_suspended(_), do: nil
+
   @impl true
   def handle_info({FormComponent, {:saved, _record}}, socket) do
     {:noreply, socket |> load_subscriptions(0)}
@@ -118,7 +134,25 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
         </:actions>
       </.page_header>
 
-      <div :if={@subscriptions == []}>
+      <form phx-change="filter" class="flex flex-wrap items-end gap-3 mb-4">
+        <.filter_select
+          name="suspended"
+          label="Health"
+          prompt="All subscriptions"
+          options={[{"true", "Suspended (failing)"}, {"false", "Healthy"}]}
+          selected={@filters.suspended}
+        />
+      </form>
+
+      <div :if={@subscriptions == [] and @filters.suspended != nil}>
+        <.empty_state title="No subscriptions match this filter" icon="hero-inbox">
+          <:actions>
+            <.link navigate={path(:index, nil)} class="btn btn-ghost btn-sm">Clear filter</.link>
+          </:actions>
+        </.empty_state>
+      </div>
+
+      <div :if={@subscriptions == [] and @filters.suspended == nil}>
         <.empty_state title="No subscriptions yet — define which events to watch and how to deliver them.">
           <:actions>
             <.link :if={@can_create} navigate={path(:new)} class="btn btn-primary btn-sm">
@@ -232,6 +266,10 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
   defp path(:index), do: base() <> "/subscriptions"
   defp path(:new), do: base() <> "/subscriptions/new"
   defp path(:new_connection), do: base() <> "/connections/new"
+
+  defp path(:index, suspended),
+    do: Helpers.filtered_path("/subscriptions", suspended: suspended && to_string(suspended))
+
   defp path(:connection, id), do: base() <> "/connections/#{id}"
   defp path(:show, id), do: base() <> "/subscriptions/#{id}"
   defp path(:edit, id), do: base() <> "/subscriptions/#{id}/edit"

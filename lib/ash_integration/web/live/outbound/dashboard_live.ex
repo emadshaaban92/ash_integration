@@ -81,54 +81,44 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
         </:actions>
       </.page_header>
 
+      <%!-- Every tile is a drill-down: clicking it opens the list view filtered to exactly
+    the rows the number counts. The error tiles (Failing / Parked / Terminal) are the
+    ones an operator most needs to act on, so they must be reachable in one click. --%>
       <div class="stats stats-vertical sm:stats-horizontal shadow w-full mb-8">
-        <div class="stat">
-          <div class="stat-title">Subscriptions</div>
-          <div class="stat-value">{stat(@stats.total_subscriptions)}</div>
-          <div class="stat-desc">{stat(@stats.active_subscriptions)} active</div>
-        </div>
+        <.stat_link href={path(:subscriptions)} title="Subscriptions">
+          <:value>{stat(@stats.total_subscriptions)}</:value>
+          <:desc>{stat(@stats.active_subscriptions)} active</:desc>
+        </.stat_link>
 
-        <div class="stat">
-          <div class="stat-title">Failing</div>
-          <div class={["stat-value", pos?(@stats.failing_subscriptions) && "text-error"]}>
-            {stat(@stats.failing_subscriptions)}
-          </div>
-          <div class="stat-desc">subscriptions with consecutive failures</div>
-        </div>
+        <.stat_link href={path(:failing)} title="Failing" error={pos?(@stats.failing_subscriptions)}>
+          <:value>{stat(@stats.failing_subscriptions)}</:value>
+          <:desc>suspended subscriptions — click to review</:desc>
+        </.stat_link>
 
-        <div class="stat">
-          <div class="stat-title">Delivered (24h)</div>
-          <div class="stat-value">{stat(@stats.delivered_24h)}</div>
-          <div class="stat-desc">bytes-on-the-wire deliveries in the last 24h</div>
-        </div>
+        <.stat_link href={path(:delivered)} title="Delivered (24h)">
+          <:value>{stat(@stats.delivered_24h)}</:value>
+          <:desc>bytes-on-the-wire deliveries in the last 24h</:desc>
+        </.stat_link>
 
-        <div class="stat">
-          <div class="stat-title">Suppressed (24h)</div>
-          <div class="stat-value">{stat(@stats.suppressed_24h)}</div>
-          <div class="stat-desc">unchanged deliveries withheld (not sent)</div>
-        </div>
+        <.stat_link href={path(:suppressed)} title="Suppressed (24h)">
+          <:value>{stat(@stats.suppressed_24h)}</:value>
+          <:desc>unchanged deliveries withheld (not sent)</:desc>
+        </.stat_link>
 
-        <div class="stat">
-          <div class="stat-title">Parked</div>
-          <div class={["stat-value", pos?(@stats.parked) && "text-error"]}>
-            {stat(@stats.parked)}
-          </div>
-          <div class="stat-desc">build failures awaiting reprocess (broken transform)</div>
-        </div>
+        <.stat_link href={path(:parked)} title="Parked" error={pos?(@stats.parked)}>
+          <:value>{stat(@stats.parked)}</:value>
+          <:desc>build failures awaiting reprocess (broken transform)</:desc>
+        </.stat_link>
 
-        <div class="stat">
-          <div class="stat-title">Terminal</div>
-          <div class={["stat-value", pos?(@stats.terminal) && "text-error"]}>
-            {stat(@stats.terminal)}
-          </div>
-          <div class="stat-desc">given-up deliveries blocking their lanes (retry or cancel)</div>
-        </div>
+        <.stat_link href={path(:terminal)} title="Terminal" error={pos?(@stats.terminal)}>
+          <:value>{stat(@stats.terminal)}</:value>
+          <:desc>given-up deliveries blocking their lanes (retry or cancel)</:desc>
+        </.stat_link>
 
-        <div class="stat">
-          <div class="stat-title">Connections</div>
-          <div class="stat-value">{stat(@stats.total_connections)}</div>
-          <div class="stat-desc">transport + auth configs</div>
-        </div>
+        <.stat_link href={path(:connections)} title="Connections">
+          <:value>{stat(@stats.total_connections)}</:value>
+          <:desc>transport + auth configs</:desc>
+        </.stat_link>
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -210,6 +200,26 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
     """
   end
 
+  attr :href, :string, required: true
+  attr :title, :string, required: true
+  attr :error, :boolean, default: false
+  slot :value, required: true
+  slot :desc
+
+  # A dashboard stat rendered as a one-click drill-down into its filtered list view.
+  defp stat_link(assigns) do
+    ~H"""
+    <.link navigate={@href} class="stat hover:bg-base-200 transition-colors cursor-pointer">
+      <div class="stat-figure text-base-content/30">
+        <.icon name="hero-arrow-right-mini" class="size-4" />
+      </div>
+      <div class="stat-title">{@title}</div>
+      <div class={["stat-value", @error && "text-error"]}>{render_slot(@value)}</div>
+      <div :if={@desc != []} class="stat-desc">{render_slot(@desc)}</div>
+    </.link>
+    """
+  end
+
   # A failed (nil) count shows "—"; a real 0 shows 0.
   defp stat(nil), do: "—"
   defp stat(n), do: n
@@ -224,6 +234,12 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
   defp path(:deliveries), do: base() <> "/deliveries"
   defp path(:logs), do: base() <> "/logs"
   defp path(:new_subscription), do: base() <> "/subscriptions/new"
+  # Error-stat drill-downs — each lands on the list filtered to exactly what it counts.
+  defp path(:failing), do: base() <> "/subscriptions?suspended=true"
+  defp path(:parked), do: base() <> "/deliveries?state=parked"
+  defp path(:terminal), do: base() <> "/deliveries?state=terminal"
+  defp path(:delivered), do: base() <> "/logs?status=success"
+  defp path(:suppressed), do: base() <> "/logs?status=suppressed"
 
   defp base, do: AshIntegration.Web.base_path()
 end

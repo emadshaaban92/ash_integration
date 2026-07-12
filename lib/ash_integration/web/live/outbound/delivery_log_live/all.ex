@@ -10,7 +10,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
 
   alias AshIntegration.Web.Outbound.Helpers
 
-  @statuses ~w(success failed skipped)
+  @statuses ~w(success failed skipped suppressed)
 
   @impl true
   def mount(_params, _session, socket) do

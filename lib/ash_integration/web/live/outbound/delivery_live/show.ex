@@ -227,9 +227,36 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
         </span>
       </div>
 
-      <div :if={@delivery.last_error && @delivery.state != :suppressed} class="alert alert-error mb-4">
+      <%!-- The red alert is for a CURRENT problem only: a delivery still pending/scheduled,
+    parked (build-failed), or failed (retrying/terminal). A `:delivered` or `:cancelled`
+    row may carry a stale `last_error` from an earlier attempt that a retry later resolved —
+    showing that as a red error made a *successful* delivery look broken. Those get their
+    own, non-alarming note below; the full attempt history is in the Delivery Logs table. --%>
+      <div
+        :if={@delivery.last_error && @delivery.state in [:pending, :scheduled, :parked, :failed]}
+        class="alert alert-error mb-4"
+      >
         <.icon name="hero-exclamation-triangle" />
         <span class="font-mono text-sm">{@delivery.last_error}</span>
+      </div>
+
+      <div
+        :if={@delivery.state == :delivered && @delivery.last_error}
+        class="alert alert-success mb-4"
+      >
+        <.icon name="hero-check-circle" />
+        <span class="text-sm">
+          <strong>Delivered</strong>
+          — an earlier attempt failed but a retry succeeded, so the consumer is up to date.
+          The failed attempt is kept below under <strong>Delivery Logs</strong>; the last error was: <span class="font-mono">{@delivery.last_error}</span>.
+        </span>
+      </div>
+
+      <div :if={@delivery.state == :cancelled && @delivery.last_error} class="alert mb-4">
+        <.icon name="hero-no-symbol" />
+        <span class="text-sm">
+          <strong>Cancelled</strong> — {@delivery.last_error}
+        </span>
       </div>
 
       <.json_block
