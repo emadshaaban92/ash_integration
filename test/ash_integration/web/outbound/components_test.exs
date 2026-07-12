@@ -70,10 +70,9 @@ defmodule AshIntegration.Web.ComponentsTest do
       assert html =~ "Base url: is invalid"
     end
 
-    test "falls back to a generic message when there are no field errors" do
+    test "renders nothing when there are no errors (so a fixed form clears the summary)" do
       html = render_component(&Components.form_error_summary/1, errors: [])
-      assert html =~ "alert-error"
-      assert html =~ "review the highlighted fields"
+      refute html =~ "alert-error"
     end
   end
 

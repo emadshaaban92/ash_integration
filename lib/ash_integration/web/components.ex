@@ -208,21 +208,23 @@ defmodule AshIntegration.Web.Components do
     """
   end
 
-  attr :errors, :list, required: true, doc: "flat error strings; empty shows a generic message"
+  attr :errors, :list, required: true, doc: "flat error strings; renders nothing when empty"
 
-  @doc "A form-level 'couldn't save' summary, so a failed submit never bounces back silently."
+  @doc """
+  A form-level "couldn't save" summary, so a failed submit never bounces back
+  silently. Renders nothing when there are no errors — the caller keeps this mounted
+  after a failed submit (`submitted?`), so once the operator fixes every field it
+  must disappear rather than linger with a stale "review the fields" message.
+  """
   def form_error_summary(assigns) do
     ~H"""
-    <div class="alert alert-error" role="alert">
+    <div :if={@errors != []} class="alert alert-error" role="alert">
       <.icon name="hero-exclamation-triangle" />
       <div>
         <p class="font-medium">This couldn't be saved.</p>
-        <ul :if={@errors != []} class="text-sm list-disc list-inside mt-1">
+        <ul class="text-sm list-disc list-inside mt-1">
           <li :for={msg <- @errors}>{msg}</li>
         </ul>
-        <p :if={@errors == []} class="text-sm mt-1">
-          Please review the highlighted fields and try again.
-        </p>
       </div>
     </div>
     """
