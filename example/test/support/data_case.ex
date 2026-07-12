@@ -118,6 +118,33 @@ defmodule Example.DataCase do
   defp delivered_at_for(_state, _o), do: nil
 
   @doc """
+  Seed a per-attempt delivery `Log` for a subscription — the bottom of the runtime
+  drill-down (Event → Delivery → Log) that the delivery relay writes on each attempt.
+  Seeded directly (bypassing the relay) so a test can pin `status`, `created_at`
+  (for the Logs view's time-window filter), `duration_ms`, `response_status`, and the
+  owning `event_delivery_id`. Connection/subscription/event_type default off the
+  subscription. Returns the `Log`.
+  """
+  def build_log!(subscription, overrides \\ %{}) do
+    o = Map.new(overrides)
+
+    AshIntegration.delivery_log_resource()
+    |> Ash.Seed.seed!(%{
+      event_type: Map.get(o, :event_type, subscription.event_type),
+      version: subscription.version,
+      event_key: Map.get(o, :event_key, "p1"),
+      status: Map.get(o, :status, :success),
+      response_status: Map.get(o, :response_status),
+      duration_ms: Map.get(o, :duration_ms),
+      error_message: Map.get(o, :error_message),
+      connection_id: subscription.connection_id,
+      subscription_id: subscription.id,
+      event_delivery_id: Map.get(o, :event_delivery_id),
+      created_at: Map.get(o, :created_at, DateTime.utc_now())
+    })
+  end
+
+  @doc """
   Synchronously drain the outbox by driving the **real Broadway relay callbacks**
   in-process (claim → `prepare_messages` → `handle_message` → `handle_batch` → ack),
   looping until the outbox is empty. This exercises the actual dispatch path —
