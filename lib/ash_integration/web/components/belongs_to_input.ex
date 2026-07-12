@@ -4,6 +4,7 @@ defmodule AshIntegration.Web.Components.BelongsToInput do
   import AshIntegration.Web.Components
 
   require Ash.Query
+  require Logger
 
   @impl true
   def render(%{field: %Phoenix.HTML.FormField{} = field} = assigns) do
@@ -70,7 +71,20 @@ defmodule AshIntegration.Web.Components.BelongsToInput do
     assign(socket, field: form[relationship.source_attribute])
   end
 
+  # Load the dropdown options. Non-bang at the boundary: a policy/DB error while
+  # reading the destination (or reloading the current selection's display fields)
+  # degrades to an empty option list rather than crashing the whole form — the same
+  # fail-soft the index helpers (`Helpers.list_connections/1`) apply to their filter
+  # dropdowns.
   defp get_options(socket, search \\ nil) do
+    do_get_options(socket, search)
+  rescue
+    error ->
+      Logger.warning("belongs_to_input option load failed: #{Exception.message(error)}")
+      []
+  end
+
+  defp do_get_options(socket, search) do
     %{form: form, relationship: relationship} = socket.assigns
 
     result_list =

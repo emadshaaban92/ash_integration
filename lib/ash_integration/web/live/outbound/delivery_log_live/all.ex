@@ -12,12 +12,24 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
 
   @statuses ~w(success failed skipped suppressed)
 
+  # Time-window options for the `since` filter. The keys double as the deep-link
+  # param carried by the dashboard's "(24h)" tiles (`?since=24h`), so the drill-down
+  # lands time-boxed to exactly the window the tile counted. Ordered list (not a map)
+  # so the dropdown renders shortest-window-first.
+  @windows [
+    {"1h", "Last hour"},
+    {"24h", "Last 24 hours"},
+    {"7d", "Last 7 days"}
+  ]
+  @window_keys Enum.map(@windows, &elem(&1, 0))
+
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
      socket
      |> assign(page_title: "Delivery Logs", logs: [], page: Helpers.empty_page())
      |> assign(connections: [], statuses: @statuses, event_types: Helpers.event_types())
+     |> assign(windows: @windows)
      |> assign(filters: empty_filters())
      |> load_connections()}
   end
@@ -50,6 +62,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
       |> apply_filter(:event_type, f.event_type)
       |> apply_filter(:subscription_id, f.subscription)
       |> apply_status(f.status)
+      |> apply_since(f.since)
 
     page = Helpers.read_page!(query, actor: actor, page: [limit: 20, offset: offset, count: true])
 
@@ -70,6 +83,23 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
 
   defp apply_status(query, nil), do: query
   defp apply_status(query, status), do: Ash.Query.filter(query, status == ^status)
+
+  # Time-box to the selected window. Bounds the list to the same span the dashboard's
+  # "(24h)" tiles count over, so tile → list drill-down stays consistent (the tile's
+  # number and the rows it lands on describe the same window).
+  defp apply_since(query, nil), do: query
+
+  defp apply_since(query, since) do
+    case window_cutoff(since) do
+      nil -> query
+      cutoff -> Ash.Query.filter(query, created_at >= ^cutoff)
+    end
+  end
+
+  defp window_cutoff("1h"), do: DateTime.add(DateTime.utc_now(), -1, :hour)
+  defp window_cutoff("24h"), do: DateTime.add(DateTime.utc_now(), -24, :hour)
+  defp window_cutoff("7d"), do: DateTime.add(DateTime.utc_now(), -24 * 7, :hour)
+  defp window_cutoff(_), do: nil
 
   @impl true
   def handle_event("filter", params, socket) do
@@ -112,6 +142,13 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
           prompt="All statuses"
           options={Enum.map(@statuses, &{&1, Helpers.humanize(&1)})}
           selected={@filters.status}
+        />
+        <.filter_select
+          name="since"
+          label="Time window"
+          prompt="All time"
+          options={@windows}
+          selected={@filters.since}
         />
 
         <.subscription_filter_badge
@@ -156,14 +193,15 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
   end
 
   defp empty_filters,
-    do: %{connection: nil, status: nil, event_type: nil, subscription: nil}
+    do: %{connection: nil, status: nil, event_type: nil, subscription: nil, since: nil}
 
   defp parse_filters(params) do
     %{
       connection: Helpers.presence(params["connection"]),
       status: normalize_status(params["status"]),
       event_type: Helpers.presence(params["event_type"]),
-      subscription: Helpers.presence(params["subscription"])
+      subscription: Helpers.presence(params["subscription"]),
+      since: normalize_since(params["since"])
     }
   end
 
@@ -172,6 +210,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
       connection: Helpers.presence(params["connection"]),
       status: normalize_status(params["status"]),
       event_type: Helpers.presence(params["event_type"]),
+      since: normalize_since(params["since"]),
       # subscription is deep-link only — not part of the filter form.
       subscription: current.subscription
     }
@@ -179,6 +218,9 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
 
   defp normalize_status(status) when status in @statuses, do: String.to_existing_atom(status)
   defp normalize_status(_), do: nil
+
+  defp normalize_since(since) when since in @window_keys, do: since
+  defp normalize_since(_), do: nil
 
   defp path(:show, id), do: base() <> "/logs/#{id}"
 
@@ -188,6 +230,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
       status: filters.status && to_string(filters.status),
       event_type: filters.event_type,
       subscription: filters.subscription,
+      since: filters.since,
       offset: offset
     )
   end

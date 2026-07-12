@@ -291,7 +291,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
             <%= case @selected_transport do %>
               <% "http" -> %>
                 <label class="label">HTTP Method</label>
-                <select name="form[route][method]" class="select select-bordered w-full">
+                <select name="form[route][method]" class="select w-full">
                   <option
                     :for={m <- ~w(post put patch delete)}
                     value={m}
@@ -306,7 +306,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
                   name="form[route][path]"
                   value={@route["path"]}
                   placeholder="/widgets"
-                  class="input input-bordered w-full"
+                  class="input w-full"
                   phx-debounce="blur"
                 />
                 <label class="label mt-2">Timeout override (ms)</label>
@@ -315,7 +315,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
                   name="form[route][timeout_ms]"
                   value={@route["timeout_ms"]}
                   placeholder="Leave blank to use the connection default"
-                  class="input input-bordered w-full"
+                  class="input w-full"
                   phx-debounce="blur"
                 />
                 <p class="text-xs text-base-content/50 mt-1">
@@ -329,7 +329,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
                   name="form[route][topic]"
                   value={@route["topic"]}
                   placeholder="Leave blank to use the connection's default topic"
-                  class="input input-bordered w-full"
+                  class="input w-full"
                   phx-debounce="blur"
                 />
               <% "whatsapp" -> %>
@@ -339,7 +339,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
                   name="form[route][to]"
                   value={@route["to"]}
                   placeholder="E.164 digits, e.g. 15551234567 — usually set by the transform"
-                  class="input input-bordered w-full"
+                  class="input w-full"
                   phx-debounce="blur"
                 />
                 <label class="label mt-2">Default template name</label>
@@ -348,7 +348,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
                   name="form[route][template_name]"
                   value={@route["template_name"]}
                   placeholder="order_shipped"
-                  class="input input-bordered w-full"
+                  class="input w-full"
                   phx-debounce="blur"
                 />
                 <label class="label mt-2">Template language</label>
@@ -357,7 +357,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
                   name="form[route][language]"
                   value={@route["language"]}
                   placeholder="en_US"
-                  class="input input-bordered w-full"
+                  class="input w-full"
                   phx-debounce="blur"
                 />
                 <p class="text-xs text-base-content/50 mt-1">
