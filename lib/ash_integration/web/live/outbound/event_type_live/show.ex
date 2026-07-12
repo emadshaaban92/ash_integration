@@ -24,7 +24,12 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
            type: type,
            versions: versions,
            producers: Enum.uniq(producers),
-           page_title: type
+           page_title: type,
+           can_create:
+             Helpers.can?(
+               {AshIntegration.subscription_resource(), :create},
+               socket.assigns.current_user
+             )
          )
          |> load_subscriptions(type)
          |> load_recent_events(type)}
@@ -112,8 +117,18 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
       </div>
 
       <h3 class="font-semibold mb-2">Subscriptions ({length(@subscriptions)})</h3>
-      <div :if={@subscriptions == []} class="text-sm text-base-content/50 mb-6">
-        No subscriptions consume this event type yet.
+      <div :if={@subscriptions == []} class="mb-6">
+        <.empty_state title="No subscriptions consume this event type yet" icon="hero-inbox">
+          <:actions>
+            <.link
+              :if={@can_create}
+              navigate={path(:new_subscription, @type)}
+              class="btn btn-primary btn-sm"
+            >
+              <.icon name="hero-plus-mini" /> Add subscription
+            </.link>
+          </:actions>
+        </.empty_state>
       </div>
       <table :if={@subscriptions != []} class="table table-zebra mb-6">
         <thead>
@@ -186,5 +201,9 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
   end
 
   defp path(:index), do: base() <> "/event-types"
+
+  defp path(:new_subscription, type),
+    do: base() <> "/subscriptions/new?event_type=#{URI.encode_www_form(type)}"
+
   defp base, do: AshIntegration.Web.base_path()
 end

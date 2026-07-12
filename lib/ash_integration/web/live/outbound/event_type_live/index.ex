@@ -89,7 +89,13 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Index do
                 else: "producers"}
             </td>
             <td>
-              <span class="badge badge-sm badge-info">
+              <span class={[
+                "badge badge-sm",
+                if(Map.get(@subscription_counts, row.type, 0) == 0,
+                  do: "badge-ghost",
+                  else: "badge-info"
+                )
+              ]}>
                 {Map.get(@subscription_counts, row.type, 0)}
               </span>
             </td>

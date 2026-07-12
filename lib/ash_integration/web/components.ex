@@ -423,6 +423,31 @@ defmodule AshIntegration.Web.Components do
     """
   end
 
+  attr :has_secret, :boolean,
+    default: false,
+    doc: "true when a value is already stored (edit of an existing secret)"
+
+  attr :optional, :boolean,
+    default: false,
+    doc: "true when the field may be left blank even when creating"
+
+  @doc """
+  Persistent helper text under an encrypted secret input.
+
+  The "leave blank to keep current" affordance is otherwise a placeholder only —
+  invisible once the field has focus or content — so state it in the open, and
+  always note that the value is stored encrypted.
+  """
+  def secret_hint(assigns) do
+    ~H"""
+    <p class="text-xs text-base-content/60 -mt-1 mb-2">
+      <span :if={@optional}>Optional — leave blank if the server needs no authentication. </span>Stored encrypted.<span :if={
+        @has_secret
+      }> Leave blank to keep the current value.</span>
+    </p>
+    """
+  end
+
   slot :inner_block, required: true
 
   defp input_error(assigns) do

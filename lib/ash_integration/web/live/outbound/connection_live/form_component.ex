@@ -274,7 +274,11 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
               options={transport_options(@selected_transport)}
               phx-change="transport-type-changed"
               phx-target={@myself}
+              data-confirm="Switching transport clears the transport configuration you've entered (URL, auth, brokers, signing…). Continue?"
             />
+            <p class="text-xs text-base-content/60 mt-1">
+              Changing the transport resets the transport-specific configuration below.
+            </p>
           </div>
 
           <.inputs_for :let={tc} field={f[:transport_config]}>
@@ -320,6 +324,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
                       placeholder={if @has_secrets[:signing], do: "Leave blank to keep current"}
                       phx-debounce="blur"
                     />
+                    <.secret_hint has_secret={@has_secrets[:signing]} />
                     <.input
                       field={sig[:header_name]}
                       type="text"
@@ -339,6 +344,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
                       placeholder={if @has_secrets[:signing], do: "Leave blank to keep current"}
                       phx-debounce="blur"
                     />
+                    <.secret_hint has_secret={@has_secrets[:signing]} />
                     <.input
                       field={sig[:source]}
                       type="textarea"

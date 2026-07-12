@@ -16,6 +16,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
        connections: [],
        can_create: false,
        perms: %{},
+       prefill_event_type: nil,
        filters: %{suspended: nil},
        page: %{offset: 0, limit: 20, count: 0}
      )}
@@ -33,9 +34,10 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
     |> load_subscriptions(Helpers.parse_int(params["offset"], 0))
   end
 
-  defp apply_action(socket, :new, _params) do
+  defp apply_action(socket, :new, params) do
     socket
     |> assign(page_title: "New Subscription")
+    |> assign(prefill_event_type: params["event_type"])
     |> load_subscriptions(0)
     |> load_connections()
   end
@@ -255,6 +257,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Index do
           connections={@connections}
           connection={nil}
           subscription={nil}
+          prefill_event_type={@prefill_event_type}
           actor={@current_user}
           navigate={path(:index)}
         />
