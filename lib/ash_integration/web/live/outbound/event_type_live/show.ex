@@ -7,6 +7,7 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
   require Ash.Query
 
   alias AshIntegration.Outbound.Declare.Registry
+  alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
   alias AshIntegration.Web.Outbound.EventLive.Helpers, as: EventHelpers
   alias AshIntegration.Web.Outbound.Helpers
 
@@ -43,7 +44,7 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
       case AshIntegration.subscription_resource()
            |> Ash.Query.for_read(:read, %{}, actor: actor)
            |> Ash.Query.filter(event_type == ^type)
-           |> Ash.Query.load(:connection)
+           |> Ash.Query.load([:connection, :parked_count])
            |> Ash.read(actor: actor, page: false) do
         {:ok, %{results: results}} -> results
         {:ok, results} when is_list(results) -> results
@@ -125,9 +126,23 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
         </thead>
         <tbody>
           <tr :for={sub <- @subscriptions}>
-            <td class="text-sm">{sub.connection && sub.connection.name}</td>
+            <td class="text-sm">
+              <.link
+                :if={sub.connection}
+                navigate={base() <> "/connections/#{sub.connection_id}"}
+                class="link link-hover"
+              >
+                {sub.connection.name}
+              </.link>
+              <span :if={!sub.connection} class="text-base-content/50">—</span>
+            </td>
             <td>v{sub.version}</td>
-            <td><.active_badge active={sub.active} /></td>
+            <td>
+              <div class="flex items-center gap-1">
+                <.active_badge active={sub.active} />
+                <DeliveryHelpers.health_badge record={sub} />
+              </div>
+            </td>
             <td class="text-right">
               <.link
                 navigate={base() <> "/subscriptions/#{sub.id}"}

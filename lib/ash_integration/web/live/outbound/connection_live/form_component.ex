@@ -33,6 +33,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
       kafka_header_rows: [],
       has_secrets: %{},
       submitted?: false,
+      header_warnings: [],
       selected_transport: "http"
     )
   end
@@ -65,6 +66,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
       broker_rows: broker_rows,
       kafka_header_rows: kafka_header_rows,
       submitted?: false,
+      header_warnings: [],
       selected_transport: transport_type(connection.transport_config),
       has_secrets: Helpers.detect_existing_secrets(connection)
     )
@@ -94,11 +96,20 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
 
   @impl true
   def handle_event("validate", %{"form" => params}, socket) do
+    # Warnings come from the RAW params, before inject_headers_map/1 drops blank-key
+    # rows and collapses duplicate keys — otherwise the data loss is invisible.
+    warnings = Helpers.header_warnings(params)
     params = params |> Helpers.inject_headers_map() |> Helpers.strip_blank_secrets()
-    {:noreply, assign(socket, form: AshPhoenix.Form.validate(socket.assigns.form, params))}
+
+    {:noreply,
+     assign(socket,
+       form: AshPhoenix.Form.validate(socket.assigns.form, params),
+       header_warnings: warnings
+     )}
   end
 
   def handle_event("save", %{"form" => params}, socket) do
+    warnings = Helpers.header_warnings(params)
     params = params |> Helpers.inject_headers_map() |> Helpers.strip_blank_secrets()
 
     case AshPhoenix.Form.submit(socket.assigns.form, params: params) do
@@ -111,7 +122,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
          |> push_navigate(to: socket.assigns.navigate)}
 
       {:error, form} ->
-        {:noreply, assign(socket, form: form, submitted?: true)}
+        {:noreply, assign(socket, form: form, submitted?: true, header_warnings: warnings)}
     end
   end
 
@@ -137,6 +148,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
        header_rows: [],
        broker_rows: [],
        kafka_header_rows: [],
+       header_warnings: [],
        has_secrets: %{
          signing: false,
          auth: false,
@@ -237,6 +249,9 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
         phx-submit="save"
       >
         <div class="space-y-4">
+          <.form_error_summary :if={@submitted?} errors={Helpers.form_errors(@form)} />
+          <.header_warning_banner warnings={@header_warnings} />
+
           <.input field={f[:name]} type="text" label="Name" required phx-debounce="blur" />
 
           <.live_component

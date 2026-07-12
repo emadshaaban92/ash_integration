@@ -208,6 +208,40 @@ defmodule AshIntegration.Web.Components do
     """
   end
 
+  attr :errors, :list, required: true, doc: "flat error strings; empty shows a generic message"
+
+  @doc "A form-level 'couldn't save' summary, so a failed submit never bounces back silently."
+  def form_error_summary(assigns) do
+    ~H"""
+    <div class="alert alert-error" role="alert">
+      <.icon name="hero-exclamation-triangle" />
+      <div>
+        <p class="font-medium">This couldn't be saved.</p>
+        <ul :if={@errors != []} class="text-sm list-disc list-inside mt-1">
+          <li :for={msg <- @errors}>{msg}</li>
+        </ul>
+        <p :if={@errors == []} class="text-sm mt-1">
+          Please review the highlighted fields and try again.
+        </p>
+      </div>
+    </div>
+    """
+  end
+
+  attr :warnings, :list, required: true
+
+  @doc "Non-blocking warnings for header/broker rows that would be dropped on save."
+  def header_warning_banner(assigns) do
+    ~H"""
+    <div :if={@warnings != []} class="alert alert-warning" role="status">
+      <.icon name="hero-exclamation-triangle" />
+      <ul class="text-sm list-disc list-inside">
+        <li :for={msg <- @warnings}>{msg}</li>
+      </ul>
+    </div>
+    """
+  end
+
   attr :name, :string, required: true
   attr :label, :string, required: true
   attr :prompt, :string, required: true
@@ -264,12 +298,13 @@ defmodule AshIntegration.Web.Components do
   attr :options, :list, doc: "the options for select inputs"
   attr :multiple, :boolean, default: false
   attr :class, :any, default: nil
+  attr :required, :boolean, default: false
 
   attr :force_errors, :boolean, default: false
 
   attr :rest, :global,
     include:
-      ~w(accept autocomplete capture cols disabled form list max maxlength min minlength multiple pattern placeholder readonly required rows size step)
+      ~w(accept autocomplete capture cols disabled form list max maxlength min minlength multiple pattern placeholder readonly rows size step)
 
   def input(%{field: %Phoenix.HTML.FormField{} = field} = assigns) do
     errors =
@@ -295,12 +330,13 @@ defmodule AshIntegration.Web.Components do
     ~H"""
     <div class="fieldset mb-2">
       <label>
-        <span :if={@label} class="label mb-1">{@label}</span>
+        <span :if={@label} class="label mb-1">{@label}<.req_mark required={@required} /></span>
         <select
           id={@id}
           name={@name}
           class={[@class || "w-full select", @errors != [] && "select-error"]}
           multiple={@multiple}
+          required={@required}
           {@rest}
         >
           <option :if={@prompt} value="">{@prompt}</option>
@@ -316,11 +352,12 @@ defmodule AshIntegration.Web.Components do
     ~H"""
     <div class="fieldset mb-2">
       <label>
-        <span :if={@label} class="label mb-1">{@label}</span>
+        <span :if={@label} class="label mb-1">{@label}<.req_mark required={@required} /></span>
         <textarea
           id={@id}
           name={@name}
           class={[@class || "w-full textarea", @errors != [] && "textarea-error"]}
+          required={@required}
           {@rest}
         >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
       </label>
@@ -348,7 +385,7 @@ defmodule AshIntegration.Web.Components do
           class={[@class || "toggle", @errors != [] && "toggle-error"]}
           {@rest}
         />
-        <span :if={@label} class="label">{@label}</span>
+        <span :if={@label} class="label">{@label}<.req_mark required={@required} /></span>
       </label>
       <.input_error :for={msg <- @errors}>{msg}</.input_error>
     </div>
@@ -359,18 +396,28 @@ defmodule AshIntegration.Web.Components do
     ~H"""
     <div class="fieldset mb-2">
       <label>
-        <span :if={@label} class="label mb-1">{@label}</span>
+        <span :if={@label} class="label mb-1">{@label}<.req_mark required={@required} /></span>
         <input
           type={@type}
           name={@name}
           id={@id}
           value={Phoenix.HTML.Form.normalize_value(@type, @value)}
           class={[@class || "w-full input", @errors != [] && "input-error"]}
+          required={@required}
           {@rest}
         />
       </label>
       <.input_error :for={msg <- @errors}>{msg}</.input_error>
     </div>
+    """
+  end
+
+  attr :required, :boolean, required: true
+
+  # A subtle asterisk marking a required field, shown in the label.
+  defp req_mark(assigns) do
+    ~H"""
+    <span :if={@required} class="text-error ml-0.5" aria-hidden="true" title="Required">*</span>
     """
   end
 
