@@ -2,6 +2,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
   @moduledoc false
   use AshIntegration.Web, :live_component
 
+  alias AshIntegration.Web.Outbound.Helpers, as: OutboundHelpers
   alias AshIntegration.Web.Outbound.SubscriptionLive.Helpers
 
   @impl true
@@ -228,6 +229,8 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
         phx-submit="save"
       >
         <div class="space-y-4">
+          <.form_error_summary :if={@submitted?} errors={OutboundHelpers.form_errors(@form)} />
+
           <.input :if={@connections == []} field={f[:connection_id]} type="hidden" />
           <.input
             :if={@connections != []}
@@ -343,6 +346,14 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
                   Pick a connection above to configure its delivery route.
                 </p>
             <% end %>
+
+            <div
+              :for={msg <- OutboundHelpers.route_config_errors(@form)}
+              class="mt-2 flex gap-1.5 items-center text-sm text-error"
+            >
+              <.icon name="hero-exclamation-circle-mini" class="size-4" />
+              <span>{msg}</span>
+            </div>
           </div>
 
           <.input

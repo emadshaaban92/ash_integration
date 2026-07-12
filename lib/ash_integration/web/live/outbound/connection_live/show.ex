@@ -192,7 +192,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
             <th>Version</th>
             <th>Every change?</th>
             <th>Status</th>
-            <th>Failures</th>
+            <th>Suspended</th>
             <th></th>
           </tr>
         </thead>
@@ -221,7 +221,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
                 "badge badge-sm",
                 if(sub.suspended, do: "badge-error", else: "badge-ghost")
               ]}>
-                {if sub.suspended, do: "suspended", else: "ok"}
+                {if sub.suspended, do: "Yes", else: "No"}
               </span>
             </td>
             <td>

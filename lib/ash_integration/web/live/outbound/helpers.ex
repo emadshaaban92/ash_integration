@@ -60,6 +60,74 @@ defmodule AshIntegration.Web.Outbound.Helpers do
   end
 
   @doc """
+  All human-readable error messages on a form (every nested form included), as
+  flat strings. Used to render a "couldn't save" summary so a failed submit never
+  bounces back silently — the AshPhoenix default surfaces errors only next to a
+  bound field, which misses union sub-forms (e.g. a subscription's `route_config`)
+  that have no visible field of their own.
+  """
+  def form_errors(form) do
+    form
+    |> AshPhoenix.Form.errors(for_path: :all, format: :plaintext)
+    |> Map.values()
+    |> List.flatten()
+    |> Enum.uniq()
+  end
+
+  @doc """
+  Interpolated error messages attached to the `route_config` union attribute, for
+  rendering *beside* the subscription's route fields — those are plain inputs, not
+  `.input`, so their validation errors would otherwise only appear in the summary.
+  """
+  def route_config_errors(form) do
+    form
+    |> AshPhoenix.Form.errors(for_path: :all, format: :raw)
+    |> Map.values()
+    |> List.flatten()
+    |> Enum.filter(&match?({:route_config, _}, &1))
+    |> Enum.map(fn {_field, {msg, opts}} -> interpolate_message(msg, opts) end)
+    |> Enum.uniq()
+  end
+
+  defp interpolate_message(msg, opts) do
+    Enum.reduce(opts || [], msg, fn {key, value}, acc ->
+      String.replace(acc, "%{#{key}}", fn _ -> to_string(value) end)
+    end)
+  end
+
+  @doc """
+  Warnings for the key/value header editors, computed from the raw form params
+  *before* `inject_headers_map/1` folds them into a map. That fold silently drops a
+  row whose key is blank and silently collapses duplicate keys to the last value —
+  both are data loss the operator can't see. This surfaces them so the UI can warn
+  instead of losing input without a trace.
+  """
+  def header_warnings(params) do
+    tc = params["transport_config"] || %{}
+    kv_warnings(tc["headers"], "header") ++ kv_warnings(tc["headers_kafka"], "Kafka header")
+  end
+
+  defp kv_warnings(rows, label) when is_map(rows) do
+    entries = Map.values(rows)
+    keys = entries |> Enum.map(&presence(&1["key"])) |> Enum.reject(&is_nil/1)
+
+    []
+    |> prepend_if(
+      Enum.any?(entries, &(is_nil(presence(&1["key"])) and not is_nil(presence(&1["value"])))),
+      "A #{label} row has a value but no name — it will be dropped on save."
+    )
+    |> prepend_if(
+      keys != Enum.uniq(keys),
+      "Duplicate #{label} names — only the last value for each name is kept."
+    )
+  end
+
+  defp kv_warnings(_rows, _label), do: []
+
+  defp prepend_if(list, true, msg), do: [msg | list]
+  defp prepend_if(list, false, _msg), do: list
+
+  @doc """
   Build a filtered index path: `base_path() <> suffix`, appending only the
   non-blank `kw` params as a query string (drops nil/""/0).
   """
