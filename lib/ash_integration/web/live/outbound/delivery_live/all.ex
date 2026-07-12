@@ -17,7 +17,12 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
   alias AshIntegration.Web.Outbound.DeliveryLive.Helpers, as: DeliveryHelpers
   alias AshIntegration.Web.Outbound.Helpers
 
-  @states ~w(pending parked scheduled failed delivered suppressed cancelled)
+  # The state filter's vocabulary matches the row badges, not the raw DB column: the
+  # `:failed` state is split into `retrying` (still backing off — `terminal_reason`
+  # nil, badged "Retrying") and `terminal` (given up — `terminal_reason` set, badged
+  # "Terminal"). Offering a single "Failed" option contradicted the badges and gave
+  # the dashboard no way to deep-link the terminal backlog specifically.
+  @filter_states ~w(pending parked scheduled retrying terminal delivered suppressed cancelled)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -30,7 +35,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
        parked_count: 0,
        can_reprocess: false
      )
-     |> assign(connections: [], event_types: Helpers.event_types(), states: @states)
+     |> assign(connections: [], event_types: Helpers.event_types(), states: @filter_states)
      |> assign(filters: empty_filters())
      |> load_connections()}
   end
@@ -100,6 +105,16 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
     do: Ash.Query.filter(query, subscription_id == ^value)
 
   defp apply_state(query, nil), do: query
+
+  # `:retrying`/`:terminal` are synthetic filter tokens (see `@filter_states`) that
+  # partition the real `:failed` state; the literals here also materialize the atoms
+  # so `normalize_state/1`'s `String.to_existing_atom/1` resolves them.
+  defp apply_state(query, :retrying),
+    do: Ash.Query.filter(query, state == :failed and is_nil(terminal_reason))
+
+  defp apply_state(query, :terminal),
+    do: Ash.Query.filter(query, state == :failed and not is_nil(terminal_reason))
+
   defp apply_state(query, state), do: Ash.Query.filter(query, state == ^state)
 
   @impl true
@@ -262,7 +277,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
     }
   end
 
-  defp normalize_state(state) when state in @states, do: String.to_existing_atom(state)
+  defp normalize_state(state) when state in @filter_states, do: String.to_existing_atom(state)
   defp normalize_state(_), do: nil
 
   defp path(:show, id), do: base() <> "/deliveries/#{id}"

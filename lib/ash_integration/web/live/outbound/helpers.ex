@@ -43,11 +43,16 @@ defmodule AshIntegration.Web.Outbound.Helpers do
   @doc """
   Read the connections visible to `actor` for the filter dropdowns. No-bang:
   degrades to `[]` (an empty dropdown) rather than crashing the page.
+
+  The `:index` action has pagination `required?` (Ash's default), so `page: false`
+  is REJECTED — it returns `{:error, PaginationRequired}` which this function would
+  swallow to `[]`, silently emptying every Connection filter dropdown. Read a large
+  first page instead. (Same trap the subscription index documents and works around.)
   """
   def list_connections(actor) do
     case AshIntegration.connection_resource()
          |> Ash.Query.for_read(:index, %{}, actor: actor)
-         |> Ash.read(actor: actor, page: false) do
+         |> Ash.read(actor: actor, page: [limit: 1000]) do
       {:ok, %{results: results}} -> results
       {:ok, results} when is_list(results) -> results
       _ -> []
