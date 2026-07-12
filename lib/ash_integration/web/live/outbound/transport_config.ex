@@ -105,6 +105,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
               placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
               phx-debounce="blur"
             />
+            <.secret_hint has_secret={@has_secrets[:auth]} />
           <% "api_key" -> %>
             <.input
               field={auth[:header_name]}
@@ -124,6 +125,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
               placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
               phx-debounce="blur"
             />
+            <.secret_hint has_secret={@has_secrets[:auth]} />
           <% "basic_auth" -> %>
             <.input
               field={auth[:username]}
@@ -143,6 +145,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
               placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
               phx-debounce="blur"
             />
+            <.secret_hint has_secret={@has_secrets[:auth]} />
           <% "oauth2_client_credentials" -> %>
             <p class="text-sm text-base-content/60 mb-2">
               Two-legged (machine-to-machine) client-credentials grant only — no
@@ -176,6 +179,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
               placeholder={if @has_secrets[:auth], do: "Leave blank to keep current"}
               phx-debounce="blur"
             />
+            <.secret_hint has_secret={@has_secrets[:auth]} />
             <.input
               field={auth[:scopes]}
               type="text"
@@ -347,6 +351,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             }
             phx-debounce="blur"
           />
+          <.secret_hint has_secret={@has_secrets[:sasl_password]} />
         <% end %>
         <%= if sec.params["_union_type"] in ["tls", "sasl_tls"] do %>
           <.input
@@ -495,6 +500,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
                 placeholder={if @has_secrets[:oauth2], do: "Leave blank to keep current"}
                 phx-debounce="blur"
               />
+              <.secret_hint has_secret={@has_secrets[:oauth2]} />
               <.input
                 field={oauth2[:scopes]}
                 type="text"
@@ -543,6 +549,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
               placeholder={if @has_secrets[:smtp_password], do: "Leave blank to keep current"}
               phx-debounce="blur"
             />
+            <.secret_hint has_secret={@has_secrets[:smtp_password]} optional />
             <div class="flex gap-2">
               <.input
                 field={adapter[:tls]}
@@ -660,6 +667,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             placeholder={if @has_secrets[:access_token], do: "Leave blank to keep current"}
             phx-debounce="blur"
           />
+          <.secret_hint has_secret={@has_secrets[:access_token]} />
         <% end %>
       </.inputs_for>
     </div>

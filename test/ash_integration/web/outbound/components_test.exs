@@ -93,6 +93,29 @@ defmodule AshIntegration.Web.ComponentsTest do
     end
   end
 
+  describe "secret_hint/1" do
+    test "always states the value is stored encrypted (persistent, not a placeholder)" do
+      html = render_component(&Components.secret_hint/1, has_secret: false)
+      assert html =~ "Stored encrypted"
+      # A brand-new secret has nothing to keep, so no leave-blank affordance.
+      refute html =~ "keep the current value"
+      refute html =~ "Optional"
+    end
+
+    test "explains the leave-blank-to-keep behavior when a secret already exists" do
+      html = render_component(&Components.secret_hint/1, has_secret: true)
+      assert html =~ "Stored encrypted"
+      assert html =~ "Leave blank to keep the current value"
+    end
+
+    test "marks the field optional when auth may be skipped (e.g. SMTP)" do
+      html = render_component(&Components.secret_hint/1, has_secret: false, optional: true)
+      assert html =~ "Optional"
+      assert html =~ "no authentication"
+      assert html =~ "Stored encrypted"
+    end
+  end
+
   describe "input/1 required marker" do
     test "shows a required marker and native attribute when required" do
       html =

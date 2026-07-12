@@ -11,7 +11,10 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.Show do
   def handle_params(%{"id" => id}, _url, socket) do
     actor = socket.assigns.current_user
 
-    case Ash.get(AshIntegration.delivery_log_resource(), id, actor: actor) do
+    case Ash.get(AshIntegration.delivery_log_resource(), id,
+           actor: actor,
+           load: [:event_delivery]
+         ) do
       {:ok, log} ->
         {:noreply, assign(socket, log: log, page_title: "Delivery Log")}
 
@@ -43,10 +46,20 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.Show do
 
       <div class="card card-border border-base-300 p-4 mb-4">
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-          <.field label="Event Type">{@log.event_type} v{@log.version}</.field>
+          <.field label="Event Type">
+            <.link navigate={path(:event_type, @log.event_type)} class="link link-hover">
+              {@log.event_type}
+            </.link>
+            v{@log.version}
+          </.field>
           <.field label="Event Key" mono>{@log.event_key}</.field>
           <.field label="Response Status">{@log.response_status || "—"}</.field>
           <.field label="Duration">{@log.duration_ms && "#{@log.duration_ms} ms"}</.field>
+          <.field :if={parent_event_id(@log)} label="Event">
+            <.link navigate={base() <> "/events/#{parent_event_id(@log)}"} class="link link-hover">
+              View event
+            </.link>
+          </.field>
           <.field :if={@log.event_delivery_id} label="Delivery">
             <.link
               navigate={base() <> "/deliveries/#{@log.event_delivery_id}"}
@@ -71,5 +84,13 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.Show do
     """
   end
 
+  # The immutable Event upstream of this attempt, reached via its EventDelivery.
+  # Nil when the delivery (and thus the parent Event link) isn't loadable.
+  defp parent_event_id(%{event_delivery: %{event_id: event_id}}) when not is_nil(event_id),
+    do: event_id
+
+  defp parent_event_id(_log), do: nil
+
+  defp path(:event_type, type), do: base() <> "/event-types/#{URI.encode(type)}"
   defp base, do: AshIntegration.Web.base_path()
 end

@@ -195,11 +195,11 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
               {@subscription.connection && @subscription.connection.name}
             </.link>
           </.field>
-          <.field label="Delivery">
+          <.field label="Delivery route">
             {route_summary(@subscription.route_config)}
           </.field>
           <.field label="Coalescing">
-            {if @subscription.notify_on_every_change, do: "Every change", else: "Latest state only"}
+            {if @subscription.notify_on_every_change, do: "Every change", else: "Latest only"}
           </.field>
           <.field label="Suppress unchanged">
             {if @subscription.suppress_unchanged,
@@ -224,7 +224,14 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
             <div>
               <div class="text-base-content/50">Parked deliveries</div>
               <div class={["font-medium", @subscription.parked_count > 0 && "text-error"]}>
-                {@subscription.parked_count}
+                <.link
+                  :if={@subscription.parked_count > 0}
+                  navigate={path(:parked, @subscription.id)}
+                  class="link link-hover text-error"
+                >
+                  {@subscription.parked_count}
+                </.link>
+                <span :if={@subscription.parked_count == 0}>{@subscription.parked_count}</span>
                 <span :if={@subscription.oldest_parked_at} class="text-base-content/50 font-normal">
                   (oldest {Helpers.format_datetime(@subscription.oldest_parked_at)})
                 </span>
@@ -413,6 +420,7 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.Show do
   defp path(:show, id), do: base() <> "/subscriptions/#{id}"
   defp path(:edit, id), do: base() <> "/subscriptions/#{id}/edit"
   defp path(:deliveries, id), do: base() <> "/deliveries?subscription=#{id}"
+  defp path(:parked, id), do: base() <> "/deliveries?subscription=#{id}&state=parked"
   defp path(:logs, id), do: base() <> "/logs?subscription=#{id}"
   defp base, do: AshIntegration.Web.base_path()
 end

@@ -17,17 +17,19 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
           :connection,
           :subscription,
           :navigate,
-          :connections
+          :connections,
+          :prefill_event_type
         ])
       )
 
     socket = assign_new(socket, :connections, fn -> [] end)
+    socket = assign_new(socket, :prefill_event_type, fn -> nil end)
     socket = if socket.assigns[:form], do: socket, else: init_form(socket)
     {:ok, socket}
   end
 
   defp init_form(%{assigns: %{action: :new_subscription, actor: actor} = assigns} = socket) do
-    {default_type, default_version} = default_selection()
+    {default_type, default_version} = default_selection(assigns[:prefill_event_type])
 
     default_conn_id =
       case assigns do
@@ -77,34 +79,43 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
     |> Helpers.assign_form_options(form)
   end
 
-  defp default_selection do
-    case Helpers.event_type_options() do
-      [{_, type} | _] ->
-        version =
-          case Helpers.version_options(type) do
-            [{_, v} | _] -> v
-            _ -> nil
-          end
+  # The event type to start on: a valid `prefill` (deep-linked from the event-type
+  # page) wins, otherwise the first type in the catalog. Version follows from the
+  # chosen type.
+  defp default_selection(prefill) do
+    options = Helpers.event_type_options()
+    prefill_valid? = prefill && Enum.any?(options, fn {_, value} -> value == prefill end)
 
-        {type, version}
+    type =
+      cond do
+        prefill_valid? -> prefill
+        match?([{_, _} | _], options) -> options |> hd() |> elem(1)
+        true -> nil
+      end
 
-      _ ->
-        {nil, nil}
-    end
+    version =
+      case Helpers.version_options(type) do
+        [{_, v} | _] -> v
+        _ -> nil
+      end
+
+    {type, version}
   end
 
   @impl true
   def handle_event("validate", %{"form" => params}, socket) do
-    new_transport = transport_for(socket.assigns, params["connection_id"])
-    # Switching to a connection with a different transport invalidates the route —
-    # reset it rather than try to cast e.g. an HTTP route onto a Kafka connection.
-    transport_changed? = new_transport != socket.assigns.selected_transport
-    transport = new_transport || socket.assigns.selected_transport
+    # Changing the event type can leave a stale version selected (one the new
+    # type doesn't support) — snap it back to the first valid version.
+    params = reset_stale_version(params)
 
-    route =
-      if transport_changed?,
-        do: %{},
-        else: Map.merge(socket.assigns.route, params["route"] || %{})
+    transport =
+      transport_for(socket.assigns, params["connection_id"]) || socket.assigns.selected_transport
+
+    # Preserve entered route values across a connection/transport switch instead of
+    # wiping them: `route_config_params/2` reads only the keys the active transport
+    # understands, so leftover keys are inert — and a value the user typed comes back
+    # if they switch the connection back.
+    route = Map.merge(socket.assigns.route, params["route"] || %{})
 
     form =
       AshPhoenix.Form.validate(socket.assigns.form, with_route_config(params, transport, route))
@@ -134,6 +145,19 @@ defmodule AshIntegration.Web.Outbound.SubscriptionLive.FormComponent do
          socket
          |> assign(form: form, submitted?: true, route: route)
          |> Helpers.assign_form_options(form)}
+    end
+  end
+
+  # If the selected version isn't in the chosen event type's version list, reset it
+  # to that type's first valid version (form params are strings).
+  defp reset_stale_version(params) do
+    valid =
+      Helpers.version_options(params["event_type"]) |> Enum.map(fn {_, v} -> to_string(v) end)
+
+    if params["version"] in valid do
+      params
+    else
+      Map.put(params, "version", List.first(valid))
     end
   end
 

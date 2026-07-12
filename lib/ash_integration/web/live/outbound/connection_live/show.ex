@@ -160,7 +160,14 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
           <div>
             <div class="text-base-content/50">Parked deliveries</div>
             <div class={["font-medium", @connection.parked_count > 0 && "text-error"]}>
-              {@connection.parked_count}
+              <.link
+                :if={@connection.parked_count > 0}
+                navigate={path(:parked, @connection.id)}
+                class="link link-hover text-error"
+              >
+                {@connection.parked_count}
+              </.link>
+              <span :if={@connection.parked_count == 0}>{@connection.parked_count}</span>
               <span :if={@connection.oldest_parked_at} class="text-base-content/50 font-normal">
                 (oldest {Helpers.format_datetime(@connection.oldest_parked_at)})
               </span>
@@ -190,7 +197,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
           <tr>
             <th>Event Type</th>
             <th>Version</th>
-            <th>Every change?</th>
+            <th>Coalescing</th>
             <th>Status</th>
             <th>Suspended</th>
             <th></th>
@@ -206,9 +213,9 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
             <td>V{sub.version}</td>
             <td>
               <span :if={sub.notify_on_every_change} class="badge badge-sm badge-info">
-                every change
+                Every change
               </span>
-              <span :if={!sub.notify_on_every_change} class="text-base-content/50">latest only</span>
+              <span :if={!sub.notify_on_every_change} class="text-base-content/50">Latest only</span>
             </td>
             <td>
               <div class="flex items-center gap-1">
@@ -271,6 +278,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Show do
   defp path(:new_subscription, id), do: base() <> "/connections/#{id}/subscriptions/new"
   defp path(:subscription, id), do: base() <> "/subscriptions/#{id}"
   defp path(:deliveries, id), do: base() <> "/deliveries?connection=#{id}"
+  defp path(:parked, id), do: base() <> "/deliveries?connection=#{id}&state=parked"
   defp path(:logs, id), do: base() <> "/logs?connection=#{id}"
 
   defp base, do: AshIntegration.Web.base_path()
