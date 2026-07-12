@@ -54,7 +54,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.Show do
           </.field>
           <.field label="Event Key" mono>{@log.event_key}</.field>
           <.field label="Response Status">{@log.response_status || "—"}</.field>
-          <.field label="Duration">{@log.duration_ms && "#{@log.duration_ms} ms"}</.field>
+          <.field label="Duration">{(@log.duration_ms && "#{@log.duration_ms} ms") || "—"}</.field>
           <.field :if={parent_event_id(@log)} label="Event">
             <.link navigate={base() <> "/events/#{parent_event_id(@log)}"} class="link link-hover">
               View event

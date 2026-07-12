@@ -238,8 +238,10 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
   defp path(:failing), do: base() <> "/subscriptions?suspended=true"
   defp path(:parked), do: base() <> "/deliveries?state=parked"
   defp path(:terminal), do: base() <> "/deliveries?state=terminal"
-  defp path(:delivered), do: base() <> "/logs?status=success"
-  defp path(:suppressed), do: base() <> "/logs?status=suppressed"
+  # The `since=24h` param time-boxes the Logs list to the same 24h window these tiles
+  # count (`created_at >= now-24h`), so the drill-down's rows match the tile's number.
+  defp path(:delivered), do: base() <> "/logs?status=success&since=24h"
+  defp path(:suppressed), do: base() <> "/logs?status=suppressed&since=24h"
 
   defp base, do: AshIntegration.Web.base_path()
 end

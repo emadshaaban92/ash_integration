@@ -44,7 +44,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             name={@tc[:headers].name <> "[#{id}][key]"}
             value={key}
             placeholder="Header name"
-            class="input input-bordered input-sm flex-1"
+            class="input input-sm flex-1"
             phx-debounce="blur"
           />
           <input
@@ -52,7 +52,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             name={@tc[:headers].name <> "[#{id}][value]"}
             value={value}
             placeholder="Header value"
-            class="input input-bordered input-sm flex-1"
+            class="input input-sm flex-1"
             phx-debounce="blur"
           />
           <button
@@ -231,7 +231,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             name={@tc[:brokers].name <> "[#{id}]"}
             value={value}
             placeholder="host:port"
-            class="input input-bordered input-sm flex-1"
+            class="input input-sm flex-1"
             phx-debounce="blur"
           />
           <button
@@ -272,7 +272,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             name={@tc[:headers].name <> "_kafka[#{id}][key]"}
             value={key}
             placeholder="Header name"
-            class="input input-bordered input-sm flex-1"
+            class="input input-sm flex-1"
             phx-debounce="blur"
           />
           <input
@@ -280,7 +280,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             name={@tc[:headers].name <> "_kafka[#{id}][value]"}
             value={value}
             placeholder="Header value"
-            class="input input-bordered input-sm flex-1"
+            class="input input-sm flex-1"
             phx-debounce="blur"
           />
           <button
@@ -415,7 +415,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             name={@tc[:headers].name <> "[#{id}][key]"}
             value={key}
             placeholder="Header name"
-            class="input input-bordered input-sm flex-1"
+            class="input input-sm flex-1"
             phx-debounce="blur"
           />
           <input
@@ -423,7 +423,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
             name={@tc[:headers].name <> "[#{id}][value]"}
             value={value}
             placeholder="Header value"
-            class="input input-bordered input-sm flex-1"
+            class="input input-sm flex-1"
             phx-debounce="blur"
           />
           <button

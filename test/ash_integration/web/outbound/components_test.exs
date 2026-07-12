@@ -40,6 +40,26 @@ defmodule AshIntegration.Web.ComponentsTest do
 
       refute html =~ ~r/value="pending"[^>]*\bselected\b/
     end
+
+    test "uses the daisyUI 5 fieldset/label markup, not the removed v4 classes" do
+      html =
+        render_component(&Components.filter_select/1,
+          name: "state",
+          label: "State",
+          prompt: "All",
+          options: [{"pending", "Pending"}],
+          selected: nil
+        )
+
+      # v5 pattern present…
+      assert html =~ "fieldset"
+      assert html =~ ~s(class="label)
+      assert html =~ ~s(class="select select-sm")
+      # …and the classes daisyUI 5 dropped are gone.
+      refute html =~ "form-control"
+      refute html =~ "label-text"
+      refute html =~ "select-bordered"
+    end
   end
 
   describe "status_badge/1" do

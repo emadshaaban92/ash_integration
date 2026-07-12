@@ -271,7 +271,12 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
           name: :logs,
           destination: AshIntegration.delivery_log_resource(),
           destination_attribute: :event_delivery_id,
-          domain: AshIntegration.domain()
+          domain: AshIntegration.domain(),
+          # Newest-first by `id` (uuidv7), matching the Log `:index` action's default
+          # sort. Without an explicit sort the loaded `logs` have no guaranteed order,
+          # so the attempts table on `delivery_live/show.ex` wasn't reliably
+          # newest-first — the freshest attempt could render anywhere in the list.
+          sort: [id: :desc]
         )
 
       Transformer.add_entity(dsl_state, [:relationships], relationship, type: :append)

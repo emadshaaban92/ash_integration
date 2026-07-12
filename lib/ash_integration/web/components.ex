@@ -253,19 +253,21 @@ defmodule AshIntegration.Web.Components do
   @doc "A labelled filter `<select>` shared by the outbound index (all) pages."
   def filter_select(assigns) do
     ~H"""
-    <label class="form-control">
-      <span class="label-text text-xs mb-1">{@label}</span>
-      <select name={@name} class="select select-sm select-bordered">
-        <option value="">{@prompt}</option>
-        <option
-          :for={{value, label} <- @options}
-          value={value}
-          selected={to_string(value) == to_string(@selected)}
-        >
-          {label}
-        </option>
-      </select>
-    </label>
+    <div class="fieldset">
+      <label>
+        <span class="label text-xs mb-1">{@label}</span>
+        <select name={@name} class="select select-sm">
+          <option value="">{@prompt}</option>
+          <option
+            :for={{value, label} <- @options}
+            value={value}
+            selected={to_string(value) == to_string(@selected)}
+          >
+            {label}
+          </option>
+        </select>
+      </label>
+    </div>
     """
   end
 
