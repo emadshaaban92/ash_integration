@@ -44,13 +44,16 @@ defmodule Example.Outbound.DeliveryLogIndexLiveTest do
     test "the connection filter narrows to one connection's logs", %{conn: conn, user: user} do
       sub_a = create_subscription!(create_connection!(user), "widget.updated")
       sub_b = create_subscription!(create_connection!(user), "stock.changed")
-      build_log!(sub_a, %{status: :success, response_status: 211})
-      build_log!(sub_b, %{status: :success, response_status: 222})
+      log_a = build_log!(sub_a, %{status: :success, response_status: 211})
+      log_b = build_log!(sub_b, %{status: :success, response_status: 222})
 
-      {:ok, _view, html} = live(conn, @logs_path <> "?connection=#{sub_a.connection_id}")
+      {:ok, view, _html} = live(conn, @logs_path <> "?connection=#{sub_a.connection_id}")
 
-      assert html =~ "211"
-      refute html =~ "222"
+      # Match the specific row elements, not a bare substring against the whole
+      # page: the response status is only 3 chars and can collide with session
+      # tokens, UUIDs, or timestamps elsewhere in the HTML.
+      assert has_element?(view, "#log-#{log_a.id}")
+      refute has_element?(view, "#log-#{log_b.id}")
     end
   end
 
