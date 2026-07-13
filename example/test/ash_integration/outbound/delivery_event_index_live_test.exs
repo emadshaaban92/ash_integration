@@ -35,20 +35,24 @@ defmodule Example.Outbound.DeliveryEventIndexLiveTest do
       connection = create_connection!(user)
       sub = create_subscription!(connection, "widget.updated")
 
-      build_delivery!(sub, %{
-        event_key: "row-key-1",
-        state: :delivered,
-        delivery: %{"wire" => "x"}
-      })
+      delivery =
+        build_delivery!(sub, %{
+          event_key: "row-key-1",
+          state: :delivered,
+          delivery: %{"wire" => "x"}
+        })
 
-      {:ok, view, html} = live(conn, @deliveries_path)
+      {:ok, view, _html} = live(conn, @deliveries_path)
 
-      assert html =~ "widget.updated"
-      assert html =~ "row-key-1"
+      # Scope assertions to this row's element (not the whole page) so an incidental
+      # substring elsewhere can't pass/fail them — the flakiness class #105 fixed.
+      row_sel = "#delivery-#{delivery.id}"
+      assert has_element?(view, row_sel, "widget.updated")
+      assert has_element?(view, row_sel, "row-key-1")
       # The strict `[connection: [:name]]` load still populates the rendered name.
-      assert html =~ connection.name
+      assert has_element?(view, row_sel, connection.name)
       # State badge — reads `state` (selected).
-      assert html =~ "Delivered"
+      assert has_element?(view, row_sel, "Delivered")
 
       # Assert against the row the VIEW actually loaded (not a query we build here),
       # so reverting the view's `select` makes this fail. The blobs must be unloaded;
@@ -63,13 +67,13 @@ defmodule Example.Outbound.DeliveryEventIndexLiveTest do
     test "a terminal delivery renders the Terminal badge (terminal_reason selected)", ctx do
       %{conn: conn, user: user} = ctx
       sub = create_subscription!(create_connection!(user), "widget.updated")
-      build_delivery!(sub, %{state: :failed, terminal_reason: :permanent})
+      delivery = build_delivery!(sub, %{state: :failed, terminal_reason: :permanent})
 
-      {:ok, _view, html} = live(conn, @deliveries_path)
+      {:ok, view, _html} = live(conn, @deliveries_path)
 
       # Terminal badge reads `state` + `terminal_reason` — both must be selected or
       # the badge would silently fall through to the plain "Retrying" state.
-      assert html =~ "Terminal"
+      assert has_element?(view, "#delivery-#{delivery.id}", "Terminal")
     end
   end
 
@@ -78,19 +82,23 @@ defmodule Example.Outbound.DeliveryEventIndexLiveTest do
       %{conn: conn, user: user} = ctx
       sub = create_subscription!(create_connection!(user), "widget.updated")
       # build_delivery! seeds the parent Event (with `data`) and stamps dispatched_at.
-      build_delivery!(sub, %{
-        event_key: "evt-key-1",
-        source_resource: "widget",
-        data: %{"s" => "x"}
-      })
+      delivery =
+        build_delivery!(sub, %{
+          event_key: "evt-key-1",
+          source_resource: "widget",
+          data: %{"s" => "x"}
+        })
 
-      {:ok, view, html} = live(conn, @events_path)
+      {:ok, view, _html} = live(conn, @events_path)
 
-      assert html =~ "widget.updated"
-      assert html =~ "evt-key-1"
-      assert html =~ "widget"
+      # Row-scoped: "Dispatched" also appears as an outbox-filter <option>, so a
+      # page-wide substring check would pass even if no row rendered.
+      row_sel = "#event-#{delivery.event_id}"
+      assert has_element?(view, row_sel, "widget.updated")
+      assert has_element?(view, row_sel, "evt-key-1")
+      assert has_element?(view, row_sel, "widget")
       # Outbox badge reads `dispatched_at` + `dispatch_terminal_reason` — both selected.
-      assert html =~ "Dispatched"
+      assert has_element?(view, row_sel, "Dispatched")
 
       # The row the VIEW loaded must have the `data` payload blob unloaded.
       [row] = mounted_rows(view, :events)
