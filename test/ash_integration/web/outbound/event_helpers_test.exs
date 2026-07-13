@@ -43,5 +43,21 @@ defmodule AshIntegration.Web.Outbound.EventLive.HelpersTest do
       refute Helpers.dispatched?(%{dispatched_at: nil})
       assert Helpers.dispatched?(%{dispatched_at: ~U[2026-07-12 00:00:00Z]})
     end
+
+    # A lean list projection that forgets to select a badge field must fail loud,
+    # not silently render "Dispatched" for every row via the catch-all clause.
+    test "the badge predicates raise when a required field is unloaded" do
+      assert_raise ArgumentError, ~r/dispatched_at/, fn ->
+        Helpers.dispatched?(%{dispatched_at: %Ash.NotLoaded{}})
+      end
+
+      assert_raise ArgumentError, ~r/dispatched_at/, fn ->
+        Helpers.stuck?(%{dispatched_at: %Ash.NotLoaded{}})
+      end
+
+      assert_raise ArgumentError, ~r/dispatch_terminal_reason/, fn ->
+        Helpers.stuck?(%{dispatched_at: nil, dispatch_terminal_reason: %Ash.NotLoaded{}})
+      end
+    end
   end
 end

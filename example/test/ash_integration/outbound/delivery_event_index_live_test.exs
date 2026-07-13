@@ -15,7 +15,6 @@ defmodule Example.Outbound.DeliveryEventIndexLiveTest do
   """
   use ExampleWeb.ConnCase, async: false
 
-  require Ash.Query
   import Phoenix.LiveViewTest
   import Example.DataCase, only: [build_delivery!: 2]
   import Example.IntegrationHelpers, only: [create_user!: 0]
@@ -31,13 +30,18 @@ defmodule Example.Outbound.DeliveryEventIndexLiveTest do
   end
 
   describe "/deliveries list" do
-    test "renders a row's summary fields, connection name, and state badge", ctx do
+    test "renders a row's fields + badge, and its projection drops the blobs", ctx do
       %{conn: conn, user: user} = ctx
       connection = create_connection!(user)
       sub = create_subscription!(connection, "widget.updated")
-      build_delivery!(sub, %{event_key: "row-key-1", state: :delivered})
 
-      {:ok, _view, html} = live(conn, @deliveries_path)
+      build_delivery!(sub, %{
+        event_key: "row-key-1",
+        state: :delivered,
+        delivery: %{"wire" => "x"}
+      })
+
+      {:ok, view, html} = live(conn, @deliveries_path)
 
       assert html =~ "widget.updated"
       assert html =~ "row-key-1"
@@ -45,6 +49,15 @@ defmodule Example.Outbound.DeliveryEventIndexLiveTest do
       assert html =~ connection.name
       # State badge — reads `state` (selected).
       assert html =~ "Delivered"
+
+      # Assert against the row the VIEW actually loaded (not a query we build here),
+      # so reverting the view's `select` makes this fail. The blobs must be unloaded;
+      # the displayed fields must be present.
+      [row] = mounted_rows(view, :deliveries)
+      assert match?(%Ash.NotLoaded{}, row.delivery)
+      assert match?(%Ash.NotLoaded{}, row.delivery_metadata)
+      assert row.event_type == "widget.updated"
+      assert row.connection.name == connection.name
     end
 
     test "a terminal delivery renders the Terminal badge (terminal_reason selected)", ctx do
@@ -58,56 +71,38 @@ defmodule Example.Outbound.DeliveryEventIndexLiveTest do
       # the badge would silently fall through to the plain "Retrying" state.
       assert html =~ "Terminal"
     end
-
-    test "the list projection drops the `delivery` blob but keeps displayed fields", ctx do
-      %{user: user} = ctx
-      sub = create_subscription!(create_connection!(user), "widget.updated")
-      build_delivery!(sub, %{delivery: %{"wire" => "xxl-descriptor"}})
-
-      # Mirror the projection `DeliveryLive.All` builds — the blob must come back
-      # unloaded while the displayed columns are present.
-      %{results: [row]} =
-        AshIntegration.event_delivery_resource()
-        |> Ash.Query.for_read(:index, %{}, authorize?: false)
-        |> Ash.Query.select([:id, :event_type, :state])
-        |> Ash.read!(authorize?: false, page: [limit: 20])
-
-      assert row.event_type == "widget.updated"
-      assert row.state == :pending
-      assert match?(%Ash.NotLoaded{}, row.delivery)
-    end
   end
 
   describe "/events list" do
-    test "renders a row's summary fields and the dispatched outbox badge", ctx do
+    test "renders a row's fields + dispatched badge, and its projection drops `data`", ctx do
       %{conn: conn, user: user} = ctx
       sub = create_subscription!(create_connection!(user), "widget.updated")
       # build_delivery! seeds the parent Event (with `data`) and stamps dispatched_at.
-      build_delivery!(sub, %{event_key: "evt-key-1", source_resource: "widget"})
+      build_delivery!(sub, %{
+        event_key: "evt-key-1",
+        source_resource: "widget",
+        data: %{"s" => "x"}
+      })
 
-      {:ok, _view, html} = live(conn, @events_path)
+      {:ok, view, html} = live(conn, @events_path)
 
       assert html =~ "widget.updated"
       assert html =~ "evt-key-1"
       assert html =~ "widget"
       # Outbox badge reads `dispatched_at` + `dispatch_terminal_reason` — both selected.
       assert html =~ "Dispatched"
-    end
 
-    test "the list projection drops the `data` payload blob", ctx do
-      %{user: user} = ctx
-      sub = create_subscription!(create_connection!(user), "widget.updated")
-      build_delivery!(sub, %{data: %{"secret" => "large-payload"}})
-
-      %{results: [row]} =
-        AshIntegration.event_resource()
-        |> Ash.Query.for_read(:index, %{}, authorize?: false)
-        |> Ash.Query.select([:id, :event_type])
-        |> Ash.read!(authorize?: false, page: [limit: 20])
-
-      assert row.event_type == "widget.updated"
+      # The row the VIEW loaded must have the `data` payload blob unloaded.
+      [row] = mounted_rows(view, :events)
       assert match?(%Ash.NotLoaded{}, row.data)
+      assert row.event_type == "widget.updated"
     end
+  end
+
+  # The rows the mounted LiveView actually loaded into its socket assigns — the real
+  # output of the view's query, so a reverted `select` would surface here.
+  defp mounted_rows(view, assign_key) do
+    :sys.get_state(view.pid).socket.assigns[assign_key]
   end
 
   defp create_connection!(owner) do

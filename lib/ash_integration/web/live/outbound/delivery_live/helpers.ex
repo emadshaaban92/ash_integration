@@ -8,6 +8,11 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Helpers do
   alias AshIntegration.Outbound.Delivery.ParkedHealth
 
   @doc "A parked delivery: build-failed, awaiting `reprocess`, with no cached body."
+  # A lean list projection can leave `state`/`terminal_reason` as `%Ash.NotLoaded{}`;
+  # that does NOT match the value heads below and would fall through the catch-all to
+  # a silently-wrong badge. Fail loud so a missing field in the list view's
+  # `@list_fields` surfaces immediately instead of mislabelling every row.
+  def parked?(%{state: %Ash.NotLoaded{}}), do: unloaded!(:state)
   def parked?(%{state: :parked}), do: true
   def parked?(_), do: false
 
@@ -50,8 +55,16 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Helpers do
   defp health_label(:degraded), do: "Degraded"
 
   @doc "A terminal `:failed` delivery: never retried, blocking its lane (operator-only)."
+  def terminal?(%{state: %Ash.NotLoaded{}}), do: unloaded!(:state)
+  def terminal?(%{terminal_reason: %Ash.NotLoaded{}}), do: unloaded!(:terminal_reason)
   def terminal?(%{state: :failed, terminal_reason: reason}) when not is_nil(reason), do: true
   def terminal?(_), do: false
+
+  defp unloaded!(field) do
+    raise ArgumentError,
+          "DeliveryLive state badge needs `#{field}`, but it was not selected. " <>
+            "Add it to `@list_fields` in the list view before rendering the badge."
+  end
 
   attr :delivery, :map, required: true
 
