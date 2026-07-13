@@ -24,6 +24,25 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
   # the dashboard no way to deep-link the terminal backlog specifically.
   @filter_states ~w(pending parked scheduled retrying terminal delivered suppressed cancelled)
 
+  # Lean projection for the list: only the columns the table + state badge actually
+  # render, plus `connection_id` (the source field the `:connection` load needs) and
+  # the `id`. Without an explicit select, Ash returns all attributes, hydrating the
+  # TOAST-able `delivery` (full signed wire descriptor) and `delivery_metadata` JSONB
+  # blobs on every one of the 20 rows/page — bytes never shown here (only on the
+  # /deliveries/:id page) that also sit in the LiveView socket for the mount's life.
+  # New columns/badges must be added here or they render as NotLoaded.
+  @list_fields [
+    :id,
+    :event_type,
+    :version,
+    :event_key,
+    :state,
+    :terminal_reason,
+    :attempts,
+    :created_at,
+    :connection_id
+  ]
+
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
@@ -60,7 +79,10 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
     query =
       AshIntegration.event_delivery_resource()
       |> Ash.Query.for_read(:index, %{}, actor: actor)
-      |> Ash.Query.load(:connection)
+      |> Ash.Query.select(@list_fields)
+      # Strict load so the `:connection` join pulls only `name` (the sole rendered
+      # field) instead of the connection's full row (transport/auth config maps).
+      |> Ash.Query.load([connection: [:name]], strict?: true)
       |> apply_filter(:connection_id, f.connection)
       |> apply_filter(:event_type, f.event_type)
       |> apply_filter(:subscription_id, f.subscription)

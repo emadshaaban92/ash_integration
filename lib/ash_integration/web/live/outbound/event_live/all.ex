@@ -16,6 +16,23 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
 
   @outbox_states ~w(in_outbox dispatched stuck)
 
+  # Lean projection for the list: only the columns the table + outbox badge render.
+  # Without an explicit select, Ash returns all attributes, hydrating the TOAST-able
+  # `data` (:map) payload blob on every one of the 20 rows/page — the full captured
+  # fact, only shown on the /events/:id page, that also sits in the LiveView socket
+  # for the mount's life. New columns/badges must be added here.
+  @list_fields [
+    :id,
+    :event_type,
+    :version,
+    :event_key,
+    :source_resource,
+    :source_action,
+    :dispatched_at,
+    :dispatch_terminal_reason,
+    :created_at
+  ]
+
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
@@ -40,6 +57,7 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
     query =
       AshIntegration.event_resource()
       |> Ash.Query.for_read(:index, %{}, actor: actor)
+      |> Ash.Query.select(@list_fields)
       |> apply_event_type(f.event_type)
       |> apply_outbox(f.outbox)
 
