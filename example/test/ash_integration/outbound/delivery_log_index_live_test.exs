@@ -27,56 +27,63 @@ defmodule Example.Outbound.DeliveryLogIndexLiveTest do
   describe "index listing + status filter" do
     test "lists logs and the status filter round-trips through the URL", %{conn: conn, user: user} do
       sub = create_subscription!(create_connection!(user), "widget.updated")
-      build_log!(sub, %{status: :success, response_status: 201})
-      build_log!(sub, %{status: :failed, response_status: 503})
+      ok = build_log!(sub, %{status: :success, response_status: 201})
+      err = build_log!(sub, %{status: :failed, response_status: 503})
 
+      # Match the specific row elements (`#log-<id>`), not a bare 3-char status
+      # substring against the whole page — it can collide with session tokens,
+      # UUIDs, or timestamps elsewhere in the HTML.
+      #
       # Unfiltered: both attempts show.
-      {:ok, _view, html} = live(conn, @logs_path)
-      assert html =~ "201"
-      assert html =~ "503"
+      {:ok, view, _html} = live(conn, @logs_path)
+      assert has_element?(view, "#log-#{ok.id}")
+      assert has_element?(view, "#log-#{err.id}")
 
       # Filtered to success: only the 2xx attempt survives.
-      {:ok, _view, html} = live(conn, @logs_path <> "?status=success")
-      assert html =~ "201"
-      refute html =~ "503"
+      {:ok, view, _html} = live(conn, @logs_path <> "?status=success")
+      assert has_element?(view, "#log-#{ok.id}")
+      refute has_element?(view, "#log-#{err.id}")
     end
 
     test "the connection filter narrows to one connection's logs", %{conn: conn, user: user} do
       sub_a = create_subscription!(create_connection!(user), "widget.updated")
       sub_b = create_subscription!(create_connection!(user), "stock.changed")
-      build_log!(sub_a, %{status: :success, response_status: 211})
-      build_log!(sub_b, %{status: :success, response_status: 222})
+      log_a = build_log!(sub_a, %{status: :success, response_status: 211})
+      log_b = build_log!(sub_b, %{status: :success, response_status: 222})
 
-      {:ok, _view, html} = live(conn, @logs_path <> "?connection=#{sub_a.connection_id}")
+      {:ok, view, _html} = live(conn, @logs_path <> "?connection=#{sub_a.connection_id}")
 
-      assert html =~ "211"
-      refute html =~ "222"
+      # Match the specific row elements, not a bare substring against the whole
+      # page: the response status is only 3 chars and can collide with session
+      # tokens, UUIDs, or timestamps elsewhere in the HTML.
+      assert has_element?(view, "#log-#{log_a.id}")
+      refute has_element?(view, "#log-#{log_b.id}")
     end
   end
 
   describe "since time-window filter (matches the dashboard 24h tiles)" do
     test "?since=24h drops logs older than the window", %{conn: conn, user: user} do
       sub = create_subscription!(create_connection!(user), "widget.updated")
-      build_log!(sub, %{status: :success, response_status: 201})
-      build_log!(sub, %{status: :success, response_status: 418, created_at: hours_ago(30)})
+      recent = build_log!(sub, %{status: :success, response_status: 201})
+      old = build_log!(sub, %{status: :success, response_status: 418, created_at: hours_ago(30)})
 
       # The dashboard "Delivered (24h)" tile drills in here:
-      {:ok, _view, html} = live(conn, @logs_path <> "?status=success&since=24h")
-      assert html =~ "201"
-      refute html =~ "418"
+      {:ok, view, _html} = live(conn, @logs_path <> "?status=success&since=24h")
+      assert has_element?(view, "#log-#{recent.id}")
+      refute has_element?(view, "#log-#{old.id}")
 
       # Without the window, the older attempt is back.
-      {:ok, _view, html} = live(conn, @logs_path <> "?status=success")
-      assert html =~ "201"
-      assert html =~ "418"
+      {:ok, view, _html} = live(conn, @logs_path <> "?status=success")
+      assert has_element?(view, "#log-#{recent.id}")
+      assert has_element?(view, "#log-#{old.id}")
     end
 
     test "an unknown since value is ignored (no accidental empty list)", %{conn: conn, user: user} do
       sub = create_subscription!(create_connection!(user), "widget.updated")
-      build_log!(sub, %{status: :success, response_status: 201, created_at: hours_ago(100)})
+      log = build_log!(sub, %{status: :success, response_status: 201, created_at: hours_ago(100)})
 
-      {:ok, _view, html} = live(conn, @logs_path <> "?since=bogus")
-      assert html =~ "201"
+      {:ok, view, _html} = live(conn, @logs_path <> "?since=bogus")
+      assert has_element?(view, "#log-#{log.id}")
     end
   end
 
@@ -121,17 +128,21 @@ defmodule Example.Outbound.DeliveryLogIndexLiveTest do
       sub = create_subscription!(create_connection!(user), "widget.updated")
       delivery = build_delivery!(sub, %{state: :failed})
 
-      build_log!(sub, %{status: :failed, response_status: 511, event_delivery_id: delivery.id})
-      build_log!(sub, %{status: :success, response_status: 533, event_delivery_id: delivery.id})
+      older =
+        build_log!(sub, %{status: :failed, response_status: 511, event_delivery_id: delivery.id})
+
+      newer =
+        build_log!(sub, %{status: :success, response_status: 533, event_delivery_id: delivery.id})
 
       {:ok, _view, html} = live(conn, "/integrations/deliveries/#{delivery.id}")
 
-      # Newest attempt (533, seeded last) appears above the older one (511).
-      assert html =~ "533"
-      assert html =~ "511"
-      {newest, _} = :binary.match(html, "533")
-      {oldest, _} = :binary.match(html, "511")
-      assert newest < oldest
+      # Compare row positions by their unique log ids (each renders in the row's
+      # "View" link) rather than the 3-digit statuses, which can collide with
+      # tokens/UUIDs elsewhere on the page. The newer attempt (seeded last, so a
+      # larger uuidv7 id) must render above the older one.
+      {newest, _} = :binary.match(html, newer.id)
+      {oldest, _} = :binary.match(html, older.id)
+      assert newest < oldest, "delivery attempts must render newest-first"
     end
   end
 
