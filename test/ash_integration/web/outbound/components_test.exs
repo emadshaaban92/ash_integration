@@ -96,19 +96,18 @@ defmodule AshIntegration.Web.ComponentsTest do
     end
   end
 
-  describe "header_warning_banner/1" do
-    test "is invisible when there are no warnings" do
-      html = render_component(&Components.header_warning_banner/1, warnings: [])
-      refute html =~ "alert-warning"
+  describe "header_warning_tip/1" do
+    test "renders nothing when there are no warnings" do
+      html = render_component(&Components.header_warning_tip/1, warnings: [])
+      refute html =~ "dropped on save"
     end
 
     test "lists each warning" do
       html =
-        render_component(&Components.header_warning_banner/1,
+        render_component(&Components.header_warning_tip/1,
           warnings: ["A header row has a value but no name — it will be dropped on save."]
         )
 
-      assert html =~ "alert-warning"
       assert html =~ "dropped on save"
     end
   end

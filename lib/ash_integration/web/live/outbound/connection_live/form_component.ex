@@ -250,7 +250,6 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
       >
         <div class="space-y-4">
           <.form_error_summary :if={@submitted?} errors={Helpers.form_errors(@form)} />
-          <.header_warning_banner warnings={@header_warnings} />
 
           <.input field={f[:name]} type="text" label="Name" required phx-debounce="blur" />
 
@@ -274,7 +273,6 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
               options={transport_options(@selected_transport)}
               phx-change="transport-type-changed"
               phx-target={@myself}
-              data-confirm="Switching transport clears the transport configuration you've entered (URL, auth, brokers, signing…). Continue?"
             />
             <p class="text-xs text-base-content/60 mt-1">
               Changing the transport resets the transport-specific configuration below.
@@ -291,6 +289,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.FormComponent do
               header_rows={@header_rows}
               broker_rows={@broker_rows}
               kafka_header_rows={@kafka_header_rows}
+              header_warnings={@header_warnings}
               myself={@myself}
             />
 
