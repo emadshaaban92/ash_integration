@@ -232,14 +232,17 @@ defmodule AshIntegration.Web.Components do
 
   attr :warnings, :list, required: true
 
-  @doc "Non-blocking warnings for header/broker rows that would be dropped on save."
-  def header_warning_banner(assigns) do
+  @doc """
+  Non-blocking hints for header rows that would be dropped on save.
+
+  Rendered as a quiet tip directly beneath the header inputs it describes
+  rather than a loud alert banner at the top of the form — same information,
+  far less intrusive.
+  """
+  def header_warning_tip(assigns) do
     ~H"""
-    <div :if={@warnings != []} class="alert alert-warning" role="status">
-      <.icon name="hero-exclamation-triangle" />
-      <ul class="text-sm list-disc list-inside">
-        <li :for={msg <- @warnings}>{msg}</li>
-      </ul>
+    <div :if={@warnings != []} class="mt-1 text-xs text-warning" role="status">
+      <p :for={msg <- @warnings}>{msg}</p>
     </div>
     """
   end

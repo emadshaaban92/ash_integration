@@ -11,6 +11,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
   attr(:header_rows, :list, default: [])
   attr(:broker_rows, :list, default: [])
   attr(:kafka_header_rows, :list, default: [])
+  attr(:header_warnings, :list, default: [])
   attr(:myself, :any, required: true)
 
   def transport_config(%{selected_transport: "http"} = assigns) do
@@ -74,6 +75,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
           + Add Header
         </button>
       </div>
+      <.header_warning_tip warnings={@header_warnings} />
 
       <div class="divider my-2"></div>
       <h5 class="font-semibold mb-3">Authentication</h5>
@@ -302,6 +304,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
           + Add Header
         </button>
       </div>
+      <.header_warning_tip warnings={@header_warnings} />
 
       <div class="divider my-2"></div>
       <h5 class="font-semibold mb-3">Connection Security</h5>
@@ -445,6 +448,7 @@ defmodule AshIntegration.Web.Outbound.TransportConfig do
           + Add Header
         </button>
       </div>
+      <.header_warning_tip warnings={@header_warnings} />
 
       <div class="divider my-2"></div>
       <h5 class="font-semibold mb-3">Delivery Method</h5>
