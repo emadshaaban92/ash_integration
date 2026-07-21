@@ -80,26 +80,41 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
 
   @impl true
   # Runs once per batch, inside the transaction. `changesets_and_results` is
-  # `[{changeset, updated_event}]`. We materialize each event's planned deliveries
-  # and coalesce, then hand the events back as the batch result.
+  # `[{changeset, updated_event}]`. We flatten EVERY event's planned deliveries into
+  # ONE bulk INSERT for the whole batch, then coalesce every affected lane in ONE
+  # set-based UPDATE. So a Broadway batch of N events costs 1 INSERT + 1 UPDATE
+  # round-trip here, not N sequential inserts plus one UPDATE per coalescing delivery.
+  # Fewer round-trips ⇒ the transaction holds its `batch_size × subscriptions` row
+  # locks for less wall-clock, easing contention with the scheduler. The events are
+  # handed back (in input order) as the batch result.
   def after_batch(changesets_and_results, _opts, context) do
     plan = dispatch_plan(context)
+    events = Enum.map(changesets_and_results, fn {_changeset, event} -> event end)
 
-    Enum.map(changesets_and_results, fn {_changeset, event} ->
-      plan
-      |> Map.get(event.id, [])
-      |> materialize_all!()
+    events
+    |> Enum.flat_map(&Map.get(plan, &1.id, []))
+    |> materialize_batch!()
 
-      {:ok, event}
-    end)
+    Enum.map(events, &{:ok, &1})
   end
 
   defp dispatch_plan(%{source_context: %{dispatch_plan: plan}}) when is_map(plan), do: plan
   defp dispatch_plan(_context), do: %{}
 
-  # Insert every spec in ONE bulk INSERT per batch (one DB round-trip instead of N),
-  # then coalesce the pending ones. Coalescing runs after all inserts so a batch
-  # carrying several same-key events settles to the newest.
+  # Insert every spec across the WHOLE batch in ONE bulk INSERT (for any sane
+  # fan-out), then coalesce the pending ones. Coalescing runs after ALL inserts so a
+  # batch carrying several same-key events settles to the newest.
+  #
+  # `batch_size` is raised from Ash's default of 100 to a computed ceiling
+  # (`insert_batch_size/1`) so the common case is a single round-trip, not
+  # `ceil(rows / 100)`. It is NOT blindly pinned to `length(specs)`: one INSERT binds
+  # `rows × columns` parameters, and the row count here is the batch's fan-out
+  # (`batch_size × subscriptions_for_the_event_type`) — a product a host can push up
+  # by BOTH raising the `batch_size` dispatch knob AND fanning a hot type out to many
+  # subscriptions — so an unguarded pin is a latent cliff into Postgres's 65535
+  # bind-parameter limit. The ceiling caps each INSERT well under that and lets Ash
+  # chunk a pathological fan-out into extra round-trips; atomicity is unaffected
+  # (they still run inside this one enclosing dispatch transaction).
   #
   # `notify?: false` is the direct way to say "we don't want these notifications":
   # the rows are created inside the dispatch transaction (parent `:dispatch` is also
@@ -109,12 +124,12 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
   # otherwise surface in host applications' own test runs.
   #
   # `sorted?: true` aligns `records` with the input order so each delivery maps back
-  # to its spec's `coalesce?` flag. `stop_on_error?: true` + raising on a non-success
-  # status preserves the bang contract: a genuine DB failure rolls back the whole
-  # batch (leaving the event undispatched for the lease to re-emit).
-  defp materialize_all!([]), do: :ok
+  # to its spec's `coalesce?`/`failure_kind` flags. `stop_on_error?: true` + raising
+  # on a non-success status preserves the bang contract: a genuine DB failure rolls
+  # back the whole batch (leaving the events undispatched for the lease to re-emit).
+  defp materialize_batch!([]), do: :ok
 
-  defp materialize_all!(specs) do
+  defp materialize_batch!(specs) do
     result =
       Ash.bulk_create(
         Enum.map(specs, & &1.attrs),
@@ -125,7 +140,8 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
         sorted?: true,
         stop_on_error?: true,
         notify?: false,
-        authorize?: false
+        authorize?: false,
+        batch_size: insert_batch_size(specs)
       )
 
     case result do
@@ -140,6 +156,18 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
       %Ash.BulkResult{errors: errors} ->
         raise "EventDelivery bulk insert failed: #{inspect(errors)}"
     end
+  end
+
+  # Rows per INSERT chunk that keep `rows × columns` under Postgres's 65535
+  # bind-parameter ceiling. Budgeted at 50k for headroom; `columns` is the widest
+  # spec's bound-attribute count padded for the columns Ash fills in itself (id,
+  # timestamps, defaulted attrs) that aren't in `attrs`. `max(1, …)` guards the
+  # divide. For realistic fan-outs this exceeds the batch's row count → one INSERT.
+  @max_insert_bind_params 50_000
+
+  defp insert_batch_size(specs) do
+    columns = 10 + (specs |> Enum.map(&map_size(&1.attrs)) |> Enum.max())
+    max(1, div(@max_insert_bind_params, columns))
   end
 
   # Emit `[:ash_integration, :delivery, :parked]` from the persisted rows (after the
@@ -167,75 +195,107 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
     end)
   end
 
+  # Collect the DISTINCT `(subscription_id, event_key)` lanes that received a new,
+  # coalescing `:pending` delivery in this batch, then cancel their superseded
+  # siblings in ONE set-based UPDATE. A `notify_on_every_change` subscription baked
+  # `coalesce?: false` into its specs, so its lanes never enter the list.
   defp coalesce_pending!(specs, deliveries) do
-    specs
-    |> Enum.zip(deliveries)
-    |> Enum.each(fn {%{coalesce?: coalesce?}, delivery} ->
-      if coalesce? and delivery.state == :pending, do: coalesce_superseded!(delivery)
-    end)
+    lanes =
+      specs
+      |> Enum.zip(deliveries)
+      |> Enum.filter(fn {%{coalesce?: coalesce?}, delivery} ->
+        coalesce? and delivery.state == :pending
+      end)
+      |> Enum.map(fn {_spec, delivery} -> {delivery.subscription_id, delivery.event_key} end)
+      |> Enum.uniq()
+
+    if lanes != [], do: coalesce_superseded!(lanes)
+    :ok
   end
 
   # ── Coalescing (latest-state) — per (subscription_id, event_key) ────────────
   # Cancel the `:pending` siblings superseded by a newer same-key delivery, keeping
-  # the newest. A `:parked` sibling freezes coalescing (the lane is held for an
-  # operator to fix). One atomic set-based UPDATE — there is no read→write window,
-  # so it can't race the scheduler promoting a sibling to `:scheduled`. Runs inside
-  # the batch transaction, so it commits with the inserts; a DB failure raises and
-  # rolls the whole batch back, matching the bang inserts.
-  defp coalesce_superseded!(delivery) do
+  # the newest — for EVERY affected lane in the batch at once. A `:parked` sibling
+  # freezes coalescing (the lane is held for an operator to fix). One atomic set-based
+  # UPDATE — there is no read→write window, so it can't race the scheduler promoting a
+  # sibling to `:scheduled`. Runs inside the batch transaction, so it commits with the
+  # inserts; a DB failure raises and rolls the whole batch back, matching the bang
+  # inserts.
+  defp coalesce_superseded!(lanes) do
     table = AshPostgres.DataLayer.Info.table(AshIntegration.event_delivery_resource())
 
-    # Cancel every `:pending` row older than the newest `:pending`/`:parked` sibling
-    # (UUIDv7 `event_id` = occurrence order), so the newest is kept. `NOT EXISTS` a
-    # `:parked` sibling preserves the freeze — any parked → nothing is cancelled.
+    {subscription_ids, event_keys} =
+      lanes
+      |> Enum.map(fn {subscription_id, event_key} ->
+        {Ecto.UUID.dump!(subscription_id), event_key}
+      end)
+      |> Enum.unzip()
+
+    # `unnest($2::uuid[], $3::text[])` zips the two arrays into `(subscription_id,
+    # event_key)` rows, so every lane rides in on exactly two binds regardless of lane
+    # count — no positional param arithmetic, no per-row casts. Per lane, cancel every
+    # `:pending` row older than the newest `:pending`/`:parked` sibling (UUIDv7
+    # `event_id` = occurrence order), so the newest is kept. `NOT EXISTS` a `:parked`
+    # sibling preserves the freeze — any parked → nothing is cancelled for that lane.
+    # `RETURNING` drives the per-lane telemetry below.
     sql = """
     UPDATE #{table} AS d
-    SET state = 'cancelled', last_error = $3, updated_at = now()
-    WHERE d.subscription_id = $1
-      AND d.event_key = $2
+    SET state = 'cancelled', last_error = $1, updated_at = now()
+    FROM unnest($2::uuid[], $3::text[]) AS lanes(subscription_id, event_key)
+    WHERE d.subscription_id = lanes.subscription_id
+      AND d.event_key = lanes.event_key
       AND d.state = 'pending'
       AND d.event_id < (
         SELECT s.event_id FROM #{table} s
-        WHERE s.subscription_id = $1 AND s.event_key = $2
+        WHERE s.subscription_id = lanes.subscription_id AND s.event_key = lanes.event_key
           AND s.state IN ('pending', 'parked')
         ORDER BY s.event_id DESC
         LIMIT 1
       )
       AND NOT EXISTS (
         SELECT 1 FROM #{table} p
-        WHERE p.subscription_id = $1 AND p.event_key = $2 AND p.state = 'parked'
+        WHERE p.subscription_id = lanes.subscription_id AND p.event_key = lanes.event_key
+          AND p.state = 'parked'
       )
+    RETURNING d.subscription_id::text, d.event_key, d.event_type
     """
 
-    params = [
-      Ecto.UUID.dump!(delivery.subscription_id),
-      delivery.event_key,
-      "Superseded by a newer event (coalesced)"
-    ]
+    params = ["Superseded by a newer event (coalesced)", subscription_ids, event_keys]
 
     case AshIntegration.repo().query(sql, params) do
-      {:ok, %{num_rows: count}} when count > 0 -> report_coalesced(delivery, count)
-      {:ok, _} -> :ok
+      {:ok, %{rows: rows}} -> report_coalesced(rows)
       {:error, error} -> raise "coalesce UPDATE failed: #{inspect(error)}"
     end
 
     :ok
   end
 
-  defp report_coalesced(delivery, count) do
-    Logger.info(
-      "Coalesced #{count} superseded pending delivery(ies) for subscription " <>
-        "#{delivery.subscription_id} (event_key #{delivery.event_key})"
-    )
+  # One log line + telemetry event per lane that actually dropped rows (preserving the
+  # previous per-`(subscription, event_key)` granularity), grouped from the UPDATE's
+  # `RETURNING`. `event_type` is functionally determined by the subscription, so it is
+  # constant within a lane.
+  defp report_coalesced(rows) do
+    rows
+    |> Enum.group_by(fn [subscription_id, event_key, event_type] ->
+      {subscription_id, event_key, event_type}
+    end)
+    |> Enum.each(fn {{subscription_id, event_key, event_type}, dropped} ->
+      count = length(dropped)
 
-    :telemetry.execute(
-      [:ash_integration, :coalesce, :events_dropped],
-      %{count: count},
-      %{
-        subscription_id: delivery.subscription_id,
-        event_type: delivery.event_type,
-        event_key: delivery.event_key
-      }
-    )
+      Logger.info(
+        "Coalesced #{count} superseded pending delivery(ies) for subscription " <>
+          "#{subscription_id} (event_key #{event_key})"
+      )
+
+      :telemetry.execute(
+        [:ash_integration, :coalesce, :events_dropped],
+        %{count: count},
+        %{
+          subscription_id: subscription_id,
+          event_type: event_type,
+          event_key: event_key
+        }
+      )
+    end)
   end
 end
