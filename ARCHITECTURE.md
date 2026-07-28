@@ -50,6 +50,7 @@ transitions are documented in the README `## Architecture` section and
 | Work on scheduling / ordering / retry timing | `lib/ash_integration/outbound/delivery/scheduler.ex`, `.../delivery/changes/`, `.../delivery/validations/` |
 | Work on the delivery relay / sending | `lib/ash_integration/outbound/delivery/relay.ex`, `.../delivery/route/` |
 | Work on Lua transforms | `lib/ash_integration/outbound/delivery/transform/` (`runtime/lua.ex`, `limits.ex`, `preview.ex`) |
+| Add or change a sandbox host API (Lua globals like `datetime`) | `lib/ash_integration/outbound/delivery/transform/runtime/lua/` (loaded by `runtime/lua.ex`; hosts add their own via `lua_sandbox: [apis: …]`) |
 | Add or change a transport | `lib/ash_integration/outbound/wire/transports/` **and** `lib/ash_integration/transport/` (config, auth, signing, TLS, adapters) |
 | Change request signing | `lib/ash_integration/transport/signing/` (+ `design/configurable-signing.md`) |
 | Work on connection/subscription health & suspension | `.../delivery/health.ex`, `.../delivery/parked_health.ex` (+ `design/connection-health.md`) |
@@ -84,6 +85,13 @@ them; if you must change one, update this list and the relevant design doc.
 5. **The signing secret never enters the Lua runtime sandbox.** It is decrypted
    live in the transport at send. Scripts are operator-authored but untrusted at
    runtime.
+5a. **Sandbox host APIs are pure computation.** Capabilities handed back into the
+   sandbox (the built-in `datetime`, plus anything a host registers via
+   `lua_sandbox: [apis: …]`) must do no I/O, no network, no filesystem — a host
+   function that can reach outside breaks the "untrusted at runtime" model for
+   every script on the node. They run inside the script's own reduction/heap
+   budgets, and each execution builds a fresh sandbox state, so a script can only
+   shadow them for itself.
 6. **The signature is computed fresh at send, per attempt** — recomputed over the
    exact body bytes with a send-time timestamp, so anti-replay stays honest on
    retries and secret rotation needs no reprocess.

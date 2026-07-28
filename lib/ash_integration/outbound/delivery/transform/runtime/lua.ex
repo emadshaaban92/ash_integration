@@ -47,6 +47,52 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
           max_heap_words: 50_000_000
         ]
 
+  ## Host APIs
+
+  Sandboxing is subtractive — it takes capabilities away. Some scripts need one
+  *back*, in a bounded form: rendering a delivery time in the operator's local
+  time needs a time-zone database, which Lua has none of. The alternative is
+  worse than a missing feature — it pushes hosts into baking a pre-converted
+  timestamp into the canonical event data, where **which** zone to render stops
+  being the per-subscription decision it is.
+
+  So the runtime loads **host APIs** — Elixir modules exposed as Lua globals —
+  into the state before the author's script runs. `datetime` is built in
+  (`AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI`):
+
+      datetime.to_zone(iso8601, tz)       -- ISO-8601 carrying that zone's offset
+      datetime.format(iso8601, tz, fmt)   -- Calendar.strftime-style formatting
+
+  A host app registers its own (any module that does `use Lua.API`) alongside it:
+
+      config :ash_integration,
+        lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]
+
+  Three properties hold this together:
+
+  - **Host APIs must be pure computation** — no I/O, no network, no filesystem.
+    The threat model is "operator-authored but untrusted at runtime", and a
+    function that can reach outside the sandbox breaks it for every script on the
+    node. Time-zone math qualifies; anything that opens a socket does not. This
+    is a contract with the host, not something the runtime can enforce: a
+    configured module runs with the full authority of the node.
+  - **They are inside the budget.** A host function is invoked by the luerl
+    *runner* process, so its reductions and its allocations count against the
+    same `max_reductions` / `:max_heap_size` ceilings as the script's own work —
+    calling one in a tight loop is bounded exactly like a tight loop of Lua.
+  - **A script can shadow them, and that hurts only itself.** The APIs are loaded
+    before the author's chunk, so `datetime = nil` at the top of a script is
+    legal. Every run builds a fresh `Lua.new/0` and re-loads the APIs into it, so
+    a mutated global cannot leak into the next execution — there is no state
+    carried between runs to corrupt.
+
+  Signing sources (`sign_session/3`) get the same APIs. That path is narrower —
+  callbacks build canonical strings, not delivery bodies — but timestamp
+  formatting is exactly what signing schemes need (`%Y%m%dT%H%M%SZ`-style
+  canonical stamps), and holding a *pure* utility back from it would only push
+  authors into hand-rolled string surgery. The purity bar is what makes the
+  surface safe, so it applies identically to both paths.
+
   The transform is a **function the script exposes**, not a top-level
   imperative chunk:
 
@@ -89,6 +135,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   @behaviour AshIntegration.Outbound.Delivery.Transform.Runtime
 
   alias AshIntegration.Outbound.Delivery.Transform.Limits
+  alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI
+
+  # Always loaded, ahead of any host-configured API.
+  @builtin_apis [DatetimeAPI]
 
   @doc """
   Convenience entry point: run `script` against `event_data` using the
@@ -207,9 +257,16 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   # Elixir pipeline) performs the keyed MAC between calls; the secret is never set
   # into the sandbox state.
   defp run_session(source, %Limits{} = limits, orchestrate) do
-    flags = sandbox_flags(limits)
+    with {:ok, lua} <- new_state() do
+      compile_session(source, lua, sandbox_flags(limits), orchestrate)
+    end
+  rescue
+    e in [Lua.RuntimeException, Lua.CompilerException] ->
+      {:error, Exception.message(e)}
+  end
 
-    case :luerl_sandbox.run(source <> @detect_callbacks, flags, Lua.new().state) do
+  defp compile_session(source, lua, flags, orchestrate) do
+    case :luerl_sandbox.run(source <> @detect_callbacks, flags, lua.state) do
       {:ok, _results, state} ->
         defined = read_defined(state)
         orchestrate.(fn fname, ctx -> sign_call_on(state, flags, defined, fname, ctx) end)
@@ -217,9 +274,6 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       other ->
         {:error, classify_sandbox_error(other)}
     end
-  rescue
-    e in [Lua.RuntimeException, Lua.CompilerException] ->
-      {:error, Exception.message(e)}
   end
 
   # Invoke one already-compiled callback on the shared state. An undefined callback
@@ -275,6 +329,14 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   defp classify_sandbox_error({:error, :timeout}),
     do: "signing callback timed out or exceeded its memory budget"
 
+  # A host API function that raises (e.g. `datetime.to_zone` on an unknown zone)
+  # comes back as the exception struct itself — surface its message, not its guts.
+  defp classify_sandbox_error({:error, %Lua.RuntimeException{} = exception}),
+    do: Exception.message(exception)
+
+  defp classify_sandbox_error({:error, %Lua.CompilerException{} = exception}),
+    do: Exception.message(exception)
+
   defp classify_sandbox_error({:error, reason}),
     do: "signing callback error: #{inspect(reason)}"
 
@@ -284,46 +346,40 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   # FURTHER luerl-spawned runner (carrying the reduction + heap limits); this
   # function only builds the pre-seeded state and classifies the outcome.
   defp run_sandboxed(script, event, defaults, %Limits{} = limits) do
-    lua =
-      Lua.new()
-      |> set_global(:event, event)
-      |> maybe_set_global(:defaults, defaults)
+    with {:ok, lua} <- new_state() do
+      lua =
+        lua
+        |> set_global(:event, event)
+        |> maybe_set_global(:defaults, defaults)
 
-    flags = %{
-      max_reductions: limits.max_steps,
-      max_time: limits.timeout_ms,
-      spawn_opts: [
-        {:max_heap_size, %{size: limits.max_memory_words, kill: true, error_logger: false}}
-      ]
-    }
+      # The author's source defines `transform`; @invoke calls it (or passes the
+      # defaults through, for a no-op script) and stashes the RETURN value in the
+      # bridge global we read back. Both run under the one bounded sandbox call.
+      case :luerl_sandbox.run(script <> @invoke, sandbox_flags(limits), lua.state) do
+        {:ok, _results, state} ->
+          read_result(state)
 
-    # The author's source defines `transform`; @invoke calls it (or passes the
-    # defaults through, for a no-op script) and stashes the RETURN value in the
-    # bridge global we read back. Both run under the one bounded sandbox call.
-    case :luerl_sandbox.run(script <> @invoke, flags, lua.state) do
-      {:ok, _results, state} ->
-        read_result(state)
+        {:lua_error, _reason, _state} = error ->
+          {:error, Exception.message(Lua.RuntimeException.exception(error))}
 
-      {:lua_error, _reason, _state} = error ->
-        {:error, Exception.message(Lua.RuntimeException.exception(error))}
+        {:error, errors, _state} when is_list(errors) ->
+          {:error, Exception.message(Lua.CompilerException.exception(errors))}
 
-      {:error, errors, _state} when is_list(errors) ->
-        {:error, Exception.message(Lua.CompilerException.exception(errors))}
+        {:error, {:reductions, count}} ->
+          {:error, "script exceeded the reduction budget (killed after #{count} reductions)"}
 
-      {:error, {:reductions, count}} ->
-        {:error, "script exceeded the reduction budget (killed after #{count} reductions)"}
+        {:error, :timeout} ->
+          {:error, "script execution timed out or exceeded its memory budget"}
 
-      {:error, :timeout} ->
-        {:error, "script execution timed out or exceeded its memory budget"}
+        {:error, %Lua.RuntimeException{} = exception} ->
+          {:error, Exception.message(exception)}
 
-      {:error, %Lua.RuntimeException{} = exception} ->
-        {:error, Exception.message(exception)}
+        {:error, %Lua.CompilerException{} = exception} ->
+          {:error, Exception.message(exception)}
 
-      {:error, %Lua.CompilerException{} = exception} ->
-        {:error, Exception.message(exception)}
-
-      {:error, reason} ->
-        {:error, "script error: #{inspect(reason)}"}
+        {:error, reason} ->
+          {:error, "script error: #{inspect(reason)}"}
+      end
     end
   rescue
     e in [Lua.RuntimeException, Lua.CompilerException] ->
@@ -335,6 +391,25 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     case Lua.get!(%Lua{state: state}, [@result_global]) do
       nil -> {:ok, :skip}
       result -> {:ok, decode_result(result)}
+    end
+  end
+
+  # A FRESH sandbox state per run, with the built-in and host-configured APIs
+  # loaded into it. Nothing is carried over between runs, so a script that
+  # shadows or clobbers an API global affects only its own execution.
+  defp new_state do
+    {:ok, Enum.reduce(host_apis(), Lua.new(), &load_host_api/2)}
+  rescue
+    e -> {:error, "could not load the configured Lua host APIs: #{Exception.message(e)}"}
+  end
+
+  defp load_host_api(module, lua) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :scope, 0) do
+      Lua.load_api(lua, module)
+    else
+      raise ArgumentError,
+            "#{inspect(module)} is not a Lua API module — every entry in " <>
+              "`config :ash_integration, lua_sandbox: [apis: [...]]` must `use Lua.API`"
     end
   end
 
@@ -386,6 +461,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   defp sandbox_config,
     do: Keyword.get(Application.get_all_env(:ash_integration), :lua_sandbox, [])
+
+  # The built-ins always load; host-configured APIs load after them (so a host
+  # can deliberately override a built-in scope with its own).
+  defp host_apis, do: @builtin_apis ++ List.wrap(Keyword.get(sandbox_config(), :apis, []))
 
   defp timeout_ms, do: Keyword.get(sandbox_config(), :timeout_ms, @default_timeout_ms)
   defp max_reductions, do: Keyword.get(sandbox_config(), :max_reductions, @default_max_reductions)

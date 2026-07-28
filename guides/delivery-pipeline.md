@@ -684,6 +684,55 @@ config :ash_integration,
   ]
 ```
 
+## Host APIs in the sandbox
+
+Sandboxing is subtractive. Some scripts need one capability *back*, in a bounded
+form — rendering a delivery time in the operator's local zone needs a timezone
+database, which Lua has none of, and which zone to render is a **per-subscription**
+decision (baking a pre-converted string into the canonical event data at the
+producer takes that choice from every other consumer of the same event).
+
+So the runtime loads **host APIs** — Elixir modules exposed as Lua globals — into
+the state before the author's script runs. `datetime` is built in:
+
+```lua
+datetime.to_zone(iso8601, tz)       -- ISO-8601 re-rendered with that zone's offset
+datetime.format(iso8601, tz, fmt)   -- Calendar.strftime-style formatting, in that zone
+```
+
+Zones resolve through the timezone database the **host app** configures
+(`config :elixir, :time_zone_database, …`); AshIntegration ships none, so the
+choice of `tz`/`tzdata` and its update cadence stays with the host. Every failure
+mode — no database configured, unknown zone, unparseable timestamp (including one
+with no UTC offset), bad format directive — **raises**, so the delivery parks with
+the reason in `last_error` rather than putting a silently-wrong timestamp on a wire.
+
+A host app registers its own modules alongside the built-in:
+
+```elixir
+config :ash_integration,
+  lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]   # modules that `use Lua.API`
+```
+
+Three properties keep this inside the threat model:
+
+- **Host APIs must be pure computation** — no I/O, no network, no filesystem.
+  Scripts are operator-authored but untrusted at runtime; a host function that can
+  reach outside breaks the sandbox for every script on the node. Timezone math
+  qualifies, anything that opens a socket does not. This is a contract with the
+  host — a configured module runs with the node's full authority.
+- **They are inside the budget.** Host functions are invoked by the luerl runner
+  process, so their reductions and allocations count against the same
+  `max_reductions` / heap ceilings — calling one in a tight loop is bounded exactly
+  like a tight loop of Lua.
+- **Shadowing hurts only the shadowing script.** APIs are loaded before the
+  author's chunk, so `datetime = nil` is legal — and every run builds a fresh
+  sandbox state, so nothing leaks into the next execution.
+
+[Custom signing scripts](#signing) get the same APIs: those callbacks build
+canonical strings, where timestamp formatting is exactly the utility needed, and
+the purity bar that makes the surface safe applies identically.
+
 ## Migration notes
 
 - **The gRPC transport was removed.** Only `:http` and `:kafka` are supported. A

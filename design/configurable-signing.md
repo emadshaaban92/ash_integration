@@ -8,7 +8,10 @@
 > the `failure_class: :transport | :response` taxonomy. See
 > `design/outbound-architecture.md`. A signing secret is `ash_cloak`-encrypted at
 > rest; the transform sandbox is luerl-backed and has no clock or crypto (`os`/`io`
-> are blocked).
+> are blocked). It does load pure **host APIs** — the built-in `datetime`
+> (timezone conversion/`strftime` over a timestamp *passed in*, never a clock)
+> plus any the host registers — into signing sessions as well as transforms; see
+> `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua`.
 
 ## 1. Problem
 
