@@ -209,10 +209,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]
   ```
 
-  Registered APIs must be **pure computation** — no I/O, no network, no filesystem
-  — and run inside the script's existing reduction/heap budgets. Each execution
-  builds a fresh sandbox state, so a script that shadows an API global affects only
-  its own run.
+  Registered APIs must be **pure computation** — no I/O, no network, no
+  filesystem. A CPU-bound host call runs inside the script's existing
+  reduction/heap budgets; a **blocking** one escapes both (luerl's reduction
+  watchdog polls a counter a descheduled process never advances, so neither the
+  reduction budget nor the wall-clock limit fires) and outlives the outer `Task`
+  kill, leaking a runner process per delivery — which is what the purity rule
+  protects. Each execution builds a fresh sandbox state, so a script that shadows
+  an API global affects only its own run. An `:apis` entry that isn't a `Lua.API`
+  module is warned about at boot and parks any run that needs it.
 - Telemetry for three outbound state changes that were previously uninstrumented,
   each emitted at the site where the state changes (a reprocess re-park re-emits;
   a cancelled/suppressed delivery never emits `:delivered`):

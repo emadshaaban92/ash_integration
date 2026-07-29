@@ -76,10 +76,17 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     node. Time-zone math qualifies; anything that opens a socket does not. This
     is a contract with the host, not something the runtime can enforce: a
     configured module runs with the full authority of the node.
-  - **They are inside the budget.** A host function is invoked by the luerl
-    *runner* process, so its reductions and its allocations count against the
-    same `max_reductions` / `:max_heap_size` ceilings as the script's own work —
-    calling one in a tight loop is bounded exactly like a tight loop of Lua.
+  - **A host function that burns CPU is inside the budget.** It is invoked by the
+    luerl *runner* process, so its reductions and its allocations count against
+    the same `max_reductions` / `:max_heap_size` ceilings as the script's own
+    work — calling one in a tight loop is bounded exactly like a tight loop of
+    Lua. A host function that **blocks**, however, escapes both: luerl's reduction
+    watchdog polls `process_info(runner, :reductions)`, and a descheduled runner
+    never advances, so it never trips `max_reductions` and never reaches the
+    `max_time` check either. Only the outer `Task` backstop returns — and because
+    the runner is spawned unlinked, brutal-killing that `Task` leaves it alive,
+    leaking one process per delivery for as long as the call blocks. This is the
+    sharpest reason the purity rule above is a rule and not a preference.
   - **A script can shadow them, and that hurts only itself.** The APIs are loaded
     before the author's chunk, so `datetime = nil` at the top of a script is
     legal. Every run builds a fresh `Lua.new/0` and re-loads the APIs into it, so
@@ -134,11 +141,43 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   @behaviour AshIntegration.Outbound.Delivery.Transform.Runtime
 
+  require Logger
+
   alias AshIntegration.Outbound.Delivery.Transform.Limits
   alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI
 
   # Always loaded, ahead of any host-configured API.
   @builtin_apis [DatetimeAPI]
+
+  @doc """
+  Boot check (from `AshIntegration.Supervisor`): warn about any
+  `lua_sandbox: [apis: …]` entry that isn't a loadable `Lua.API` module.
+
+  Without this, a typo'd module name is invisible until the first transform runs
+  and parks — legible, but a production surprise. It **warns rather than raises**,
+  following `AshIntegration.Outbound.PoolCheck`: refusing the host's boot over a
+  transform-sandbox setting is a heavier failure than the one it prevents, and a
+  node that never runs a transform is unaffected. Every run still validates, so a
+  bad entry parks the delivery with the same message rather than slipping through.
+  """
+  @spec warn_if_host_apis_invalid() :: :ok
+  def warn_if_host_apis_invalid do
+    case Enum.reject(configured_apis(), &lua_api_module?/1) do
+      [] ->
+        :ok
+
+      invalid ->
+        Logger.warning("""
+        AshIntegration: #{Enum.map_join(invalid, ", ", &inspect/1)} #{if length(invalid) == 1, do: "is not a", else: "are not"} Lua API module#{if length(invalid) == 1, do: "", else: "s"}.
+
+        Every entry in `config :ash_integration, lua_sandbox: [apis: [...]]` must be a
+        module that does `use Lua.API`. As configured, EVERY transform and custom
+        signing run on this node will park with a load error.
+        """)
+
+        :ok
+    end
+  end
 
   @doc """
   Convenience entry point: run `script` against `event_data` using the
@@ -403,14 +442,24 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     e -> {:error, "could not load the configured Lua host APIs: #{Exception.message(e)}"}
   end
 
+  # Gate on `__lua_functions__/0` — the function `Lua.load_api/2` actually needs,
+  # and one only `use Lua.API` generates. Probing `scope/0` instead would wave
+  # through a module that happens to export it for unrelated reasons, which then
+  # dies inside `load_api` with a raw UndefinedFunctionError — exactly the
+  # near-miss this message exists to explain.
   defp load_host_api(module, lua) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :scope, 0) do
+    if lua_api_module?(module) do
       Lua.load_api(lua, module)
     else
       raise ArgumentError,
             "#{inspect(module)} is not a Lua API module — every entry in " <>
               "`config :ash_integration, lua_sandbox: [apis: [...]]` must `use Lua.API`"
     end
+  end
+
+  defp lua_api_module?(module) do
+    is_atom(module) and Code.ensure_loaded?(module) and
+      function_exported?(module, :__lua_functions__, 0)
   end
 
   defp set_global(lua, key, data) do
@@ -464,7 +513,9 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   # The built-ins always load; host-configured APIs load after them (so a host
   # can deliberately override a built-in scope with its own).
-  defp host_apis, do: @builtin_apis ++ List.wrap(Keyword.get(sandbox_config(), :apis, []))
+  defp host_apis, do: @builtin_apis ++ configured_apis()
+
+  defp configured_apis, do: List.wrap(Keyword.get(sandbox_config(), :apis, []))
 
   defp timeout_ms, do: Keyword.get(sandbox_config(), :timeout_ms, @default_timeout_ms)
   defp max_reductions, do: Keyword.get(sandbox_config(), :max_reductions, @default_max_reductions)

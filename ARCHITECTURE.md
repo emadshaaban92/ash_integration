@@ -85,13 +85,18 @@ them; if you must change one, update this list and the relevant design doc.
 5. **The signing secret never enters the Lua runtime sandbox.** It is decrypted
    live in the transport at send. Scripts are operator-authored but untrusted at
    runtime.
-5a. **Sandbox host APIs are pure computation.** Capabilities handed back into the
-   sandbox (the built-in `datetime`, plus anything a host registers via
-   `lua_sandbox: [apis: …]`) must do no I/O, no network, no filesystem — a host
-   function that can reach outside breaks the "untrusted at runtime" model for
-   every script on the node. They run inside the script's own reduction/heap
-   budgets, and each execution builds a fresh sandbox state, so a script can only
-   shadow them for itself.
+
+   - **Sandbox host APIs are pure computation.** Capabilities handed back into
+     the sandbox (the built-in `datetime`, plus anything a host registers via
+     `lua_sandbox: [apis: …]`) must do no I/O, no network, no filesystem — a host
+     function that can reach outside breaks the "untrusted at runtime" model for
+     every script on the node. Each execution builds a fresh sandbox state, so a
+     script can only shadow them for itself. The resource budgets bound a host
+     call that **burns reductions**; one that **blocks** trips neither
+     `max_reductions` (luerl polls the runner's reduction count, which a
+     descheduled process never advances) nor `max_time`, and outlives the outer
+     `Task` kill because the runner is spawned unlinked — so it leaks a process
+     per delivery. Purity is what keeps the ceilings meaningful.
 6. **The signature is computed fresh at send, per attempt** — recomputed over the
    exact body bytes with a send-time timestamp, so anti-replay stays honest on
    retries and secret rotation needs no reprocess.

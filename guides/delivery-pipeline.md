@@ -721,10 +721,16 @@ Three properties keep this inside the threat model:
   reach outside breaks the sandbox for every script on the node. Timezone math
   qualifies, anything that opens a socket does not. This is a contract with the
   host — a configured module runs with the node's full authority.
-- **They are inside the budget.** Host functions are invoked by the luerl runner
-  process, so their reductions and allocations count against the same
-  `max_reductions` / heap ceilings — calling one in a tight loop is bounded exactly
-  like a tight loop of Lua.
+- **A CPU-bound host function is inside the budget.** Host functions are invoked
+  by the luerl runner process, so their reductions and allocations count against
+  the same `max_reductions` / heap ceilings — calling one in a tight loop is
+  bounded exactly like a tight loop of Lua. A host function that **blocks**
+  escapes both ceilings: luerl's reduction watchdog polls the runner's reduction
+  count, and a descheduled process never advances it, so neither `max_reductions`
+  nor `max_time` ever fires. Only the outer `Task` backstop returns, and the
+  runner — spawned unlinked — survives that `Task`'s kill, leaking one process per
+  delivery for as long as it blocks. That is the concrete cost of breaking the
+  purity rule, and why it is a rule.
 - **Shadowing hurts only the shadowing script.** APIs are loaded before the
   author's chunk, so `datetime = nil` is legal — and every run builds a fresh
   sandbox state, so nothing leaks into the next execution.

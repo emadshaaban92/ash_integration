@@ -17,8 +17,11 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI do
       datetime.format("2024-06-15T10:30:00Z", "Africa/Cairo", "%Y-%m-%d %H:%M")
       --> "2024-06-15 13:30"
 
-  Both take an ISO-8601 timestamp **with a UTC offset** (`event.created_at` is
-  always in that shape) and an IANA zone name.
+  Both take an ISO-8601 timestamp **with a UTC offset** and an IANA zone name.
+  `event.created_at` is always in that shape — `AshIntegration.Outbound.Wire.Envelope`
+  normalizes it from the event's `DateTime`. A timestamp pulled out of `event.data`
+  is only as good as its producer, which is why a missing offset raises (below)
+  rather than being read as UTC.
 
   This is deliberately **not a clock**: it converts a timestamp the script already
   holds and exposes no "now". The sandbox stays deterministic — the same event

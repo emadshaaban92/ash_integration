@@ -5,6 +5,13 @@ defmodule AshIntegration.LuaHostAPIsTest do
 
   alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua
 
+  # The realistic near-miss: a real, loadable module that exports `scope/0` for
+  # its own reasons but never did `use Lua.API`, so it has no `__lua_functions__/0`
+  # for `Lua.load_api/2` to read.
+  defmodule NotQuiteALuaAPI do
+    def scope, do: ["myapp"]
+  end
+
   defp put_sandbox_config(config) do
     original = Application.get_env(:ash_integration, :lua_sandbox)
     Application.put_env(:ash_integration, :lua_sandbox, config)
@@ -81,6 +88,17 @@ defmodule AshIntegration.LuaHostAPIsTest do
       assert message =~ "use Lua.API"
     end
 
+    test "a real module that only looks like a Lua API parks with the same message" do
+      put_sandbox_config(apis: [NotQuiteALuaAPI])
+
+      assert {:error, message} = run(~S|return {ok = true}|)
+      assert message =~ "could not load the configured Lua host APIs"
+      assert message =~ "NotQuiteALuaAPI"
+      assert message =~ "use Lua.API"
+      # Not the raw UndefinedFunctionError from inside Lua.load_api/2.
+      refute message =~ "__lua_functions__"
+    end
+
     test "a misconfigured API also fails a signing session legibly" do
       put_sandbox_config(apis: [NotAnAPIModule])
 
@@ -92,6 +110,32 @@ defmodule AshIntegration.LuaHostAPIsTest do
                )
 
       assert message =~ "could not load the configured Lua host APIs"
+    end
+  end
+
+  describe "boot check" do
+    import ExUnit.CaptureLog
+
+    test "warns about an unloadable :apis entry" do
+      put_sandbox_config(apis: [NotQuiteALuaAPI, NoSuchModuleAtAll])
+
+      log = capture_log(fn -> assert :ok = Lua.warn_if_host_apis_invalid() end)
+
+      assert log =~ "NotQuiteALuaAPI"
+      assert log =~ "NoSuchModuleAtAll"
+      assert log =~ "use Lua.API"
+    end
+
+    test "stays quiet for a valid configuration" do
+      put_sandbox_config(apis: [AshIntegration.Test.LuaAPI])
+
+      assert capture_log(fn -> assert :ok = Lua.warn_if_host_apis_invalid() end) == ""
+    end
+
+    test "stays quiet when no :apis are configured" do
+      put_sandbox_config(timeout_ms: 5_000)
+
+      assert capture_log(fn -> assert :ok = Lua.warn_if_host_apis_invalid() end) == ""
     end
   end
 

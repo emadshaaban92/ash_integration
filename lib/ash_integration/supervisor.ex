@@ -38,6 +38,12 @@ defmodule AshIntegration.Supervisor do
       # land on the failure paths and stall dispatch/delivery throughput.
       AshIntegration.Outbound.PoolCheck.warn_if_oversubscribed()
 
+      # Boot check: a typo'd `lua_sandbox: [apis: …]` entry would otherwise stay
+      # invisible until the first transform ran and parked. Warns (never crashes)
+      # — refusing the host's boot over a transform-sandbox setting is a heavier
+      # failure than the one it prevents.
+      AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.warn_if_host_apis_invalid()
+
       children = [
         AshIntegration.Transport.KafkaClientManager,
         # The scheduler (brain): promotes pending → scheduled, owning ordering
