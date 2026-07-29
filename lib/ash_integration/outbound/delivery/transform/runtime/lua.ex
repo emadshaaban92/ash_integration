@@ -47,6 +47,67 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
           max_heap_words: 50_000_000
         ]
 
+  ## Host APIs
+
+  Sandboxing is subtractive — it takes capabilities away. Some scripts need one
+  *back*, in a bounded form: rendering a delivery time in the operator's local
+  time needs a time-zone database, which Lua has none of. The alternative is
+  worse than a missing feature — it pushes hosts into baking a pre-converted
+  timestamp into the canonical event data, where **which** zone to render stops
+  being the per-subscription decision it is.
+
+  So the runtime loads **host APIs** — Elixir modules exposed as Lua globals —
+  into the state before the author's script runs. `datetime` is built in
+  (`AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI`):
+
+      datetime.to_zone(iso8601, tz)       -- ISO-8601 carrying that zone's offset
+      datetime.format(iso8601, tz, fmt)   -- Calendar.strftime-style formatting
+
+  A host app registers its own (any module that does `use Lua.API`) alongside it:
+
+      config :ash_integration,
+        lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]
+
+  Built-ins load first, host modules after, in configured order. **A scope
+  collision replaces the earlier module entirely** — `Lua.load_api/2` resets the
+  scope table rather than merging into it, so a host module scoped `datetime`
+  removes `datetime.to_zone`/`datetime.format` for every script on the node, and
+  of two host modules sharing a scope only the last survives. That is
+  occasionally what a host wants; far more often it's an accidental name clash,
+  so `warn_about_host_apis/0` flags both shapes at boot.
+
+  Three properties hold this together:
+
+  - **Host APIs must be pure computation** — no I/O, no network, no filesystem.
+    The threat model is "operator-authored but untrusted at runtime", and a
+    function that can reach outside the sandbox breaks it for every script on the
+    node. Time-zone math qualifies; anything that opens a socket does not. This
+    is a contract with the host, not something the runtime can enforce: a
+    configured module runs with the full authority of the node.
+  - **A host function that burns CPU is inside the budget.** It is invoked by the
+    luerl *runner* process, so its reductions and its allocations count against
+    the same `max_reductions` / `:max_heap_size` ceilings as the script's own
+    work — calling one in a tight loop is bounded exactly like a tight loop of
+    Lua. A host function that **blocks**, however, escapes both: luerl's reduction
+    watchdog polls `process_info(runner, :reductions)`, and a descheduled runner
+    never advances, so it never trips `max_reductions` and never reaches the
+    `max_time` check either. Only the outer `Task` backstop returns — and because
+    the runner is spawned unlinked, brutal-killing that `Task` leaves it alive,
+    leaking one process per delivery for as long as the call blocks. This is the
+    sharpest reason the purity rule above is a rule and not a preference.
+  - **A script can shadow them, and that hurts only itself.** The APIs are loaded
+    before the author's chunk, so `datetime = nil` at the top of a script is
+    legal. Every run builds a fresh `Lua.new/0` and re-loads the APIs into it, so
+    a mutated global cannot leak into the next execution — there is no state
+    carried between runs to corrupt.
+
+  Signing sources (`sign_session/3`) get the same APIs. That path is narrower —
+  callbacks build canonical strings, not delivery bodies — but timestamp
+  formatting is exactly what signing schemes need (`%Y%m%dT%H%M%SZ`-style
+  canonical stamps), and holding a *pure* utility back from it would only push
+  authors into hand-rolled string surgery. The purity bar is what makes the
+  surface safe, so it applies identically to both paths.
+
   The transform is a **function the script exposes**, not a top-level
   imperative chunk:
 
@@ -88,7 +149,149 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   @behaviour AshIntegration.Outbound.Delivery.Transform.Runtime
 
+  require Logger
+
   alias AshIntegration.Outbound.Delivery.Transform.Limits
+  alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI
+
+  # Always loaded, ahead of any host-configured API.
+  @builtin_apis [DatetimeAPI]
+
+  @doc """
+  Boot check (from `AshIntegration.Supervisor`): warn about a
+  `lua_sandbox: [apis: …]` entry that isn't a loadable `Lua.API` module, one that
+  claims a built-in's scope and so replaces it, or two entries that claim the same
+  scope as each other and so replace one another.
+
+  All three are otherwise invisible until a transform runs — the first parks
+  every delivery, the other two silently remove functions scripts were calling.
+  This **warns rather than raises**, following
+  `AshIntegration.Outbound.PoolCheck`: refusing the host's boot over a
+  transform-sandbox setting is a heavier failure than the one it prevents, and a
+  node that never runs a transform is unaffected. Every run still validates a
+  module before loading it, so a bad entry parks with the same message rather
+  than slipping through.
+  """
+  @spec warn_about_host_apis() :: :ok
+  def warn_about_host_apis do
+    configured = configured_apis()
+    {loadable, unloadable} = Enum.split_with(configured, &lua_api_module?/1)
+
+    warn_unloadable(unloadable)
+    warn_shadowed_builtins(Enum.flat_map(loadable, &shadowed_builtin/1))
+    warn_shadowed_hosts(shadowed_hosts(loadable))
+
+    :ok
+  end
+
+  defp warn_unloadable([]), do: :ok
+
+  defp warn_unloadable(modules) do
+    Logger.warning("""
+    AshIntegration: these `config :ash_integration, lua_sandbox: [apis: [...]]` entries \
+    are not Lua API modules: #{Enum.map_join(modules, ", ", &inspect/1)}.
+
+    Every entry must be a module that does `use Lua.API`. As configured, EVERY transform
+    and custom signing run on this node will park with a load error — the APIs load into
+    the sandbox before the author's script does, so even a script that calls none of them
+    fails.
+    """)
+  end
+
+  defp warn_shadowed_builtins([]), do: :ok
+
+  defp warn_shadowed_builtins(collisions) do
+    for {module, builtin, scope} <- collisions do
+      Logger.warning("""
+      AshIntegration: #{inspect(module)} claims the Lua scope #{inspect(scope)}, which \
+      REPLACES the built-in #{inspect(builtin)} entirely.
+
+      `Lua.load_api/2` overwrites the scope table rather than merging into it, so these \
+      built-in functions are gone for every transform and signing run on this node: \
+      #{scoped_names(builtin, scope)}. A script still calling one fails with an \
+      undefined-function error.
+
+      Rename your scope unless replacing the built-in outright is what you intended.
+      """)
+    end
+
+    :ok
+  end
+
+  defp warn_shadowed_hosts([]), do: :ok
+
+  defp warn_shadowed_hosts(collisions) do
+    for {winner, shadowed, scope} <- collisions do
+      Logger.warning("""
+      AshIntegration: these `config :ash_integration, lua_sandbox: [apis: [...]]` entries \
+      all claim the Lua scope #{inspect(scope)}: \
+      #{Enum.map_join(shadowed ++ [winner], ", ", &inspect/1)}.
+
+      `Lua.load_api/2` overwrites the scope table rather than merging into it, so the LAST \
+      entry wins — #{inspect(winner)} — and the earlier ones are replaced wholesale for \
+      every transform and signing run on this node. #{lost_sentence(shadowed, winner, scope)}
+
+      Give each module its own scope unless replacing the others outright is what you intended.
+      """)
+    end
+
+    :ok
+  end
+
+  # Two host modules claiming one scope is the same wholesale replacement as a
+  # built-in collision, minus the built-in — and likelier, since the host picks
+  # both names. `:apis` order decides it: the last entry loaded wins.
+  defp shadowed_hosts(loadable) do
+    loadable
+    |> Enum.uniq()
+    |> Enum.group_by(& &1.scope())
+    |> Enum.filter(fn {_scope, modules} -> length(modules) > 1 end)
+    |> Enum.map(fn {scope, modules} ->
+      {List.last(modules), Enum.drop(modules, -1), Enum.join(scope, ".")}
+    end)
+  end
+
+  # Only the names the winner does NOT redefine actually disappear; the rest are
+  # still callable, just backed by a different module. Say which happened.
+  defp lost_sentence(shadowed, winner, scope) do
+    kept = MapSet.new(function_names(winner))
+
+    lost =
+      shadowed
+      |> Enum.flat_map(&function_names/1)
+      |> Enum.reject(&MapSet.member?(kept, &1))
+      |> Enum.uniq()
+
+    case lost do
+      [] ->
+        "No functions disappear — #{inspect(winner)} defines the same names — but its " <>
+          "implementations replace theirs."
+
+      names ->
+        "These functions are gone, and a script still calling one fails with an " <>
+          "undefined-function error: " <> Enum.map_join(names, ", ", &"#{scope}.#{&1}") <> "."
+    end
+  end
+
+  # `[{name, with_state?, variadic?}, …]` — what `use Lua.API` records for a module.
+  defp function_names(module) do
+    Enum.map(module.__lua_functions__(), fn {name, _state?, _variadic?} -> name end)
+  end
+
+  defp scoped_names(builtin, scope) do
+    Enum.map_join(function_names(builtin), ", ", &"#{scope}.#{&1}")
+  end
+
+  defp shadowed_builtin(module) do
+    scope = module.scope()
+
+    case Enum.find(@builtin_apis, &(&1.scope() == scope)) do
+      # A host listing a built-in explicitly just loads it twice — harmless.
+      nil -> []
+      ^module -> []
+      builtin -> [{module, builtin, Enum.join(scope, ".")}]
+    end
+  end
 
   @doc """
   Convenience entry point: run `script` against `event_data` using the
@@ -207,9 +410,16 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   # Elixir pipeline) performs the keyed MAC between calls; the secret is never set
   # into the sandbox state.
   defp run_session(source, %Limits{} = limits, orchestrate) do
-    flags = sandbox_flags(limits)
+    with {:ok, lua} <- new_state() do
+      compile_session(source, lua, sandbox_flags(limits), orchestrate)
+    end
+  rescue
+    e in [Lua.RuntimeException, Lua.CompilerException] ->
+      {:error, Exception.message(e)}
+  end
 
-    case :luerl_sandbox.run(source <> @detect_callbacks, flags, Lua.new().state) do
+  defp compile_session(source, lua, flags, orchestrate) do
+    case :luerl_sandbox.run(source <> @detect_callbacks, flags, lua.state) do
       {:ok, _results, state} ->
         defined = read_defined(state)
         orchestrate.(fn fname, ctx -> sign_call_on(state, flags, defined, fname, ctx) end)
@@ -217,9 +427,6 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       other ->
         {:error, classify_sandbox_error(other)}
     end
-  rescue
-    e in [Lua.RuntimeException, Lua.CompilerException] ->
-      {:error, Exception.message(e)}
   end
 
   # Invoke one already-compiled callback on the shared state. An undefined callback
@@ -275,6 +482,15 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   defp classify_sandbox_error({:error, :timeout}),
     do: "signing callback timed out or exceeded its memory budget"
 
+  # A host API function that raises comes back as the exception struct itself —
+  # surface its message, not its guts. Matched on `is_exception/1` rather than the
+  # `Lua.*` structs specifically: the built-in `datetime` raises
+  # `Lua.RuntimeException` (via `Lua.API.runtime_exception!/1`), but a host module
+  # is free to raise anything, and an `inspect`ed `%ArgumentError{}` in `last_error`
+  # is exactly the illegibility this clause exists to prevent.
+  defp classify_sandbox_error({:error, exception}) when is_exception(exception),
+    do: Exception.message(exception)
+
   defp classify_sandbox_error({:error, reason}),
     do: "signing callback error: #{inspect(reason)}"
 
@@ -284,46 +500,39 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   # FURTHER luerl-spawned runner (carrying the reduction + heap limits); this
   # function only builds the pre-seeded state and classifies the outcome.
   defp run_sandboxed(script, event, defaults, %Limits{} = limits) do
-    lua =
-      Lua.new()
-      |> set_global(:event, event)
-      |> maybe_set_global(:defaults, defaults)
+    with {:ok, lua} <- new_state() do
+      lua =
+        lua
+        |> set_global(:event, event)
+        |> maybe_set_global(:defaults, defaults)
 
-    flags = %{
-      max_reductions: limits.max_steps,
-      max_time: limits.timeout_ms,
-      spawn_opts: [
-        {:max_heap_size, %{size: limits.max_memory_words, kill: true, error_logger: false}}
-      ]
-    }
+      # The author's source defines `transform`; @invoke calls it (or passes the
+      # defaults through, for a no-op script) and stashes the RETURN value in the
+      # bridge global we read back. Both run under the one bounded sandbox call.
+      case :luerl_sandbox.run(script <> @invoke, sandbox_flags(limits), lua.state) do
+        {:ok, _results, state} ->
+          read_result(state)
 
-    # The author's source defines `transform`; @invoke calls it (or passes the
-    # defaults through, for a no-op script) and stashes the RETURN value in the
-    # bridge global we read back. Both run under the one bounded sandbox call.
-    case :luerl_sandbox.run(script <> @invoke, flags, lua.state) do
-      {:ok, _results, state} ->
-        read_result(state)
+        {:lua_error, _reason, _state} = error ->
+          {:error, Exception.message(Lua.RuntimeException.exception(error))}
 
-      {:lua_error, _reason, _state} = error ->
-        {:error, Exception.message(Lua.RuntimeException.exception(error))}
+        {:error, errors, _state} when is_list(errors) ->
+          {:error, Exception.message(Lua.CompilerException.exception(errors))}
 
-      {:error, errors, _state} when is_list(errors) ->
-        {:error, Exception.message(Lua.CompilerException.exception(errors))}
+        {:error, {:reductions, count}} ->
+          {:error, "script exceeded the reduction budget (killed after #{count} reductions)"}
 
-      {:error, {:reductions, count}} ->
-        {:error, "script exceeded the reduction budget (killed after #{count} reductions)"}
+        {:error, :timeout} ->
+          {:error, "script execution timed out or exceeded its memory budget"}
 
-      {:error, :timeout} ->
-        {:error, "script execution timed out or exceeded its memory budget"}
+        # A raising host API — see `classify_sandbox_error/1` for why this matches
+        # any exception rather than only the `Lua.*` structs.
+        {:error, exception} when is_exception(exception) ->
+          {:error, Exception.message(exception)}
 
-      {:error, %Lua.RuntimeException{} = exception} ->
-        {:error, Exception.message(exception)}
-
-      {:error, %Lua.CompilerException{} = exception} ->
-        {:error, Exception.message(exception)}
-
-      {:error, reason} ->
-        {:error, "script error: #{inspect(reason)}"}
+        {:error, reason} ->
+          {:error, "script error: #{inspect(reason)}"}
+      end
     end
   rescue
     e in [Lua.RuntimeException, Lua.CompilerException] ->
@@ -336,6 +545,42 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       nil -> {:ok, :skip}
       result -> {:ok, decode_result(result)}
     end
+  end
+
+  # A FRESH sandbox state per run, with the built-in and host-configured APIs
+  # loaded into it. Nothing is carried over between runs, so a script that
+  # shadows or clobbers an API global affects only its own execution.
+  defp new_state do
+    {:ok, Enum.reduce(host_apis(), Lua.new(), &load_host_api/2)}
+  rescue
+    # The only thing `load_host_api/2` itself raises — attribute it precisely.
+    e in ArgumentError ->
+      {:error, "could not load the configured Lua host APIs: #{Exception.message(e)}"}
+
+    # Anything else (a module's `install/3`, `Lua.new/0`) is a different failure and
+    # shouldn't be reported as a bad `:apis` config.
+    e ->
+      {:error, "could not build the transform sandbox: #{Exception.message(e)}"}
+  end
+
+  # Gate on `__lua_functions__/0` — the function `Lua.load_api/2` actually needs,
+  # and one only `use Lua.API` generates. Probing `scope/0` instead would wave
+  # through a module that happens to export it for unrelated reasons, which then
+  # dies inside `load_api` with a raw UndefinedFunctionError — exactly the
+  # near-miss this message exists to explain.
+  defp load_host_api(module, lua) do
+    if lua_api_module?(module) do
+      Lua.load_api(lua, module)
+    else
+      raise ArgumentError,
+            "#{inspect(module)} is not a Lua API module — every entry in " <>
+              "`config :ash_integration, lua_sandbox: [apis: [...]]` must `use Lua.API`"
+    end
+  end
+
+  defp lua_api_module?(module) do
+    is_atom(module) and Code.ensure_loaded?(module) and
+      function_exported?(module, :__lua_functions__, 0)
   end
 
   defp set_global(lua, key, data) do
@@ -386,6 +631,14 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   defp sandbox_config,
     do: Keyword.get(Application.get_all_env(:ash_integration), :lua_sandbox, [])
+
+  # The built-ins always load; host-configured APIs load after them. A host scope
+  # that collides with a built-in's therefore REPLACES it wholesale (`Lua.load_api/2`
+  # resets the scope table rather than merging), which `warn_about_host_apis/0`
+  # surfaces at boot because the far likelier cause is an accidental name clash.
+  defp host_apis, do: @builtin_apis ++ configured_apis()
+
+  defp configured_apis, do: List.wrap(Keyword.get(sandbox_config(), :apis, []))
 
   defp timeout_ms, do: Keyword.get(sandbox_config(), :timeout_ms, @default_timeout_ms)
   defp max_reductions, do: Keyword.get(sandbox_config(), :max_reductions, @default_max_reductions)

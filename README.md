@@ -534,6 +534,63 @@ function transform(event, defaults)
 end
 ```
 
+### Host APIs available to a transform
+
+The sandbox has no I/O, but it does expose **pure host utilities** as Lua globals. `datetime` is built in:
+
+```
+datetime.to_zone(iso8601, tz)       -- ISO-8601 re-rendered with that zone's offset
+datetime.format(iso8601, tz, fmt)   -- Calendar.strftime-style formatting, in that zone
+```
+
+Both take an ISO-8601 timestamp **carrying a UTC offset** (`event.created_at` always does — it is normalized from the event's `DateTime`) and an IANA zone name:
+
+```lua
+-- Deliver the operator's local time, chosen PER SUBSCRIPTION
+function transform(event, defaults)
+  defaults.body = {
+    id         = event.data.id,
+    delivered  = datetime.to_zone(event.created_at, "Africa/Cairo"),
+    -- "2026-01-15T12:30:00+02:00" in January, "+03:00" in June — DST is applied,
+    -- not assumed, so a hardcoded offset is never needed
+    printed_at = datetime.format(event.created_at, "Africa/Cairo", "%d/%m/%Y %H:%M")
+  }
+  return defaults
+end
+```
+
+Which timezone to render is a **per-subscription** decision, so it belongs in the transform. Baking a pre-converted string into the canonical event data at the producer would take that choice from every other consumer of the same event.
+
+Zones resolve through the **time-zone database your host app configures** (`config :elixir, :time_zone_database, Tz.TimeZoneDatabase` or `Tzdata.TimeZoneDatabase`) — AshIntegration ships none, so that choice (and its update cadence) stays yours. If none is configured, or the zone is unknown, or the timestamp is unparseable (including one with **no** UTC offset), the call **raises** and the delivery **parks** with that reason in `last_error` — a silently-wrong timestamp on a wire is worse than a parked delivery an operator can see and fix.
+
+Your app can register its own API modules alongside the built-in:
+
+```elixir
+# lib/my_app/integration/lua_api.ex
+defmodule MyApp.Integration.LuaAPI do
+  use Lua.API, scope: "myapp"
+
+  # Callable from a transform as `myapp.tenant_path("acme", event.data.id)`.
+  # Lua numbers arrive as integers/floats, so coerce rather than `<>`-ing an
+  # argument that might not be a string. Note `deflua/2` heads take no `when`
+  # guards (the lua dep only parses those in the state-carrying form) — validate
+  # in the body.
+  deflua tenant_path(tenant, id) do
+    "/t/" <> to_string(tenant) <> "/orders/" <> to_string(id)
+  end
+end
+
+# config/config.exs
+config :ash_integration,
+  lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]
+```
+
+Registered APIs must be **pure computation** — no I/O, no network, no filesystem. Scripts are operator-authored but untrusted at runtime; a host function that can reach outside the sandbox breaks that model for every script on the node. They are loaded fresh per execution, so a script that shadows one affects only itself.
+
+Pick a scope name that doesn't collide with a built-in: built-ins load first and a host module with the same scope **replaces** it entirely rather than merging, so a host API scoped `datetime` removes `datetime.to_zone` for every script on the node. A collision is logged at boot.
+
+A **CPU-bound** host function runs inside the script's own reduction and heap budgets. A **blocking** one escapes them: luerl's reduction watchdog polls the runner's reduction count, and a blocked process never advances it, so neither the reduction budget nor the wall-clock limit fires — only the outer backstop returns, and the runner survives it, leaking a process per delivery. That is what the purity rule is protecting. The same APIs are loaded for [custom signing scripts](guides/delivery-pipeline.md).
+
 **Signature & auth.** The descriptor (body as a term, headers, routing) is resolved at dispatch and snapshotted on the event, then replayed on every retry. Two secret-derived outputs are **never** snapshotted and are injected live at delivery: `Authorization`/auth (resolved from the encrypted connection — a transform-set `authorization` header still wins), and the **signature**, which is recomputed fresh per attempt under the connection's `signing` scheme with a frozen send-time timestamp. Signing live keeps the anti-replay timestamp honest on retries and makes a rotated secret apply immediately — so reprocess is only needed to pick up an edited transform or connection/route config, not a secret rotation.
 
 Scripts run in a sandboxed environment with no I/O, a 10KB size limit, and a 5-second timeout.

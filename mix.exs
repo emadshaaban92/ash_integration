@@ -74,6 +74,10 @@ defmodule AshIntegration.MixProject do
       {:live_select, "~> 1.0"},
       {:tidewave, "~> 0.1", only: [:dev]},
       {:simple_sat, "~> 0.1", only: [:test]},
+      # A Calendar time-zone database for the suite ONLY — the `datetime` host API
+      # deliberately uses whatever database the HOST configures, so the library
+      # itself must not depend on one (see the Lua runtime moduledoc).
+      {:tz, "~> 0.28", only: [:dev, :test]},
       {:sourceror, "~> 1.7", only: [:dev, :test]},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:usage_rules, "~> 1.0", only: [:dev]},

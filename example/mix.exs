@@ -68,6 +68,10 @@ defmodule Example.MixProject do
        app: false,
        compile: false,
        depth: 1},
+      # A Calendar time-zone database for the Lua sandbox's built-in `datetime`
+      # host API. The library ships none on purpose (that choice, and its update
+      # cadence, belong to the host) — see config/config.exs.
+      {:tz, "~> 0.28"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},

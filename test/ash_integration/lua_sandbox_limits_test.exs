@@ -53,6 +53,25 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
     assert message =~ "reduction" or message =~ "timed out"
   end
 
+  test "a host API called in a tight loop is bounded by the same budgets" do
+    # Host functions are invoked by the luerl RUNNER process, so their reductions
+    # and allocations count against the script's ceilings — an operator can't use
+    # `datetime` to buy unbounded work.
+    bomb = ~S"""
+    function transform(event, defaults)
+      local out = {}
+      local i = 1
+      while true do
+        out[i] = datetime.to_zone("2024-06-15T10:30:00Z", "Africa/Cairo")
+        i = i + 1
+      end
+    end
+    """
+
+    assert {:error, message} = Lua.execute(bomb, %{})
+    assert message =~ "reduction" or message =~ "timed out" or message =~ "killed"
+  end
+
   test "a legitimate transform still runs under the tightened budgets" do
     assert {:ok, %{"doubled" => 84}} =
              Lua.execute(

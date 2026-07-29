@@ -182,6 +182,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Host APIs in the Lua sandbox**, with a built-in `datetime`. A transform (and a
+  custom signing script) can now render a timestamp in any timezone, so *which*
+  zone to use stays the per-subscription decision it is — the previous workaround
+  was baking a pre-converted string into the canonical event data at the producer,
+  which took that choice from every other consumer of the same event.
+
+  ```lua
+  datetime.to_zone(iso8601, tz)       -- ISO-8601 re-rendered with that zone's offset
+  datetime.format(iso8601, tz, fmt)   -- Calendar.strftime-style formatting, in that zone
+  ```
+
+  Zones resolve through the **host app's** configured
+  `Calendar.TimeZoneDatabase` (`config :elixir, :time_zone_database, …`) — the
+  library adds no `tz`/`tzdata` dependency, so that choice stays with the host. No
+  configured database, an unknown zone, an unparseable timestamp (including one
+  with no UTC offset), or a bad format directive **raises**, parking the delivery
+  with the reason rather than putting a silently-wrong timestamp on a wire. The
+  API is not a clock: it converts a timestamp the script already holds, so
+  transforms stay deterministic across `reprocess`.
+
+  A host app can register its own API modules (anything that does `use Lua.API`):
+
+  ```elixir
+  config :ash_integration,
+    lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]
+  ```
+
+  Registered APIs must be **pure computation** — no I/O, no network, no
+  filesystem. A CPU-bound host call runs inside the script's existing
+  reduction/heap budgets; a **blocking** one escapes both (luerl's reduction
+  watchdog polls a counter a descheduled process never advances, so neither the
+  reduction budget nor the wall-clock limit fires) and outlives the outer `Task`
+  kill, leaking a runner process per delivery — which is what the purity rule
+  protects. Each execution builds a fresh sandbox state, so a script that shadows
+  an API global affects only its own run. An `:apis` entry that isn't a `Lua.API`
+  module is warned about at boot and then parks **every** transform and signing
+  run on the node — APIs load into the state before the author's script does, so
+  a script that touches none of them fails too. Built-ins load first and a scope
+  collision **replaces the earlier module entirely** (`Lua.load_api/2` resets the
+  scope table rather than merging) — both when a host scope claims a built-in's
+  and when two host entries claim each other's, in which case `:apis` order
+  decides and the last one wins. The same boot check flags both, naming the
+  functions that disappear. A host API that raises surfaces its **message** in
+  `last_error` (in transforms and signing callbacks alike), whatever exception
+  type it raises — not an `inspect`ed exception struct.
 - Telemetry for three outbound state changes that were previously uninstrumented,
   each emitted at the site where the state changes (a reprocess re-park re-emits;
   a cancelled/suppressed delivery never emits `:delivered`):

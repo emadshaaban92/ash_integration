@@ -684,6 +684,72 @@ config :ash_integration,
   ]
 ```
 
+## Host APIs in the sandbox
+
+Sandboxing is subtractive. Some scripts need one capability *back*, in a bounded
+form — rendering a delivery time in the operator's local zone needs a timezone
+database, which Lua has none of, and which zone to render is a **per-subscription**
+decision (baking a pre-converted string into the canonical event data at the
+producer takes that choice from every other consumer of the same event).
+
+So the runtime loads **host APIs** — Elixir modules exposed as Lua globals — into
+the state before the author's script runs. `datetime` is built in:
+
+```lua
+datetime.to_zone(iso8601, tz)       -- ISO-8601 re-rendered with that zone's offset
+datetime.format(iso8601, tz, fmt)   -- Calendar.strftime-style formatting, in that zone
+```
+
+Zones resolve through the timezone database the **host app** configures
+(`config :elixir, :time_zone_database, …`); AshIntegration ships none, so the
+choice of `tz`/`tzdata` and its update cadence stays with the host. Every failure
+mode — no database configured, unknown zone, unparseable timestamp (including one
+with no UTC offset), bad format directive — **raises**, so the delivery parks with
+the reason in `last_error` rather than putting a silently-wrong timestamp on a wire.
+
+A host app registers its own modules alongside the built-in:
+
+```elixir
+config :ash_integration,
+  lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]   # modules that `use Lua.API`
+```
+
+Built-ins load first, host modules after, in configured order — so a scope collision
+**replaces the earlier module entirely** (`Lua.load_api/2` resets the scope table
+rather than merging), removing every function that module defined for all scripts on
+the node. That applies both when a host scope claims a built-in's and when two host
+entries claim each other's, where `:apis` order decides and the last one wins.
+Occasionally intended, usually an accidental name clash, so both are logged at boot
+alongside an entry that isn't a `Lua.API` module at all.
+
+A host API that raises parks the delivery with that exception's **message** in
+`last_error` — whatever it raises, not only `Lua`'s own exception structs.
+
+Three properties keep this inside the threat model:
+
+- **Host APIs must be pure computation** — no I/O, no network, no filesystem.
+  Scripts are operator-authored but untrusted at runtime; a host function that can
+  reach outside breaks the sandbox for every script on the node. Timezone math
+  qualifies, anything that opens a socket does not. This is a contract with the
+  host — a configured module runs with the node's full authority.
+- **A CPU-bound host function is inside the budget.** Host functions are invoked
+  by the luerl runner process, so their reductions and allocations count against
+  the same `max_reductions` / heap ceilings — calling one in a tight loop is
+  bounded exactly like a tight loop of Lua. A host function that **blocks**
+  escapes both ceilings: luerl's reduction watchdog polls the runner's reduction
+  count, and a descheduled process never advances it, so neither `max_reductions`
+  nor `max_time` ever fires. Only the outer `Task` backstop returns, and the
+  runner — spawned unlinked — survives that `Task`'s kill, leaking one process per
+  delivery for as long as it blocks. That is the concrete cost of breaking the
+  purity rule, and why it is a rule.
+- **Shadowing hurts only the shadowing script.** APIs are loaded before the
+  author's chunk, so `datetime = nil` is legal — and every run builds a fresh
+  sandbox state, so nothing leaks into the next execution.
+
+[Custom signing scripts](#signing) get the same APIs: those callbacks build
+canonical strings, where timestamp formatting is exactly the utility needed, and
+the purity bar that makes the surface safe applies identically.
+
 ## Migration notes
 
 - **The gRPC transport was removed.** Only `:http` and `:kafka` are supported. A
