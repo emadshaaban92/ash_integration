@@ -23,6 +23,23 @@ defmodule AshIntegration.Test.LuaAPI do
   end
 end
 
+defmodule AshIntegration.Test.ShoutingLuaAPI do
+  @moduledoc """
+  A second host API claiming `AshIntegration.Test.LuaAPI`'s scope, standing in for
+  the likelier clash: two of the host's OWN modules sharing a name. Whichever is
+  listed last in `:apis` wins and replaces the other outright.
+
+  It redefines `shout/1` (so that name survives, backed by this implementation)
+  and defines nothing else, so the other module's remaining functions disappear.
+  """
+
+  use Lua.API, scope: "myapp"
+
+  deflua shout(text) do
+    "((" <> to_string(text) <> "))"
+  end
+end
+
 defmodule AshIntegration.Test.CollidingLuaAPI do
   @moduledoc """
   A host API that claims the built-in `datetime` scope. `Lua.load_api/2` resets a

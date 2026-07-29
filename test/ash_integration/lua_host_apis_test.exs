@@ -118,8 +118,31 @@ defmodule AshIntegration.LuaHostAPIsTest do
       assert {:error, message} = run(~S|return {x = myapp.explode("on purpose")}|)
       assert message =~ "host API blew up: on purpose"
 
+      # The MESSAGE, not an `inspect`ed exception struct. A host module raises
+      # whatever it likes (here a plain ArgumentError, not the Lua.RuntimeException
+      # the built-in `datetime` raises), and `%ArgumentError{message: "..."}` in
+      # `last_error` would satisfy the assertion above while being exactly the
+      # illegibility this path exists to avoid.
+      refute message =~ "ArgumentError"
+      refute message =~ "script error:"
+
       # The sandbox is usable immediately afterwards.
       assert {:ok, %{"shouted" => "OK!"}} = run(~S|return {shouted = myapp.shout("ok")}|)
+    end
+
+    test "a raising host API is just as legible from a signing callback" do
+      put_sandbox_config(apis: [AshIntegration.Test.LuaAPI])
+
+      assert {:error, message} =
+               Lua.sign_session(
+                 ~S|function string_to_sign(ctx) return myapp.explode("on purpose") end|,
+                 Lua.default_limits(),
+                 fn call -> call.("string_to_sign", %{"body" => "payload"}) end
+               )
+
+      assert message =~ "host API blew up: on purpose"
+      refute message =~ "ArgumentError"
+      refute message =~ "signing callback error:"
     end
   end
 
@@ -149,6 +172,29 @@ defmodule AshIntegration.LuaHostAPIsTest do
     end
   end
 
+  describe "two host scopes that collide with each other" do
+    test "the LAST entry wins and replaces the earlier one wholesale" do
+      put_sandbox_config(apis: [AshIntegration.Test.LuaAPI, AshIntegration.Test.ShoutingLuaAPI])
+
+      # `shout/1` is defined by both — the last entry's implementation is the live one.
+      assert {:ok, %{"shouted" => "((hi))"}} = run(~S|return {shouted = myapp.shout("hi")}|)
+
+      # ...and everything else the earlier module defined is gone, because the
+      # scope table was reset rather than merged into.
+      assert {:error, message} = run(~S|return {p = myapp.tenant_path("acme", "42")}|)
+      assert message =~ "undefined function"
+    end
+
+    test "order decides which survives" do
+      put_sandbox_config(apis: [AshIntegration.Test.ShoutingLuaAPI, AshIntegration.Test.LuaAPI])
+
+      assert {:ok, %{"shouted" => "HI!"}} = run(~S|return {shouted = myapp.shout("hi")}|)
+
+      assert {:ok, %{"p" => "/t/acme/orders/42"}} =
+               run(~S|return {p = myapp.tenant_path("acme", "42")}|)
+    end
+  end
+
   describe "boot check" do
     import ExUnit.CaptureLog
 
@@ -172,6 +218,36 @@ defmodule AshIntegration.LuaHostAPIsTest do
       # The functions that actually disappear, not a hand-written list.
       assert log =~ "datetime.to_zone"
       assert log =~ "datetime.format"
+    end
+
+    test "warns that two host entries share a scope, naming what is lost" do
+      put_sandbox_config(apis: [AshIntegration.Test.LuaAPI, AshIntegration.Test.ShoutingLuaAPI])
+
+      log = capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end)
+
+      assert log =~ "ShoutingLuaAPI"
+      assert log =~ "LuaAPI"
+      assert log =~ ~s(claim the Lua scope "myapp")
+      # The functions the winner does NOT redefine are the ones that disappear.
+      assert log =~ "myapp.tenant_path"
+      assert log =~ "myapp.explode"
+      # `shout/1` is redefined by the winner, so it is still callable.
+      refute log =~ "myapp.shout"
+    end
+
+    test "says so when the winner redefines every shadowed name" do
+      put_sandbox_config(apis: [AshIntegration.Test.ShoutingLuaAPI, AshIntegration.Test.LuaAPI])
+
+      log = capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end)
+
+      assert log =~ "No functions disappear"
+      assert log =~ "implementations replace theirs"
+    end
+
+    test "listing the same module twice is not a collision" do
+      put_sandbox_config(apis: [AshIntegration.Test.LuaAPI, AshIntegration.Test.LuaAPI])
+
+      assert capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end) == ""
     end
 
     test "stays quiet for a valid configuration" do

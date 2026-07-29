@@ -714,11 +714,16 @@ config :ash_integration,
   lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]   # modules that `use Lua.API`
 ```
 
-Built-ins load first, host modules after — so a host module whose scope collides
-with a built-in's **replaces it entirely** (`Lua.load_api/2` resets the scope table
-rather than merging), removing every function that built-in defined for all scripts
-on the node. Occasionally intended, usually an accidental name clash, so it is
-logged at boot alongside an entry that isn't a `Lua.API` module at all.
+Built-ins load first, host modules after, in configured order — so a scope collision
+**replaces the earlier module entirely** (`Lua.load_api/2` resets the scope table
+rather than merging), removing every function that module defined for all scripts on
+the node. That applies both when a host scope claims a built-in's and when two host
+entries claim each other's, where `:apis` order decides and the last one wins.
+Occasionally intended, usually an accidental name clash, so both are logged at boot
+alongside an entry that isn't a `Lua.API` module at all.
+
+A host API that raises parks the delivery with that exception's **message** in
+`last_error` — whatever it raises, not only `Lua`'s own exception structs.
 
 Three properties keep this inside the threat model:
 
