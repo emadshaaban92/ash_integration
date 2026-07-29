@@ -17,4 +17,23 @@ defmodule AshIntegration.Test.LuaAPI do
   deflua tenant_path(tenant, id) do
     "/t/" <> to_string(tenant) <> "/orders/" <> to_string(id)
   end
+
+  deflua explode(reason) do
+    raise ArgumentError, "host API blew up: #{reason}"
+  end
+end
+
+defmodule AshIntegration.Test.CollidingLuaAPI do
+  @moduledoc """
+  A host API that claims the built-in `datetime` scope. `Lua.load_api/2` resets a
+  scope table rather than merging into it, so loading this REPLACES the built-in
+  outright — the case `warn_about_host_apis/0` flags at boot.
+  """
+
+  use Lua.API, scope: "datetime"
+
+  deflua epoch_day(iso8601) do
+    {:ok, datetime, _offset} = DateTime.from_iso8601(to_string(iso8601))
+    datetime |> DateTime.to_date() |> Date.to_gregorian_days()
+  end
 end

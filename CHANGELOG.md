@@ -219,7 +219,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an API global affects only its own run. An `:apis` entry that isn't a `Lua.API`
   module is warned about at boot and then parks **every** transform and signing
   run on the node — APIs load into the state before the author's script does, so
-  a script that touches none of them fails too.
+  a script that touches none of them fails too. Built-ins load first and a host
+  scope that collides with one **replaces it entirely** (`Lua.load_api/2` resets
+  the scope table rather than merging), which the same boot check flags, naming
+  the functions that disappear.
 - Telemetry for three outbound state changes that were previously uninstrumented,
   each emitted at the site where the state changes (a reprocess re-park re-emits;
   a cancelled/suppressed delivery never emits `:delivered`):

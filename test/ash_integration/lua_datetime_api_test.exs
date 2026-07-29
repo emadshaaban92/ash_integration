@@ -127,6 +127,13 @@ defmodule AshIntegration.LuaDatetimeAPITest do
       assert message =~ "invalid format string"
     end
 
+    test "a non-string format string raises" do
+      assert {:error, message} =
+               run(~S|return {at = datetime.format("2024-06-15T10:30:00Z", "Etc/UTC", 5)}|)
+
+      assert message =~ "expected a format string"
+    end
+
     test "non-string arguments raise" do
       assert {:error, message} = run(~S|return {at = datetime.to_zone(1718447400, "Etc/UTC")}|)
       assert message =~ "expected an ISO-8601 timestamp string"

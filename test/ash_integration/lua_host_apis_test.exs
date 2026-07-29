@@ -111,6 +111,42 @@ defmodule AshIntegration.LuaHostAPIsTest do
 
       assert message =~ "could not load the configured Lua host APIs"
     end
+
+    test "a raising host API surfaces its message and parks, like the built-in does" do
+      put_sandbox_config(apis: [AshIntegration.Test.LuaAPI])
+
+      assert {:error, message} = run(~S|return {x = myapp.explode("on purpose")}|)
+      assert message =~ "host API blew up: on purpose"
+
+      # The sandbox is usable immediately afterwards.
+      assert {:ok, %{"shouted" => "OK!"}} = run(~S|return {shouted = myapp.shout("ok")}|)
+    end
+  end
+
+  describe "a host scope that collides with a built-in" do
+    test "REPLACES the built-in wholesale rather than merging with it" do
+      put_sandbox_config(apis: [AshIntegration.Test.CollidingLuaAPI])
+
+      # The host's own function is there...
+      assert {:ok, %{"day" => day}} =
+               run(~S|return {day = datetime.epoch_day("2024-06-15T10:30:00Z")}|)
+
+      assert is_number(day)
+
+      # ...and the built-in's are gone, because `Lua.load_api/2` resets the scope
+      # table. This is the behaviour the boot check warns about.
+      assert {:error, message} =
+               run(~S|return {at = datetime.to_zone("2024-06-15T10:30:00Z", "Africa/Cairo")}|)
+
+      assert message =~ "undefined function"
+    end
+
+    test "the built-in is intact again once the colliding API is unconfigured" do
+      put_sandbox_config([])
+
+      assert {:ok, %{"at" => "2024-06-15T13:30:00+03:00"}} =
+               run(~S|return {at = datetime.to_zone("2024-06-15T10:30:00Z", "Africa/Cairo")}|)
+    end
   end
 
   describe "boot check" do
@@ -119,23 +155,35 @@ defmodule AshIntegration.LuaHostAPIsTest do
     test "warns about an unloadable :apis entry" do
       put_sandbox_config(apis: [NotQuiteALuaAPI, NoSuchModuleAtAll])
 
-      log = capture_log(fn -> assert :ok = Lua.warn_if_host_apis_invalid() end)
+      log = capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end)
 
       assert log =~ "NotQuiteALuaAPI"
       assert log =~ "NoSuchModuleAtAll"
       assert log =~ "use Lua.API"
     end
 
+    test "warns that a colliding scope replaces the built-in, naming what is lost" do
+      put_sandbox_config(apis: [AshIntegration.Test.CollidingLuaAPI])
+
+      log = capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end)
+
+      assert log =~ "CollidingLuaAPI"
+      assert log =~ "REPLACES"
+      # The functions that actually disappear, not a hand-written list.
+      assert log =~ "datetime.to_zone"
+      assert log =~ "datetime.format"
+    end
+
     test "stays quiet for a valid configuration" do
       put_sandbox_config(apis: [AshIntegration.Test.LuaAPI])
 
-      assert capture_log(fn -> assert :ok = Lua.warn_if_host_apis_invalid() end) == ""
+      assert capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end) == ""
     end
 
     test "stays quiet when no :apis are configured" do
       put_sandbox_config(timeout_ms: 5_000)
 
-      assert capture_log(fn -> assert :ok = Lua.warn_if_host_apis_invalid() end) == ""
+      assert capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end) == ""
     end
   end
 

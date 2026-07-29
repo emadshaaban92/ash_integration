@@ -714,6 +714,12 @@ config :ash_integration,
   lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]   # modules that `use Lua.API`
 ```
 
+Built-ins load first, host modules after — so a host module whose scope collides
+with a built-in's **replaces it entirely** (`Lua.load_api/2` resets the scope table
+rather than merging), removing every function that built-in defined for all scripts
+on the node. Occasionally intended, usually an accidental name clash, so it is
+logged at boot alongside an entry that isn't a `Lua.API` module at all.
+
 Three properties keep this inside the threat model:
 
 - **Host APIs must be pure computation** — no I/O, no network, no filesystem.

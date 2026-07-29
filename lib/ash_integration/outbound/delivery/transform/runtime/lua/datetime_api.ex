@@ -27,6 +27,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI do
   holds and exposes no "now". The sandbox stays deterministic — the same event
   re-run through `reprocess` renders the same string.
 
+  `to_zone/2` preserves whatever precision the input carries, so a DB-sourced
+  `event.created_at` renders as `"2024-06-15T13:30:00.123456+03:00"`, microseconds
+  and all. Use `format/3` when you want a specific shape on the wire.
+
   ## Which time-zone database
 
   Zones resolve through whatever `Calendar.TimeZoneDatabase` the **host
@@ -128,7 +132,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI do
   defp strftime(datetime, fmt) when is_binary(fmt) do
     {:ok, Calendar.strftime(datetime, fmt)}
   rescue
-    e -> {:error, "invalid format string #{inspect(fmt)}: #{Exception.message(e)}"}
+    # What `Calendar.strftime/2` raises for a bad directive — narrow, so a genuine
+    # Calendar bug isn't misattributed to the operator's format string.
+    e in [ArgumentError, KeyError] ->
+      {:error, "invalid format string #{inspect(fmt)}: #{Exception.message(e)}"}
   end
 
   defp strftime(_datetime, fmt),

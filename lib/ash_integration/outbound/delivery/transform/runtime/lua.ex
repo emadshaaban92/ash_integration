@@ -68,6 +68,13 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       config :ash_integration,
         lua_sandbox: [apis: [MyApp.Integration.LuaAPI]]
 
+  Built-ins load first, host modules after. **A host scope that collides with a
+  built-in's replaces it entirely** — `Lua.load_api/2` resets the scope table
+  rather than merging into it, so a host module scoped `datetime` removes
+  `datetime.to_zone`/`datetime.format` for every script on the node. That is
+  occasionally what a host wants; far more often it's an accidental name clash,
+  so `warn_about_host_apis/0` flags it at boot.
+
   Three properties hold this together:
 
   - **Host APIs must be pure computation** — no I/O, no network, no filesystem.
@@ -150,32 +157,79 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   @builtin_apis [DatetimeAPI]
 
   @doc """
-  Boot check (from `AshIntegration.Supervisor`): warn about any
-  `lua_sandbox: [apis: …]` entry that isn't a loadable `Lua.API` module.
+  Boot check (from `AshIntegration.Supervisor`): warn about a
+  `lua_sandbox: [apis: …]` entry that isn't a loadable `Lua.API` module, or that
+  claims a built-in's scope and so replaces it.
 
-  Without this, a typo'd module name is invisible until the first transform runs
-  and parks — legible, but a production surprise. It **warns rather than raises**,
-  following `AshIntegration.Outbound.PoolCheck`: refusing the host's boot over a
+  Both failures are otherwise invisible until a transform runs — the first parks
+  every delivery, the second silently removes functions scripts were calling.
+  This **warns rather than raises**, following
+  `AshIntegration.Outbound.PoolCheck`: refusing the host's boot over a
   transform-sandbox setting is a heavier failure than the one it prevents, and a
-  node that never runs a transform is unaffected. Every run still validates, so a
-  bad entry parks the delivery with the same message rather than slipping through.
+  node that never runs a transform is unaffected. Every run still validates a
+  module before loading it, so a bad entry parks with the same message rather
+  than slipping through.
   """
-  @spec warn_if_host_apis_invalid() :: :ok
-  def warn_if_host_apis_invalid do
-    case Enum.reject(configured_apis(), &lua_api_module?/1) do
-      [] ->
-        :ok
+  @spec warn_about_host_apis() :: :ok
+  def warn_about_host_apis do
+    configured = configured_apis()
+    {loadable, unloadable} = Enum.split_with(configured, &lua_api_module?/1)
 
-      invalid ->
-        Logger.warning("""
-        AshIntegration: #{Enum.map_join(invalid, ", ", &inspect/1)} #{if length(invalid) == 1, do: "is not a", else: "are not"} Lua API module#{if length(invalid) == 1, do: "", else: "s"}.
+    warn_unloadable(unloadable)
+    warn_shadowed_builtins(Enum.flat_map(loadable, &shadowed_builtin/1))
 
-        Every entry in `config :ash_integration, lua_sandbox: [apis: [...]]` must be a
-        module that does `use Lua.API`. As configured, EVERY transform and custom
-        signing run on this node will park with a load error.
-        """)
+    :ok
+  end
 
-        :ok
+  defp warn_unloadable([]), do: :ok
+
+  defp warn_unloadable(modules) do
+    Logger.warning("""
+    AshIntegration: these `config :ash_integration, lua_sandbox: [apis: [...]]` entries \
+    are not Lua API modules: #{Enum.map_join(modules, ", ", &inspect/1)}.
+
+    Every entry must be a module that does `use Lua.API`. As configured, EVERY transform
+    and custom signing run on this node will park with a load error — the APIs load into
+    the sandbox before the author's script does, so even a script that calls none of them
+    fails.
+    """)
+  end
+
+  defp warn_shadowed_builtins([]), do: :ok
+
+  defp warn_shadowed_builtins(collisions) do
+    for {module, builtin, scope} <- collisions do
+      Logger.warning("""
+      AshIntegration: #{inspect(module)} claims the Lua scope #{inspect(scope)}, which \
+      REPLACES the built-in #{inspect(builtin)} entirely.
+
+      `Lua.load_api/2` overwrites the scope table rather than merging into it, so these \
+      built-in functions are gone for every transform and signing run on this node: \
+      #{scoped_names(builtin, scope)}. A script still calling one fails with an \
+      undefined-function error.
+
+      Rename your scope unless replacing the built-in outright is what you intended.
+      """)
+    end
+
+    :ok
+  end
+
+  # `[{name, with_state?, variadic?}, …]` — what `use Lua.API` records for a module.
+  defp scoped_names(builtin, scope) do
+    Enum.map_join(builtin.__lua_functions__(), ", ", fn {name, _state?, _variadic?} ->
+      "#{scope}.#{name}"
+    end)
+  end
+
+  defp shadowed_builtin(module) do
+    scope = module.scope()
+
+    case Enum.find(@builtin_apis, &(&1.scope() == scope)) do
+      # A host listing a built-in explicitly just loads it twice — harmless.
+      nil -> []
+      ^module -> []
+      builtin -> [{module, builtin, Enum.join(scope, ".")}]
     end
   end
 
@@ -439,7 +493,14 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   defp new_state do
     {:ok, Enum.reduce(host_apis(), Lua.new(), &load_host_api/2)}
   rescue
-    e -> {:error, "could not load the configured Lua host APIs: #{Exception.message(e)}"}
+    # The only thing `load_host_api/2` itself raises — attribute it precisely.
+    e in ArgumentError ->
+      {:error, "could not load the configured Lua host APIs: #{Exception.message(e)}"}
+
+    # Anything else (a module's `install/3`, `Lua.new/0`) is a different failure and
+    # shouldn't be reported as a bad `:apis` config.
+    e ->
+      {:error, "could not build the transform sandbox: #{Exception.message(e)}"}
   end
 
   # Gate on `__lua_functions__/0` — the function `Lua.load_api/2` actually needs,
@@ -511,8 +572,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   defp sandbox_config,
     do: Keyword.get(Application.get_all_env(:ash_integration), :lua_sandbox, [])
 
-  # The built-ins always load; host-configured APIs load after them (so a host
-  # can deliberately override a built-in scope with its own).
+  # The built-ins always load; host-configured APIs load after them. A host scope
+  # that collides with a built-in's therefore REPLACES it wholesale (`Lua.load_api/2`
+  # resets the scope table rather than merging), which `warn_about_host_apis/0`
+  # surfaces at boot because the far likelier cause is an accidental name clash.
   defp host_apis, do: @builtin_apis ++ configured_apis()
 
   defp configured_apis, do: List.wrap(Keyword.get(sandbox_config(), :apis, []))

@@ -123,6 +123,14 @@ config :ash_integration,
   actor_resource: Example.Accounts.User,
   vault: Example.Vault
 
+# The Lua transform sandbox exposes a built-in `datetime` host API
+# (`datetime.to_zone/2`, `datetime.format/3`) that resolves zones through the
+# HOST's Calendar time-zone database. AshIntegration deliberately ships none, so
+# a host app picks one — this is that choice, and without it every transform
+# calling `datetime` (including from the dashboard's transform preview) parks
+# with `utc_only_time_zone_database`.
+config :elixir, :time_zone_database, Tz.TimeZoneDatabase
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"
