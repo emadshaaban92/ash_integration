@@ -3,6 +3,7 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
   use Spark.Dsl.Transformer
 
   alias Ash.Resource.{Dsl, Info}
+  alias Ash.Resource.Preparation.Builtins, as: Preparations
   alias Spark.Dsl.Transformer
 
   @impl true
@@ -275,7 +276,7 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
 
       prepare =
         Transformer.build_entity!(Dsl, [:actions, :read], :prepare,
-          preparation: {Ash.Resource.Preparation.Build, [sort: [id: :desc]]}
+          preparation: Preparations.build(sort: [id: :desc])
         )
 
       pagination =
@@ -308,7 +309,7 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
 
       prepare =
         Transformer.build_entity!(Dsl, [:actions, :read], :prepare,
-          preparation: {Ash.Resource.Preparation.Build, [sort: [id: :desc]]}
+          preparation: Preparations.build(sort: [id: :desc])
         )
 
       pagination =

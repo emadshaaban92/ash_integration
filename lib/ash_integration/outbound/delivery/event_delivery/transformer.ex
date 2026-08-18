@@ -3,6 +3,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
   use Spark.Dsl.Transformer
 
   alias Ash.Resource.{Change, Dsl, Info}
+  alias Ash.Resource.Preparation.Builtins, as: Preparations
   alias Spark.Dsl.Transformer
 
   # `:parked` is a build-failure state: the immutable Event exists, but `project`
@@ -383,7 +384,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
 
       prepare =
         Transformer.build_entity!(Dsl, [:actions, :read], :prepare,
-          preparation: {Ash.Resource.Preparation.Build, [sort: [id: :desc]]}
+          preparation: Preparations.build(sort: [id: :desc])
         )
 
       pagination =
@@ -413,7 +414,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
     else
       prepare =
         Transformer.build_entity!(Dsl, [:actions, :read], :prepare,
-          preparation: {Ash.Resource.Preparation.Build, [sort: [id: :desc]]}
+          preparation: Preparations.build(sort: [id: :desc])
         )
 
       pagination =
@@ -456,7 +457,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
 
       prepare =
         Transformer.build_entity!(Dsl, [:actions, :read], :prepare,
-          preparation: {Ash.Resource.Preparation.Build, [sort: [id: :asc]]}
+          preparation: Preparations.build(sort: [id: :asc])
         )
 
       {:ok, action} =

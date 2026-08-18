@@ -269,6 +269,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The default sort on every injected browse action is no longer silently
+  dropped.** The `:index`, `:for_subscription`, and `:parked` read actions
+  injected by the Connection / Event / EventDelivery / Log / Subscription
+  transformers declared `sort: [id: :desc]` (`[id: :asc]` for `:parked`) as a
+  *flat* keyword list on `Ash.Resource.Preparation.Build`. That builtin reads
+  `opts[:options]`, so the sort was discarded with no error and no warning, and
+  every one of those actions returned rows in arbitrary order. Because `:index`
+  and `:for_subscription` are keyset/offset paginated, this was more than a
+  display bug: paging an unordered query can repeat or skip rows, so the
+  delivery / log / event browsers could lose rows between pages, and a
+  subscription's "Recent deliveries" pane could omit the newest delivery
+  entirely. All eight sites now build the preparation with
+  `Ash.Resource.Preparation.Builtins.build/1`, which nests the options
+  correctly. `:parked` remains ascending (oldest-first replay) by design.
+
 - **SMTP STARTTLS with `verify: :verify_peer` (the default) no longer fails the
   handshake with `bad_certificate`.** gen_smtp upgrades a plaintext connection by
   calling `ssl:connect/3` on the existing socket without setting

@@ -3,6 +3,7 @@ defmodule AshIntegration.Connection.Transformer do
   use Spark.Dsl.Transformer
 
   alias Ash.Resource.{Change, Dsl, Info}
+  alias Ash.Resource.Preparation.Builtins, as: Preparations
   alias Spark.Dsl.Transformer
 
   @impl true
@@ -434,7 +435,7 @@ defmodule AshIntegration.Connection.Transformer do
 
       prepare =
         Transformer.build_entity!(Dsl, [:actions, :read], :prepare,
-          preparation: {Ash.Resource.Preparation.Build, [sort: [id: :desc]]}
+          preparation: Preparations.build(sort: [id: :desc])
         )
 
       {:ok, action} =
