@@ -104,6 +104,46 @@ defmodule Example.Outbound.EventDispatchTest do
     assert Enum.count(events_for(s1), &(&1.state == :pending)) == 2
   end
 
+  test "one batched coalesce UPDATE settles multiple lanes: one coalesces while a parked-frozen lane stays intact",
+       %{connection: dest} do
+    # Two `widget.updated` lanes fan out from the SAME batch: create + update with NO
+    # drain between, so both events are still undispatched and one drain dispatches
+    # them together (one `after_batch` → one set-based coalesce UPDATE). One lane
+    # coalesces normally; the other has a parked occurrence that must FREEZE its
+    # coalescing. Both are resolved by the single UPDATE — the case the old
+    # per-delivery loop couldn't get wrong but the multi-lane join now can (cross-lane
+    # bleed, or a freeze that leaks past its own lane).
+    coalescing = create_subscription!(dest, "widget.updated")
+
+    # This transform errors (→ parked) ONLY on the stock == 99 occurrence, so this one
+    # subscription yields a pending sibling AND a parked sibling on the same lane.
+    frozen =
+      create_subscription!(dest, "widget.updated",
+        transform_source:
+          "function transform(event, defaults) if event.data.stock == 99 then error('boom') end return defaults end"
+      )
+
+    widget = create_widget!(%{name: "w", stock: 1})
+    update_widget!(widget, %{stock: 99})
+    # Both events are undispatched → a single drain fans them out in ONE batch.
+    drain_dispatch!()
+
+    # The plain lane coalesces: the older (create) pending is superseded by the newer
+    # (update) → exactly one pending, one cancelled.
+    coalescing_events = events_for(coalescing)
+    assert Enum.count(coalescing_events, &(&1.state == :pending)) == 1
+    assert Enum.count(coalescing_events, &(&1.state == :cancelled)) == 1
+
+    # The frozen lane keeps BOTH its earlier pending and its parked occurrence: the
+    # parked sibling freezes coalescing, so nothing is cancelled even though a newer
+    # sibling exists. A cross-lane bleed from the coalescing lane would wrongly cancel
+    # the pending here.
+    frozen_events = events_for(frozen)
+    assert Enum.count(frozen_events, &(&1.state == :pending)) == 1
+    assert Enum.count(frozen_events, &(&1.state == :parked)) == 1
+    assert Enum.count(frozen_events, &(&1.state == :cancelled)) == 0
+  end
+
   test "a transform that errors parks the event (parked state, nil payload, last_error)",
        %{connection: dest} do
     # Seed past the save-time smoke gate (it now rejects a script that raises on
