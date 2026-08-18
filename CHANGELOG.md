@@ -284,6 +284,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Ash.Resource.Preparation.Builtins.build/1`, which nests the options
   correctly. `:parked` remains ascending (oldest-first replay) by design.
 
+- **The subscription list on a connection is ordered.** Subscription's injected
+  `:for_connection` read declared no sort at all, so the subscriptions pane on
+  `/integrations/connections/:id` rendered them in whatever order Postgres
+  returned. It now sorts `id: :desc` like the other injected browse actions.
+
 - **SMTP STARTTLS with `verify: :verify_peer` (the default) no longer fails the
   handshake with `bad_certificate`.** gen_smtp upgrades a plaintext connection by
   calling `ssl:connect/3` on the existing socket without setting
