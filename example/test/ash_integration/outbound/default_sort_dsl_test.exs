@@ -9,7 +9,8 @@ defmodule Example.Outbound.DefaultSortDslTest do
   so a hand-built `{Ash.Resource.Preparation.Build, [sort: [id: :desc]]}` — the FLAT
   keyword shape — is a silent no-op: no sort, no error, no warning. Every transformer
   must nest its options (`Ash.Resource.Preparation.Builtins.build/1` builds that shape),
-  or the `:index` / `:for_subscription` / `:parked` panes render an arbitrary slice.
+  or the `:index` / `:for_subscription` / `:parked` / `:for_connection` panes render an
+  arbitrary slice.
 
   This asserts BOTH halves so the bug cannot come back through either door:
 
@@ -35,7 +36,8 @@ defmodule Example.Outbound.DefaultSortDslTest do
     {EventDelivery, :parked, %{connection_id: Ash.UUID.generate()}, [id: :asc]},
     {Log, :index, %{}, [id: :desc]},
     {Log, :for_subscription, %{subscription_id: Ash.UUID.generate()}, [id: :desc]},
-    {Subscription, :index, %{}, [id: :desc]}
+    {Subscription, :index, %{}, [id: :desc]},
+    {Subscription, :for_connection, %{connection_id: Ash.UUID.generate()}, [id: :desc]}
   ]
 
   for {resource, action, args, expected} <- @browse_actions do

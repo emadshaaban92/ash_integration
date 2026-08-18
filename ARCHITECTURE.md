@@ -115,15 +115,21 @@ them; if you must change one, update this list and the relevant design doc.
     `Log` (not a hot-row `consecutive_failures` counter), with park-on-suspend to
     free capacity and a bounded probe for automatic recovery. See
     `design/connection-health.md`.
-11. **Every injected browse action carries an explicit `id` sort.** The
-    transformer-injected `:index` / `:for_subscription` / `:parked` reads declare
-    `keyset?: true` — and paginating an *unordered* query repeats or skips rows
-    between pages, so the sort is correctness, not presentation. `id` is the sort
-    key (a DB-minted UUIDv7: time-ordered *and* unique, unlike `created_at`);
-    `:parked` is ascending on purpose (oldest-first replay), everything else
-    descending. Declare it with `Ash.Resource.Preparation.Builtins.build/1`, never a
-    hand-built `{Ash.Resource.Preparation.Build, [...]}` tuple — `Build.prepare/3`
-    reads `opts[:options]`, so a flat keyword list is a *silent* no-op. Guarded by
+11. **Every injected browse action carries an explicit `id` sort.** That is the
+    transformer-injected `:index`, `:for_subscription`, `:parked`, and
+    `:for_connection` reads — every injected read except the `:by_id` gets. For the
+    paginated ones (`:index` and `:for_subscription` declare `keyset?: true,
+    offset?: true`) the sort is *correctness*, not presentation: paging an
+    *unordered* query repeats or skips rows between pages. `:parked` and
+    `:for_connection` are unpaginated, and sort for a deterministic replay/display
+    order. `id` is the sort key everywhere (a DB-minted UUIDv7: time-ordered *and*
+    unique, unlike `created_at`); `:parked` is ascending on purpose (oldest-first
+    replay), everything else descending. Callers rely on the action default rather
+    than re-sorting at the call site — a second `Ash.Query.sort/2` only appends a
+    duplicate key. Declare it with `Ash.Resource.Preparation.Builtins.build/1`,
+    never a hand-built `{Ash.Resource.Preparation.Build, [...]}` tuple —
+    `Build.prepare/3` reads `opts[:options]`, so a flat keyword list is a *silent*
+    no-op. Guarded by
     `example/test/ash_integration/outbound/default_sort_dsl_test.exs`.
 
 ## Design docs — the *why* (read before non-trivial changes)

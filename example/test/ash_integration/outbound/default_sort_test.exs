@@ -118,14 +118,30 @@ defmodule Example.Outbound.DefaultSortTest do
     acc = acc ++ Enum.map(page.results, & &1.id)
 
     case Ash.page(page, :next) do
-      {:ok, %{results: []}} -> acc
-      {:ok, next} -> collect_pages(next, acc)
-      {:error, _} -> acc
+      {:ok, %{results: []}} ->
+        acc
+
+      {:ok, next} ->
+        collect_pages(next, acc)
+
+      # Never swallow this: a truncated page walk would surface as a bogus
+      # "rows lost across pages" diff instead of the real pagination error.
+      {:error, reason} ->
+        flunk("paging failed after #{length(acc)} row(s): #{inspect(reason)}")
     end
   end
 
-  defp strictly_descending?(ids), do: ids == ids |> Enum.sort() |> Enum.reverse()
-  defp strictly_ascending?(ids), do: ids == Enum.sort(ids)
+  # Strict, not merely "sorted": `Enum.sort/1` is stable and admits duplicates,
+  # so comparing against a sorted copy would pass a list that repeats a row —
+  # exactly the failure the page-walk tests exist to catch.
+  defp strictly_descending?(ids), do: strictly_ordered?(ids, &Kernel.>/2)
+  defp strictly_ascending?(ids), do: strictly_ordered?(ids, &Kernel.</2)
+
+  defp strictly_ordered?(ids, compare) do
+    ids
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.all?(fn [a, b] -> compare.(a, b) end)
+  end
 
   defp create_connection!(owner) do
     Connection
