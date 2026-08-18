@@ -110,6 +110,10 @@ defmodule Example.DataCase do
       :delivered_at,
       delivered_at_for(state, o)
     )
+    # A terminal (`:permanent`/`:expired`) verdict on a `:failed` row — set by the
+    # failure path, not the `:create` action, so force it in for tests that need a
+    # genuinely terminal delivery. Nil (the common case) otherwise.
+    |> Ash.Changeset.force_change_attribute(:terminal_reason, Map.get(o, :terminal_reason))
     |> Ash.create!(authorize?: false)
   end
 

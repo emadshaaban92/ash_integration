@@ -12,6 +12,23 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
 
   @statuses ~w(success failed skipped suppressed)
 
+  # Lean projection for the list: only the columns the table + status badge render,
+  # plus `connection_id` (the source field the `:connection` load needs). Without an
+  # explicit select, Ash returns all attributes, hydrating the TOAST-able
+  # `request_payload` (:map) and `response_body` (:string) blobs on every one of the
+  # 20 rows/page — bytes only shown on the /logs/:id page, that also sit in the
+  # LiveView socket for the mount's life. New columns/badges must be added here.
+  @list_fields [
+    :id,
+    :status,
+    :event_type,
+    :response_status,
+    :error_message,
+    :duration_ms,
+    :created_at,
+    :connection_id
+  ]
+
   # Time-window options for the `since` filter. The keys double as the deep-link
   # param carried by the dashboard's "(24h)" tiles (`?since=24h`), so the drill-down
   # lands time-boxed to exactly the window the tile counted. Ordered list (not a map)
@@ -52,7 +69,10 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
     query =
       AshIntegration.delivery_log_resource()
       |> Ash.Query.for_read(:index, %{}, actor: actor)
-      |> Ash.Query.load(:connection)
+      |> Ash.Query.select(@list_fields)
+      # Strict load so the `:connection` join pulls only `name` (the sole rendered
+      # field) instead of the connection's full row (transport/auth config maps).
+      |> Ash.Query.load([connection: [:name]], strict?: true)
       # Newest-first by `id` (uuidv7) — the Log's canonical recency key: it matches
       # the `:index` action default and the health indexes, and being unique keeps
       # offset-pagination boundaries stable (equal-`created_at` rows can't duplicate

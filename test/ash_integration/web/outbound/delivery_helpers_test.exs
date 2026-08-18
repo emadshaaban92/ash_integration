@@ -67,6 +67,22 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.HelpersTest do
       refute Helpers.terminal?(%{state: :failed, terminal_reason: nil})
       refute Helpers.terminal?(%{state: :delivered, terminal_reason: nil})
     end
+
+    # A lean list projection that forgets to select a badge field must fail loud,
+    # not silently mislabel the row via the catch-all clause.
+    test "the badge predicates raise when a required field is unloaded" do
+      assert_raise ArgumentError, ~r/state/, fn ->
+        Helpers.parked?(%{state: %Ash.NotLoaded{}})
+      end
+
+      assert_raise ArgumentError, ~r/state/, fn ->
+        Helpers.terminal?(%{state: %Ash.NotLoaded{}})
+      end
+
+      assert_raise ArgumentError, ~r/terminal_reason/, fn ->
+        Helpers.terminal?(%{state: :failed, terminal_reason: %Ash.NotLoaded{}})
+      end
+    end
   end
 
   describe "health_badge/1" do
