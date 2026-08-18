@@ -53,11 +53,9 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
       AshIntegration.delivery_log_resource()
       |> Ash.Query.for_read(:index, %{}, actor: actor)
       |> Ash.Query.load(:connection)
-      # Newest-first by `id` (uuidv7) — the Log's canonical recency key: it matches
-      # the `:index` action default and the health indexes, and being unique keeps
-      # offset-pagination boundaries stable (equal-`created_at` rows can't duplicate
-      # or skip across pages).
-      |> Ash.Query.sort(id: :desc)
+      # Ordering comes from the `:index` action default (`id: :desc`) — see
+      # invariant 11 in ARCHITECTURE.md. Sorting again here would only append a
+      # duplicate key.
       |> apply_filter(:connection_id, f.connection)
       |> apply_filter(:event_type, f.event_type)
       |> apply_filter(:subscription_id, f.subscription)

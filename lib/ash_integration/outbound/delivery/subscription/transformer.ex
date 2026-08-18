@@ -3,6 +3,7 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
   use Spark.Dsl.Transformer
 
   alias Ash.Resource.{Change, Dsl, Info}
+  alias Ash.Resource.Preparation.Builtins, as: Preparations
   alias Spark.Dsl.Transformer
 
   @impl true
@@ -541,7 +542,7 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
 
       prepare =
         Transformer.build_entity!(Dsl, [:actions, :read], :prepare,
-          preparation: {Ash.Resource.Preparation.Build, [sort: [id: :desc]]}
+          preparation: Preparations.build(sort: [id: :desc])
         )
 
       {:ok, action} =
@@ -574,11 +575,17 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
           filter: expr(connection_id == ^arg(:connection_id))
         )
 
+      prepare =
+        Transformer.build_entity!(Dsl, [:actions, :read], :prepare,
+          preparation: Preparations.build(sort: [id: :desc])
+        )
+
       {:ok, action} =
         Transformer.build_entity(Dsl, [:actions], :read,
           name: :for_connection,
           arguments: [argument],
-          filters: [filter]
+          filters: [filter],
+          preparations: [prepare]
         )
 
       Transformer.add_entity(dsl_state, [:actions], action, type: :append)
