@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Recorded a real difference between the two Lua backends' CPU ceilings.** No
+  behaviour changes on the pinned `lua 0.4` backend; this documents (and tests)
+  what would change if a host moved to `lua 1.0`. Transform sources are
+  operator-authored but untrusted at runtime, so the difference matters:
+  - On `lua 0.4` the step budget is enforced by **killing** the process running
+    the Lua code. `pcall` cannot catch a process kill, so a runaway script always
+    parks the delivery.
+  - On `lua 1.0` it is enforced by **raising a catchable Lua error**. Total CPU is
+    still bounded (the budget is per top-level evaluation and is never refilled,
+    so catching it buys nothing), but a script can burn its whole budget, catch
+    the error, and still return a deliverable descriptor.
+  - `lua 1.0` also has **no wall-clock ceiling of its own**, so the outer `Task`
+    becomes the only one; memory moves from the luerl runner's `spawn_opts` to
+    that `Task`'s own `:max_heap_size` (already set, so the ceiling holds either
+    way). Conversely, because `lua 1.0` evaluates in-process, brutal-killing the
+    `Task` actually kills the evaluator — the `0.4` hazard where a **blocking**
+    host function leaks one unlinked runner per delivery disappears.
+  - On `lua 1.0` the runtime additionally sets `:max_call_depth` and
+    `:max_string_bytes` (from the same `Limits`), ceilings `lua 0.4` cannot
+    express, so the newer backend is bounded no less tightly.
+  - `test/ash_integration/lua_pcall_budget_test.exs` pins all of this on both
+    backends.
+
 - **TLS certificate verification is now on by default for Kafka and SMTP
   connections.** Previously a Kafka `:tls` / `:sasl_tls` connection sent
   `ssl: true` to kpro, which maps to `verify_none` (no chain or hostname check),
@@ -60,6 +83,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     grant is never sent with duplicate form fields.
 
 ### Changed
+
+- **The Lua transform runtime now runs on the stable `Lua` API and works on both
+  `lua 0.4` and `lua 1.0`.** It previously called `:luerl_sandbox.run/3` directly
+  at three sites and hand-reconstructed `%Lua{}` from a raw luerl state at four
+  more. `lua 1.0` replaced luerl with its own Elixir Lua 5.3 VM and dropped luerl
+  as a dependency, so every transform and signing run would have parked on a 1.0
+  install. Everything now goes through `Lua.new/1`, `Lua.eval!/2` and `Lua.get!/2`,
+  with the one genuinely version-specific concern — where the CPU ceiling lives —
+  isolated in
+  `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat`.
+  - **`lua 0.4` remains the pinned default.** `mix.exs` now accepts
+    `~> 0.4 or ~> 1.0`; `mix.lock` still pins `0.4`, and CI runs the full suite
+    against **both** (a second lockfile, `mix.lock.lua1`, selected via
+    `MIX_LOCKFILE` — which also redirects `deps`/`_build` to per-lockfile trees).
+  - **`:luerl` is now a declared dependency** (`optional: true`). Calling
+    `:luerl_sandbox` while declaring only `{:lua, "~> 0.4"}` was an undeclared
+    dependency; `lua 1.0` has no luerl dependency at all, so it must be declared
+    rather than leaned on transitively. Hosts on `lua 1.0` are not forced to carry
+    it.
+  - **The `lua_sandbox` CPU-budget option is now `:max_steps`** (the runtime-neutral
+    `Limits` vocabulary). `:max_reductions` named luerl's own flag, which the
+    `lua 1.0` backend has no equivalent for; it is still honoured as a deprecated
+    alias, so a host that set it keeps its configured ceiling.
 
 - **Dispatch now uses an age-based terminal model, not an attempt ceiling.** An
   undispatched `Event` no longer becomes poison after `max_attempts` claims; instead

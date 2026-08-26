@@ -50,6 +50,7 @@ transitions are documented in the README `## Architecture` section and
 | Work on scheduling / ordering / retry timing | `lib/ash_integration/outbound/delivery/scheduler.ex`, `.../delivery/changes/`, `.../delivery/validations/` |
 | Work on the delivery relay / sending | `lib/ash_integration/outbound/delivery/relay.ex`, `.../delivery/route/` |
 | Work on Lua transforms | `lib/ash_integration/outbound/delivery/transform/` (`runtime/lua.ex`, `limits.ex`, `preview.ex`) |
+| Deal with the `lua 0.4` / `lua 1.0` split (CPU budget, wall-clock, backend detection) | `lib/ash_integration/outbound/delivery/transform/runtime/lua/compat.ex` — the ONLY version-specific code; both backends run in CI (see `mix.lock.lua1` + the `lua` dimension of `.github/workflows/ci.yml`) |
 | Add or change a sandbox host API (Lua globals like `datetime`) | `lib/ash_integration/outbound/delivery/transform/runtime/lua/` (loaded by `runtime/lua.ex`; hosts add their own via `lua_sandbox: [apis: …]`) |
 | Add or change a transport | `lib/ash_integration/outbound/wire/transports/` **and** `lib/ash_integration/transport/` (config, auth, signing, TLS, adapters) |
 | Change request signing | `lib/ash_integration/transport/signing/` (+ `design/configurable-signing.md`) |
@@ -92,11 +93,21 @@ them; if you must change one, update this list and the relevant design doc.
      function that can reach outside breaks the "untrusted at runtime" model for
      every script on the node. Each execution builds a fresh sandbox state, so a
      script can only shadow them for itself. The resource budgets bound a host
-     call that **burns reductions**; one that **blocks** trips neither
-     `max_reductions` (luerl polls the runner's reduction count, which a
-     descheduled process never advances) nor `max_time`, and outlives the outer
-     `Task` kill because the runner is spawned unlinked — so it leaks a process
-     per delivery. Purity is what keeps the ceilings meaningful.
+     call that **burns CPU**; one that **blocks** defeats the step budget on
+     either backend (on `:luerl` it also escapes the wall-clock check and
+     outlives the outer `Task` kill, leaking one unlinked runner per delivery).
+     Purity is what keeps the ceilings meaningful.
+
+   - **The CPU ceiling is enforced differently on each Lua backend, and that is
+     visible to scripts.** On `lua 0.4` (`:luerl`) the budget kills the process
+     running the Lua code, so `pcall` cannot catch it and a runaway always parks
+     the delivery. On `lua 1.0` (`:lua_vm`) it raises a catchable Lua error: total
+     CPU is still bounded (the budget is per top-level evaluation and never
+     refilled), but a script can burn it, catch it, and still return a
+     deliverable descriptor. `lua 1.0` also has no wall-clock ceiling of its own,
+     so the outer `Task` is the only one. `0.4` stays the pinned default for that
+     reason; see `runtime/lua/compat.ex` and
+     `test/ash_integration/lua_pcall_budget_test.exs`.
 6. **The signature is computed fresh at send, per attempt** — recomputed over the
    exact body bytes with a send-time timestamp, so anti-replay stays honest on
    retries and secret rotation needs no reprocess.

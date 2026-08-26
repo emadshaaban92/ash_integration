@@ -1,51 +1,94 @@
 defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   @max_script_size 10_240
   @default_timeout_ms 5_000
-  # ~100M reductions ≈ a fraction of a second of runaway CPU before the kill (the
-  # luerl reduction poll is coarse, so the practical bound is "a brief spin", and
-  # the outer wall-clock backstop catches anything that slips past).
-  @default_max_reductions 100_000_000
-  # Heap+stack ceiling for the runner, in WORDS (≈8 bytes each on 64-bit, so the
-  # default is ~400MB). Exceeding it kills the runner instantly — an allocation
-  # bomb can't OOM the node while waiting for the wall-clock timeout.
+  # ~100M steps ≈ a fraction of a second of runaway CPU before the script is
+  # stopped. The unit is the backend's (BEAM reductions on `:luerl`, VM
+  # instructions on `:lua_vm`) and neither is a wall-clock measure, so the outer
+  # wall-clock backstop catches anything that slips past either way.
+  @default_max_steps 100_000_000
+  # Heap+stack ceiling in WORDS (≈8 bytes each on 64-bit, so the default is
+  # ~400MB). Exceeding it kills the process holding the heap instantly — an
+  # allocation bomb can't OOM the node while waiting for the wall-clock timeout.
   @default_max_heap_words 50_000_000
 
   @moduledoc """
   Sandboxed Lua execution environment for outbound transform scripts.
 
   This is the `:lua` implementation of the
-  `AshIntegration.Outbound.Delivery.Transform.Runtime` behaviour — the in-process,
-  luerl-backed transform engine. The resolver reaches it through that
-  behaviour (never by name), so a future runtime can slot in beside it.
+  `AshIntegration.Outbound.Delivery.Transform.Runtime` behaviour — the in-process
+  transform engine. The resolver reaches it through that behaviour (never by
+  name), so a future runtime can slot in beside it.
+
+  Everything here runs on the **stable `Lua` API** — the surface `lua 0.4.x` and
+  `lua 1.0.x` spell identically. The single genuinely version-specific concern,
+  putting a CPU ceiling on an evaluation, lives behind
+  `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat`, which also
+  decides which backend this node compiled against:
+
+  - **`:luerl`** (`lua 0.4`) — the Lua code runs in a luerl-spawned runner process.
+  - **`:lua_vm`** (`lua 1.0`) — `lua`'s own Elixir Lua 5.3 VM, evaluating
+    in-process. `lua 1.0` dropped luerl as a dependency entirely.
+
+  Nothing else in this module knows which one it is.
+
+  ## Bounding an untrusted script
 
   Transform scripts are **operator-authored but untrusted at runtime** (a typo, a
   pathological loop, or hostile event data flowing into the script). Execution is
-  bounded on three axes so one script can't take down the node:
+  bounded so one script can't take down the node:
 
-  - **Function sandboxing** (`Lua.new/0`): `io`, `os.execute`, `os.exit`,
+  - **Function sandboxing** (`Lua.new/1`): `io`, `os.execute`, `os.exit`,
     `os.getenv`, `package`, `load`, `require`, `dofile`, … all raise if called.
   - **Script size**: scripts over #{@max_script_size} bytes are rejected up front.
-  - **CPU / reductions**: a luerl `max_reductions` budget kills a runaway loop.
-  - **Memory**: a per-runner `:max_heap_size` (`spawn_opts`) kills an allocation
-    bomb the instant it exceeds the heap ceiling, before it can OOM the node.
-  - **Wall-clock**: a luerl `max_time` plus an outer `Task` backstop bound total
-    runtime.
+  - **CPU / steps**: a `max_steps` budget stops a runaway loop — by killing the
+    luerl runner on `:luerl`, by raising a Lua error on `:lua_vm`. See
+    "Where the backends differ" below; the difference is observable to a script.
+  - **Memory**: a `:max_heap_size` with `kill: true` on the process holding the
+    Lua heap kills an allocation bomb the instant it exceeds the ceiling, before
+    it can OOM the node.
+  - **Wall-clock**: an outer `Task` backstop bounds total runtime (plus, on
+    `:luerl` only, the sandbox's own `max_time` inside it).
   - **Crash isolation**: the script runs under `Task.Supervisor.async_nolink`, so
     a sandbox crash/kill surfaces as an error to the caller instead of taking the
     caller down with it.
 
   The three resource axes are expressed in the runtime-neutral
-  `AshIntegration.Outbound.Delivery.Transform.Limits` vocabulary and mapped
-  onto luerl's native flags here (`max_steps → max_reductions`,
-  `max_memory_words → :max_heap_size`, `timeout_ms → max_time`). Limits are
-  configurable (with safe defaults):
+  `AshIntegration.Outbound.Delivery.Transform.Limits` vocabulary
+  (`max_steps`, `max_memory_words`, `timeout_ms`) and mapped onto whichever
+  primitives the compiled-against backend actually offers — see `Compat`.
+  Limits are configurable (with safe defaults):
 
       config :ash_integration,
         lua_sandbox: [
           timeout_ms:     5_000,
-          max_reductions: 100_000_000,
+          max_steps:      100_000_000,
           max_heap_words: 50_000_000
         ]
+
+  `:max_reductions` is still accepted as a deprecated alias for `:max_steps`;
+  it named luerl's own flag, which the `:lua_vm` backend does not have.
+
+  ## Where the backends differ
+
+  `Compat` documents this in full; the security-relevant part belongs here too,
+  because it is a property of *this* sandbox and not an implementation detail:
+
+  - On **`:luerl`**, the step budget is enforced by **killing** the process the
+    Lua code runs in. Nothing inside Lua can observe or survive that, so a
+    runaway script always ends in `{:error, …}` and the delivery parks.
+  - On **`:lua_vm`**, it is enforced by **raising a Lua error**, which `pcall`
+    **catches**. Total CPU is still bounded (the budget is per top-level
+    evaluation and is never refilled, so the next loop back-edge re-raises), but
+    a script can burn its whole budget, catch the error, and still return a
+    normal result. The same source that parks on `:luerl` can deliver on
+    `:lua_vm`.
+
+  Two guarantees also change *where* they are enforced. `lua 1.0` has no
+  `max_time` equivalent, so on `:lua_vm` the outer `Task` is the **only**
+  wall-clock enforcement point rather than a backstop behind the sandbox's own
+  timer. And because `:lua_vm` evaluates in-process, the memory ceiling is the
+  `Task`'s own `:max_heap_size` rather than `spawn_opts` on a luerl runner — the
+  runtime sets that flag on both backends, so the ceiling holds either way.
 
   ## Host APIs
 
@@ -84,21 +127,29 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     node. Time-zone math qualifies; anything that opens a socket does not. This
     is a contract with the host, not something the runtime can enforce: a
     configured module runs with the full authority of the node.
-  - **A host function that burns CPU is inside the budget.** It is invoked by the
-    luerl *runner* process, so its reductions and its allocations count against
-    the same `max_reductions` / `:max_heap_size` ceilings as the script's own
-    work — calling one in a tight loop is bounded exactly like a tight loop of
-    Lua. A host function that **blocks**, however, escapes both: luerl's reduction
-    watchdog polls `process_info(runner, :reductions)`, and a descheduled runner
-    never advances, so it never trips `max_reductions` and never reaches the
-    `max_time` check either. Only the outer `Task` backstop returns — and because
-    the runner is spawned unlinked, brutal-killing that `Task` leaves it alive,
-    leaking one process per delivery for as long as the call blocks. This is the
+  - **A host function that burns CPU is inside the budget.** It is invoked by
+    whichever process is running the Lua code — luerl's runner on `:luerl`, the
+    `Task` itself on `:lua_vm` — so its work and its allocations count against
+    the same step and heap ceilings as the script's own: calling one in a tight
+    loop is bounded exactly like a tight loop of Lua. A host function that
+    **blocks** is the awkward case, and it is where the two backends diverge:
+
+      * On `:luerl` it escapes both budgets. The reduction watchdog polls
+        `process_info(runner, :reductions)`, and a descheduled runner never
+        advances, so it never trips the step budget and never reaches the
+        `max_time` check either. Only the outer `Task` backstop returns — and
+        because the runner is spawned *unlinked*, brutal-killing that `Task`
+        leaves it alive, leaking one process per delivery for as long as the call
+        blocks.
+      * On `:lua_vm` the evaluator *is* the `Task`, so `Task.shutdown(:brutal_kill)`
+        actually kills it and nothing leaks.
+
+    Either way a blocking host function defeats the step budget, which is the
     sharpest reason the purity rule above is a rule and not a preference.
   - **A script can shadow them, and that hurts only itself.** The APIs are loaded
     before the author's chunk, so `datetime = nil` at the top of a script is
-    legal. Every run builds a fresh `Lua.new/0` and re-loads the APIs into it, so
-    a mutated global cannot leak into the next execution — there is no state
+    legal. Every run builds a fresh state and re-loads the APIs into it, so a
+    mutated global cannot leak into the next execution — there is no state
     carried between runs to corrupt.
 
   Signing sources (`sign_session/3`) get the same APIs. That path is narrower —
@@ -152,6 +203,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   require Logger
 
   alias AshIntegration.Outbound.Delivery.Transform.Limits
+  alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat
   alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI
 
   # Always loaded, ahead of any host-configured API.
@@ -308,7 +360,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   def default_limits do
     %Limits{
       timeout_ms: timeout_ms(),
-      max_steps: max_reductions(),
+      max_steps: max_steps(),
       max_memory_words: max_heap_words()
     }
   end
@@ -330,6 +382,14 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     end
   end
 
+  # `parse_chunk/1` is one of the two places the stable API is NOT literally
+  # identical: `lua 0.4` answers `{:error, [String.t()]}`, `lua 1.0` answers
+  # `{:error, %Lua.CompilerException{}}`. Both shapes are matched here rather than
+  # in `Compat` because both clauses compile on both versions (the struct exists
+  # in each) — there is no conditional compilation to isolate. `to_string/1` on an
+  # exception struct RAISES, so the list clause alone would crash on `lua 1.0`.
+  defp format_errors(error) when is_exception(error), do: Exception.message(error)
+
   defp format_errors(errors), do: errors |> List.wrap() |> Enum.map_join("; ", &to_string/1)
 
   @impl true
@@ -340,11 +400,14 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   def execute(script, event, defaults, %Limits{} = limits) do
     task =
       Task.Supervisor.async_nolink(AshIntegration.TaskSupervisor, fn ->
-        # The luerl runner's own `:max_heap_size` only bounds script *execution*.
-        # Reading and decoding the `result` table (read_result/decode_result) runs
-        # here in the Task, after the runner returns — so a script that builds a
-        # within-budget-but-huge `result` could balloon this process's heap, outside
-        # that ceiling. Cap the Task heap too (kill: true → surfaces as `{:exit, _}`).
+        # This flag is doing two jobs. On `:lua_vm` it IS the memory ceiling —
+        # that backend evaluates in this very process. On `:luerl` the runner
+        # carries its own `:max_heap_size`, but that only bounds script
+        # *execution*: reading and decoding the `result` table
+        # (read_result/decode_result) runs here in the Task after the runner
+        # returns, so a script that builds a within-budget-but-huge `result` could
+        # balloon this process's heap outside that ceiling.
+        # (kill: true → surfaces as `{:exit, _}`.)
         Process.flag(:max_heap_size, %{
           size: limits.max_memory_words,
           kill: true,
@@ -354,16 +417,22 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
         run_sandboxed(script, event, defaults, limits)
       end)
 
-    # Outer wall-clock backstop, slightly longer than the inner luerl `max_time`
-    # so the sandbox returns its own classified resource error first. Because the
-    # task is `async_nolink`, a brutal-kill or crash here comes back as `{:exit, _}`
-    # — never propagated to (and crashing) the caller.
-    case Task.yield(task, limits.timeout_ms + 1_000) || Task.shutdown(task, :brutal_kill) do
+    # Outer wall-clock backstop. On `:luerl` it allows a grace second over the
+    # sandbox's own `max_time`, so the sandbox returns its classified resource
+    # error rather than losing the race to an opaque killed-task exit; on
+    # `:lua_vm` there is no inner timer, so this IS the wall-clock ceiling and the
+    # grace is zero (see `Compat.wall_clock_grace_ms/0`). Because the task is
+    # `async_nolink`, a brutal-kill or crash here comes back as `{:exit, _}` —
+    # never propagated to (and crashing) the caller.
+    case Task.yield(task, wall_clock_ms(limits)) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       {:exit, _reason} -> {:error, "transform sandbox crashed or was killed"}
       nil -> {:error, "script execution timed out after #{limits.timeout_ms}ms"}
     end
   end
+
+  defp wall_clock_ms(%Limits{} = limits),
+    do: limits.timeout_ms + Compat.wall_clock_grace_ms()
 
   @impl true
   def sign_session(source, %Limits{} = _limits, _orchestrate)
@@ -386,7 +455,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     # ONE wall-clock backstop for the whole signing pipeline (all callbacks share
     # it), so a pathological source can't multiply latency by the number of
     # callbacks the way per-call Tasks would.
-    case Task.yield(task, limits.timeout_ms + 1_000) || Task.shutdown(task, :brutal_kill) do
+    case Task.yield(task, wall_clock_ms(limits)) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       {:exit, _reason} -> {:error, "signing sandbox crashed or was killed"}
       nil -> {:error, "signing callbacks timed out after #{limits.timeout_ms}ms"}
@@ -410,37 +479,36 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   # Elixir pipeline) performs the keyed MAC between calls; the secret is never set
   # into the sandbox state.
   defp run_session(source, %Limits{} = limits, orchestrate) do
-    with {:ok, lua} <- new_state() do
-      compile_session(source, lua, sandbox_flags(limits), orchestrate)
+    with {:ok, lua} <- new_state(limits) do
+      compile_session(source, lua, limits, orchestrate)
     end
   rescue
     e in [Lua.RuntimeException, Lua.CompilerException] ->
       {:error, Exception.message(e)}
   end
 
-  defp compile_session(source, lua, flags, orchestrate) do
-    case :luerl_sandbox.run(source <> @detect_callbacks, flags, lua.state) do
-      {:ok, _results, state} ->
-        defined = read_defined(state)
-        orchestrate.(fn fname, ctx -> sign_call_on(state, flags, defined, fname, ctx) end)
+  defp compile_session(source, lua, %Limits{} = limits, orchestrate) do
+    case Compat.eval(lua, source <> @detect_callbacks, limits, "signing source") do
+      {:ok, lua} ->
+        defined = read_defined(lua)
+        orchestrate.(fn fname, ctx -> sign_call_on(lua, limits, defined, fname, ctx) end)
 
-      other ->
-        {:error, classify_sandbox_error(other)}
+      {:error, message} ->
+        {:error, message}
     end
   end
 
   # Invoke one already-compiled callback on the shared state. An undefined callback
-  # short-circuits to `:undefined` with no sandbox run at all.
-  defp sign_call_on(state, flags, defined, fname, ctx) do
+  # short-circuits to `:undefined` with no sandbox run at all. `lua` is the state
+  # as of compilation, so each callback starts from the same point and a mutation
+  # one callback makes cannot leak into the next.
+  defp sign_call_on(lua, %Limits{} = limits, defined, fname, ctx) do
     if MapSet.member?(defined, fname) do
-      lua = set_global(%Lua{state: state}, :__ctx, ctx)
+      lua = set_global(lua, :__ctx, ctx)
 
-      case :luerl_sandbox.run("__sign_result = #{fname}(__ctx)", flags, lua.state) do
-        {:ok, _results, state} ->
-          {:ok, {:defined, decode_result(Lua.get!(%Lua{state: state}, [:__sign_result]))}}
-
-        other ->
-          {:error, classify_sandbox_error(other)}
+      case Compat.eval(lua, "__sign_result = #{fname}(__ctx)", limits, "signing callback") do
+        {:ok, lua} -> {:ok, {:defined, decode_result(Lua.get!(lua, [:__sign_result]))}}
+        {:error, message} -> {:error, message}
       end
     else
       {:ok, :undefined}
@@ -450,8 +518,8 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       {:error, Exception.message(e)}
   end
 
-  defp read_defined(state) do
-    case Lua.get!(%Lua{state: state}, [:__sign_defined]) do
+  defp read_defined(lua) do
+    case Lua.get!(lua, [:__sign_defined]) do
       table when is_list(table) ->
         for {k, true} <- table, into: MapSet.new(), do: to_string(k)
 
@@ -460,47 +528,12 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     end
   end
 
-  defp sandbox_flags(%Limits{} = limits) do
-    %{
-      max_reductions: limits.max_steps,
-      max_time: limits.timeout_ms,
-      spawn_opts: [
-        {:max_heap_size, %{size: limits.max_memory_words, kill: true, error_logger: false}}
-      ]
-    }
-  end
-
-  defp classify_sandbox_error({:lua_error, _reason, _state} = error),
-    do: Exception.message(Lua.RuntimeException.exception(error))
-
-  defp classify_sandbox_error({:error, errors, _state}) when is_list(errors),
-    do: Exception.message(Lua.CompilerException.exception(errors))
-
-  defp classify_sandbox_error({:error, {:reductions, count}}),
-    do: "signing callback exceeded the reduction budget (killed after #{count} reductions)"
-
-  defp classify_sandbox_error({:error, :timeout}),
-    do: "signing callback timed out or exceeded its memory budget"
-
-  # A host API function that raises comes back as the exception struct itself —
-  # surface its message, not its guts. Matched on `is_exception/1` rather than the
-  # `Lua.*` structs specifically: the built-in `datetime` raises
-  # `Lua.RuntimeException` (via `Lua.API.runtime_exception!/1`), but a host module
-  # is free to raise anything, and an `inspect`ed `%ArgumentError{}` in `last_error`
-  # is exactly the illegibility this clause exists to prevent.
-  defp classify_sandbox_error({:error, exception}) when is_exception(exception),
-    do: Exception.message(exception)
-
-  defp classify_sandbox_error({:error, reason}),
-    do: "signing callback error: #{inspect(reason)}"
-
-  defp classify_sandbox_error(other), do: "signing callback error: #{inspect(other)}"
-
-  # Runs inside the async_nolink task. The actual Lua evaluation happens in a
-  # FURTHER luerl-spawned runner (carrying the reduction + heap limits); this
-  # function only builds the pre-seeded state and classifies the outcome.
+  # Runs inside the async_nolink task. This function only builds the pre-seeded
+  # state and reads the outcome back; `Compat.eval/4` is the bounded execution
+  # call (a luerl-spawned runner on `:luerl`, an in-process VM run on `:lua_vm`)
+  # and classifies every failure into one message vocabulary.
   defp run_sandboxed(script, event, defaults, %Limits{} = limits) do
-    with {:ok, lua} <- new_state() do
+    with {:ok, lua} <- new_state(limits) do
       lua =
         lua
         |> set_global(:event, event)
@@ -509,29 +542,9 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       # The author's source defines `transform`; @invoke calls it (or passes the
       # defaults through, for a no-op script) and stashes the RETURN value in the
       # bridge global we read back. Both run under the one bounded sandbox call.
-      case :luerl_sandbox.run(script <> @invoke, sandbox_flags(limits), lua.state) do
-        {:ok, _results, state} ->
-          read_result(state)
-
-        {:lua_error, _reason, _state} = error ->
-          {:error, Exception.message(Lua.RuntimeException.exception(error))}
-
-        {:error, errors, _state} when is_list(errors) ->
-          {:error, Exception.message(Lua.CompilerException.exception(errors))}
-
-        {:error, {:reductions, count}} ->
-          {:error, "script exceeded the reduction budget (killed after #{count} reductions)"}
-
-        {:error, :timeout} ->
-          {:error, "script execution timed out or exceeded its memory budget"}
-
-        # A raising host API — see `classify_sandbox_error/1` for why this matches
-        # any exception rather than only the `Lua.*` structs.
-        {:error, exception} when is_exception(exception) ->
-          {:error, Exception.message(exception)}
-
-        {:error, reason} ->
-          {:error, "script error: #{inspect(reason)}"}
+      case Compat.eval(lua, script <> @invoke, limits, "script") do
+        {:ok, lua} -> read_result(lua)
+        {:error, message} -> {:error, message}
       end
     end
   rescue
@@ -540,8 +553,8 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   end
 
   # The transform's return value (`nil` → skip the event).
-  defp read_result(state) do
-    case Lua.get!(%Lua{state: state}, [@result_global]) do
+  defp read_result(lua) do
+    case Lua.get!(lua, [@result_global]) do
       nil -> {:ok, :skip}
       result -> {:ok, decode_result(result)}
     end
@@ -549,15 +562,18 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   # A FRESH sandbox state per run, with the built-in and host-configured APIs
   # loaded into it. Nothing is carried over between runs, so a script that
-  # shadows or clobbers an API global affects only its own execution.
-  defp new_state do
-    {:ok, Enum.reduce(host_apis(), Lua.new(), &load_host_api/2)}
+  # shadows or clobbers an API global affects only its own execution. `limits`
+  # reaches `Compat.new_state/1` because on the `:lua_vm` backend the CPU ceiling
+  # is an option ON the state; on `:luerl` it rides with the execution call
+  # instead and this is a plain `Lua.new/0`.
+  defp new_state(%Limits{} = limits) do
+    {:ok, Enum.reduce(host_apis(), Compat.new_state(limits), &load_host_api/2)}
   rescue
     # The only thing `load_host_api/2` itself raises — attribute it precisely.
     e in ArgumentError ->
       {:error, "could not load the configured Lua host APIs: #{Exception.message(e)}"}
 
-    # Anything else (a module's `install/3`, `Lua.new/0`) is a different failure and
+    # Anything else (a module's `install/3`, `Lua.new/1`) is a different failure and
     # shouldn't be reported as a bad `:apis` config.
     e ->
       {:error, "could not build the transform sandbox: #{Exception.message(e)}"}
@@ -641,6 +657,17 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   defp configured_apis, do: List.wrap(Keyword.get(sandbox_config(), :apis, []))
 
   defp timeout_ms, do: Keyword.get(sandbox_config(), :timeout_ms, @default_timeout_ms)
-  defp max_reductions, do: Keyword.get(sandbox_config(), :max_reductions, @default_max_reductions)
+
+  # `:max_reductions` named luerl's own flag, which the `:lua_vm` backend has no
+  # equivalent for. `:max_steps` (the `Limits` vocabulary) is the name to use; the
+  # old key stays honoured so a host that set it keeps its configured ceiling
+  # rather than silently reverting to the default.
+  defp max_steps do
+    config = sandbox_config()
+
+    Keyword.get(config, :max_steps) || Keyword.get(config, :max_reductions) ||
+      @default_max_steps
+  end
+
   defp max_heap_words, do: Keyword.get(sandbox_config(), :max_heap_words, @default_max_heap_words)
 end

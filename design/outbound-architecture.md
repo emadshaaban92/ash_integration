@@ -563,10 +563,12 @@ rather than crashing a lane:
 - **Header control chars** — a `\r`/`\n`/C0/DEL in a transform-built header name
   or value is rejected at the resolver boundary (request-splitting + lane
   wedging).
-- **Sandbox resource limits** — the Lua run is bounded by a luerl
-  `max_reductions` budget, a per-runner `:max_heap_size`, and a wall-clock
-  `max_time`, and runs under `Task.Supervisor.async_nolink` so a crash/kill is
-  isolated from the caller (`config :ash_integration, lua_sandbox: …`).
+- **Sandbox resource limits** — the Lua run is bounded by a `max_steps` budget,
+  a `:max_heap_size` on the process holding the Lua heap, and a wall-clock
+  ceiling, and runs under `Task.Supervisor.async_nolink` so a crash/kill is
+  isolated from the caller (`config :ash_integration, lua_sandbox: …`). Where the
+  step budget and the wall-clock ceiling are actually enforced differs between
+  `lua 0.4` and `lua 1.0` — see `Runtime.Lua.Compat`.
 
 **Secret hygiene in audit rows.** The delivery log redacts secret-bearing header
 values (`authorization`, `x-signature`, …) from the snapshotted descriptor copy,

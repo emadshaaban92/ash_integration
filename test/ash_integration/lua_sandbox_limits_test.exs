@@ -4,6 +4,8 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
   use ExUnit.Case, async: false
 
   alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua
+  alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat
+  alias AshIntegration.Test.LuaBackend
 
   setup do
     original = Application.get_env(:ash_integration, :lua_sandbox)
@@ -11,7 +13,7 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
     # Small budgets so the allocation/loop bombs die quickly and cheaply.
     Application.put_env(:ash_integration, :lua_sandbox,
       timeout_ms: 1_000,
-      max_reductions: 1_000_000,
+      max_steps: 1_000_000,
       max_heap_words: 200_000
     )
 
@@ -23,6 +25,16 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
     end)
 
     :ok
+  end
+
+  # The assertions below are written in the runtime-neutral `Limits` vocabulary
+  # (`max_steps`, "step budget") and on the OBSERVABLE outcome — the delivery
+  # parks with a resource-limit message — rather than on either backend's native
+  # error tuple. Where the backends genuinely differ, there is a per-backend test
+  # (`lua_pcall_budget_test.exs`, and `backend/0` branches here), never a weakened
+  # assertion that both happen to satisfy.
+  defp resource_limit_message?(message) do
+    message =~ "step budget" or message =~ "timed out" or message =~ "killed"
   end
 
   test "an allocation-bomb transform is killed without taking down the caller" do
@@ -46,15 +58,25 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
              Lua.execute(~S|function transform(e, d) return {ok = true} end|, %{})
   end
 
-  test "a tight infinite loop is killed by the reduction budget" do
+  test "a tight infinite loop is stopped and the delivery parks" do
     bomb = ~S|function transform(e, d) while true do end end|
     assert {:error, message} = Lua.execute(bomb, %{})
-    assert is_binary(message)
-    assert message =~ "reduction" or message =~ "timed out"
+    assert resource_limit_message?(message)
+  end
+
+  test "the step budget is what stops a tight loop, and it says so" do
+    # The wall-clock backstop is a second away; the step budget is 1M. Whichever
+    # unit the backend counts in, the message an operator sees in `last_error`
+    # names the step budget.
+    assert {:error, message} =
+             Lua.execute(~S|function transform(e, d) while true do end end|, %{})
+
+    assert message =~ "script exceeded its step budget"
   end
 
   test "a host API called in a tight loop is bounded by the same budgets" do
-    # Host functions are invoked by the luerl RUNNER process, so their reductions
+    # Host functions are invoked by whichever process runs the Lua code (luerl's
+    # runner on `:luerl`, the transform Task itself on `:lua_vm`), so their work
     # and allocations count against the script's ceilings — an operator can't use
     # `datetime` to buy unbounded work.
     bomb = ~S"""
@@ -69,7 +91,7 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
     """
 
     assert {:error, message} = Lua.execute(bomb, %{})
-    assert message =~ "reduction" or message =~ "timed out" or message =~ "killed"
+    assert resource_limit_message?(message)
   end
 
   test "a legitimate transform still runs under the tightened budgets" do
@@ -78,5 +100,64 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
                ~S|function transform(event, d) return {doubled = event.n * 2} end|,
                %{"n" => 42}
              )
+  end
+
+  test "a signing callback that runs away parks the whole session" do
+    source = ~S|function string_to_sign(ctx) while true do end end|
+
+    assert {:error, message} =
+             Lua.sign_session(source, Lua.default_limits(), fn call ->
+               call.("string_to_sign", %{"body" => "payload"})
+             end)
+
+    assert resource_limit_message?(message)
+  end
+
+  describe "config" do
+    test ":max_steps sets the step budget" do
+      Application.put_env(:ash_integration, :lua_sandbox, max_steps: 12_345)
+      assert Lua.default_limits().max_steps == 12_345
+    end
+
+    test ":max_reductions is still honoured as the deprecated alias" do
+      # It named luerl's own flag, which the `:lua_vm` backend has no equivalent
+      # for — but a host that set it must keep its configured ceiling rather than
+      # silently reverting to the (much larger) default.
+      Application.put_env(:ash_integration, :lua_sandbox, max_reductions: 54_321)
+      assert Lua.default_limits().max_steps == 54_321
+    end
+
+    test ":max_steps wins when both are set" do
+      Application.put_env(:ash_integration, :lua_sandbox,
+        max_steps: 111,
+        max_reductions: 222
+      )
+
+      assert Lua.default_limits().max_steps == 111
+    end
+  end
+
+  describe "the compiled-against backend" do
+    test "is one of the two this runtime supports, and reports its version" do
+      assert Compat.backend() in [:luerl, :lua_vm]
+      assert Compat.lua_version() =~ ~r/^\d+\.\d+\.\d+/
+      assert Compat.lua_version() == to_string(Application.spec(:lua, :vsn))
+
+      # `Compat` decides at COMPILE time; `LuaBackend` re-derives it at run time
+      # from the loaded `:lua` application. A shim that compiled against one
+      # backend and ran against the other is the failure mode this pins.
+      assert Compat.backend() == LuaBackend.backend()
+    end
+
+    test "wall-clock grace matches where wall-clock is actually enforced" do
+      # `:luerl` has an inner `max_time`, so the outer Task waits a grace second
+      # to let the sandbox's own classified error win the race. `:lua_vm` has no
+      # inner timer, so the Task IS the ceiling and there is nothing to wait for.
+      if LuaBackend.luerl?() do
+        assert Compat.wall_clock_grace_ms() == 1_000
+      else
+        assert Compat.wall_clock_grace_ms() == 0
+      end
+    end
   end
 end

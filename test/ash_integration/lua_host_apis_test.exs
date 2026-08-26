@@ -4,6 +4,7 @@ defmodule AshIntegration.LuaHostAPIsTest do
   use ExUnit.Case, async: false
 
   alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua
+  alias AshIntegration.Test.LuaBackend
 
   # The realistic near-miss: a real, loadable module that exports `scope/0` for
   # its own reasons but never did `use Lua.API`, so it has no `__lua_functions__/0`
@@ -26,6 +27,21 @@ defmodule AshIntegration.LuaHostAPIsTest do
 
   defp run(body, event \\ %{}) do
     Lua.execute("function transform(event, defaults)\n#{body}\nend", event)
+  end
+
+  # "this name is gone" reads differently on each backend, and both phrasings are
+  # worth pinning: `:luerl` reports the call site as an undefined function,
+  # `:lua_vm` reports the missing field on the scope table. Asserting the actual
+  # per-backend text beats relaxing this to something vague that both satisfy —
+  # a message that stopped naming the missing name would still pass that.
+  defp assert_missing_function(message, scope, name) do
+    if LuaBackend.luerl?() do
+      assert message =~ "undefined function"
+    else
+      assert message =~ "attempt to call a nil value"
+      assert message =~ "field '#{name}'"
+      assert message =~ "global '#{scope}'"
+    end
   end
 
   describe "host-registered APIs" do
@@ -161,7 +177,7 @@ defmodule AshIntegration.LuaHostAPIsTest do
       assert {:error, message} =
                run(~S|return {at = datetime.to_zone("2024-06-15T10:30:00Z", "Africa/Cairo")}|)
 
-      assert message =~ "undefined function"
+      assert_missing_function(message, "datetime", "to_zone")
     end
 
     test "the built-in is intact again once the colliding API is unconfigured" do
@@ -182,7 +198,7 @@ defmodule AshIntegration.LuaHostAPIsTest do
       # ...and everything else the earlier module defined is gone, because the
       # scope table was reset rather than merged into.
       assert {:error, message} = run(~S|return {p = myapp.tenant_path("acme", "42")}|)
-      assert message =~ "undefined function"
+      assert_missing_function(message, "myapp", "tenant_path")
     end
 
     test "order decides which survives" do

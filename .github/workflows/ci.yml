@@ -17,9 +17,18 @@ env:
   MIX_ENV: test
 
 jobs:
-  # Compile + test across the supported Elixir/OTP range.
+  # Compile + test across the supported Elixir/OTP range, on BOTH Lua backends.
+  #
+  # The `lua` dimension is not cosmetic: the transform runtime picks its backend
+  # at COMPILE time (see `Runtime.Lua.Compat`), so the branch a given lockfile
+  # does not select is not merely untested — it is not even compiled. A shim
+  # exercised on one backend rots silently and gives false confidence, so both
+  # lockfiles run the full suite. `mix.lock` (lua 0.4, luerl) is the pinned
+  # default; `mix.lock.lua1` (lua 1.0, the package's own VM) is the forward-looking
+  # one. `MIX_LOCKFILE` also redirects deps/_build to per-lockfile trees, so the
+  # two never share compiled artifacts (see mix.exs).
   test:
-    name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }} / ${{ matrix.lua }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -27,12 +36,31 @@ jobs:
         include:
           - elixir: "1.19"
             otp: "27"
+            lua: "lua-0.4"
+            lockfile: "mix.lock"
           - elixir: "1.19"
             otp: "28"
+            lua: "lua-0.4"
+            lockfile: "mix.lock"
           - elixir: "1.20"
             otp: "28"
+            lua: "lua-0.4"
+            lockfile: "mix.lock"
           - elixir: "1.20"
             otp: "29"
+            lua: "lua-0.4"
+            lockfile: "mix.lock"
+          - elixir: "1.19"
+            otp: "28"
+            lua: "lua-1.0"
+            lockfile: "mix.lock.lua1"
+          - elixir: "1.20"
+            otp: "29"
+            lua: "lua-1.0"
+            lockfile: "mix.lock.lua1"
+
+    env:
+      MIX_LOCKFILE: ${{ matrix.lockfile }}
 
     steps:
       - name: Checkout
@@ -44,15 +72,19 @@ jobs:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
 
+      # `deps.*`/`_build.*` are the per-lockfile trees a non-default MIX_LOCKFILE
+      # selects; the cache key carries the lockfile so the two never collide.
       - name: Cache deps and _build
         uses: actions/cache@v6
         with:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('**/mix.lock') }}
+            deps.*
+            _build.*
+          key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ matrix.lua }}-${{ hashFiles(matrix.lockfile) }}
           restore-keys: |
-            ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-
+            ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ matrix.lua }}-
 
       - name: Install dependencies
         run: mix deps.get
