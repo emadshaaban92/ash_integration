@@ -67,7 +67,7 @@ defmodule AshIntegration.MixProject do
       {:brod, "~> 4.0", optional: true},
       {:swoosh, "~> 1.0", optional: true},
       {:gen_smtp, "~> 1.0", optional: true},
-      {:lua, "~> 0.4"},
+      {:lua, "~> 1.0"},
       {:jason, "~> 1.0"},
       {:phoenix, "~> 1.7"},
       {:phoenix_live_view, "~> 1.0"},
