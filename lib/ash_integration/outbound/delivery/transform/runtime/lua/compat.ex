@@ -23,10 +23,19 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat do
   #
   # Both branches are exercised in CI (see the `lua` dimension of
   # `.github/workflows/ci.yml`), and that coverage is verifiable: negate this
-  # test, run the Lua suite under each lockfile, and confirm both go red — 66
-  # failures on the 0.4 tree compiled with the 1.0 branch, 59 the other way. A
-  # version shim whose dead branch is never exercised is not covered.
-  @v1 Version.match?(@lua_vsn, ">= 1.0.0")
+  # test and run the Lua suite under each lockfile. The 0.4 tree compiled with the
+  # 1.0 branch fails to COMPILE (the branch matches on `Lua.RuntimeException`
+  # fields 0.4's struct does not have), and the 1.0 tree compiled with the 0.4
+  # branch goes red with 61 failures. A version shim whose dead branch is never
+  # exercised is not covered.
+  # `">= 1.0.0-0"`, not `">= 1.0.0"`: Elixir's `Version.match?/2` excludes
+  # pre-releases from a requirement that carries none, so `1.0.0-rc.1` would test
+  # FALSE against `">= 1.0.0"` and compile the `:luerl` branch — the exact failure
+  # this gate exists to prevent. `mix.exs` accepts `~> 1.0`, which Hex resolves to
+  # a published `1.0.0-rc`, so it is reachable without anyone touching the
+  # constraint. `test/support/lua_backend.ex` re-derives the backend at run time
+  # and must use the same requirement.
+  @v1 Version.match?(@lua_vsn, ">= 1.0.0-0")
 
   @moduledoc """
   The **only** version-specific surface between
@@ -81,16 +90,42 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat do
   point is documented where it differs. `test/ash_integration/lua_pcall_budget_test.exs`
   pins the behaviour of both.
 
-  ## Two guarantees also change enforcement point
+  ## Wall-clock is the caller's Task, on BOTH backends
 
-  - **Wall-clock.** `lua 0.4` has a `max_time` flag inside the sandbox call;
-    `lua 1.0` has no equivalent. On the `:lua_vm` backend the caller's outer
-    `Task` is therefore the *only* wall-clock enforcement point — which is why
-    `wall_clock_grace_ms/0` exists (see its docs).
-  - **Memory.** `lua 0.4` carries `:max_heap_size` into the luerl runner via
-    `spawn_opts`; `lua 1.0` evaluates in the calling process, so the caller's own
-    `Process.flag(:max_heap_size, …)` is what bounds it. The runtime sets that
-    flag on its `Task` on both backends, so the ceiling holds either way.
+  It is tempting to say `lua 0.4` has a wall-clock ceiling of its own and
+  `lua 1.0` does not. It does not, in any way the runtime can use.
+
+  `lua 0.4` does expose a `max_time` flag, but `luerl_sandbox:do_run/3` only
+  honours it when `max_reductions` is **unset**:
+
+      case proplists:get_value(max_reductions, Flags) of
+          none -> receive_response(Runner, MaxT);
+          MaxR -> case wait_reductions(Runner, MaxR) of
+                      {killed, R} -> {error, {reductions, R}};
+                      ok          -> receive_response(Runner, MaxT)
+                  end
+      end
+
+  `wait_reductions/2` returns only once the runner has died or been killed for
+  exceeding its reductions, so by the time `receive_response(Runner, MaxT)` is
+  reached the reply is already in the mailbox and `MaxT` bounds nothing. The
+  runtime always sets a step budget, so that branch is always the one taken. (A
+  *blocking* runner never advances its reduction count either, so it loops inside
+  `wait_reductions/2` and never reaches the timer at all — see the blocking
+  host-function note in `Runtime.Lua`.)
+
+  `flags/1` still passes `max_time` — it costs nothing and would be a live
+  ceiling if the step budget were ever unset — but the outer `Task` in
+  `Runtime.Lua.execute/4` is the real and only wall-clock enforcement point on
+  both backends. It therefore waits exactly `Limits.timeout_ms`, with no grace
+  added for an inner timer that never fires.
+
+  ## Memory changes enforcement point
+
+  `lua 0.4` carries `:max_heap_size` into the luerl runner via `spawn_opts`;
+  `lua 1.0` evaluates in the calling process, so the caller's own
+  `Process.flag(:max_heap_size, …)` is what bounds it. The runtime sets that flag
+  on its `Task` on both backends, so the ceiling holds either way.
 
   That in-process evaluation is also an upside worth recording: on the `:lua_vm`
   backend `Task.shutdown(task, :brutal_kill)` actually kills the evaluator, so
@@ -132,23 +167,6 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat do
   @doc "The `:lua` application version this node compiled against."
   @spec lua_version() :: String.t()
   def lua_version, do: @lua_vsn
-
-  @doc """
-  Extra wall-clock slack the caller's outer `Task` should allow **on top of**
-  `Limits.timeout_ms`, before it gives up and brutal-kills the run.
-
-  On `:luerl` this is a full second, so the sandbox's own `max_time` trips first
-  and the caller gets luerl's classified resource error rather than an opaque
-  killed-task exit. On `:lua_vm` there is no inner timer to lose that race to —
-  the `Task` *is* the wall-clock ceiling — so the slack is zero and the timeout
-  the operator is told about is the one that was actually applied.
-  """
-  @spec wall_clock_grace_ms() :: non_neg_integer()
-  if @v1 do
-    def wall_clock_grace_ms, do: 0
-  else
-    def wall_clock_grace_ms, do: 1_000
-  end
 
   if @v1 do
     @instruction_budget_marker "instruction budget exceeded"
@@ -206,22 +224,62 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat do
       {:ok, lua}
     rescue
       e in [Lua.RuntimeException, Lua.CompilerException] ->
-        {:error, classify(Exception.message(e), limits, subject)}
+        {:error, classify(e, limits, subject)}
     end
 
-    # `lua 1.0` raises the CPU bound as an ordinary Lua error carrying this
-    # marker. Translate it into the same `Limits` vocabulary the `:luerl` branch
-    # produces, so one condition reads as one message on both backends. If a
-    # future release rewords the marker, the dual-backend suite's step-budget
-    # assertions go red — which is the point: a shim whose translation silently
-    # stops matching is worse than no shim.
-    defp classify(message, %Limits{} = limits, subject) when is_binary(message) do
-      if String.contains?(message, @instruction_budget_marker) do
+    # `lua 1.0` raises the CPU bound as an ordinary Lua error, so it has to be
+    # told apart from every other one. Translated into the same `Limits`
+    # vocabulary the `:luerl` branch produces, one condition reads as one message
+    # on both backends.
+    defp classify(%Lua.RuntimeException{} = e, %Limits{} = limits, subject) do
+      if budget_breach?(e) do
         step_budget_message(subject, "stopped at the #{limits.max_steps}-instruction ceiling")
       else
-        message
+        Exception.message(e)
       end
     end
+
+    defp classify(e, _limits, _subject), do: Exception.message(e)
+
+    # The rendered message is NOT evidence. Transform sources are untrusted at
+    # runtime, and the budget breach is raised as a plain Lua runtime error, so
+    #
+    #     error("instruction budget exceeded", 0)
+    #
+    # reproduces the marker byte for byte (level 0 suppresses the `<eval>:1: `
+    # position prefix the VM otherwise stamps onto an `error/1` value). Matching
+    # the message would let a script forge a resource-limit failure, discard its
+    # real diagnostic, and send an operator hunting a runaway loop that never
+    # happened — and would equally rewrite a legitimate error that merely quotes
+    # the marker.
+    #
+    # What a script cannot forge is the raise-time instruction tally: reaching the
+    # ceiling IS the breach, and `Lua.VM.State.tick!/2` stamps the spent count into
+    # the state it ferries out on the error. Both facts are required — a script
+    # that genuinely exhausts its budget inside a `pcall` and then raises something
+    # else still gets its own message.
+    defp budget_breach?(%Lua.RuntimeException{value: @instruction_budget_marker} = e) do
+      spent = raise_state(e, :instruction_count)
+      ceiling = raise_state(e, :max_instructions)
+
+      is_integer(spent) and is_integer(ceiling) and spent >= ceiling
+    end
+
+    defp budget_breach?(_exception), do: false
+
+    # Read the tally defensively. If a future `lua` release moves or renames it,
+    # this answers `nil`, no breach is recognised, and the operator gets the VM's
+    # own message — the uniform vocabulary is lost, never accuracy. The
+    # "script exceeded its step budget" assertion in `lua_sandbox_limits_test.exs`
+    # goes red at that point rather than the shim degrading in silence.
+    defp raise_state(%Lua.RuntimeException{original: original}, key) when is_struct(original) do
+      case Map.get(original, :state) do
+        state when is_map(state) -> Map.get(state, key)
+        _other -> nil
+      end
+    end
+
+    defp raise_state(_exception, _key), do: nil
   else
     @doc """
     A fresh sandboxed `t:Lua.t/0`.
@@ -262,6 +320,12 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat do
     defp flags(%Limits{} = limits) do
       %{
         max_reductions: limits.max_steps,
+        # NOT a live wall-clock ceiling: `luerl_sandbox` only reaches its
+        # `max_time` receive once the runner has already terminated, whenever
+        # `max_reductions` is set — which it always is here. Passed anyway
+        # because it costs nothing and would bound the run if the step budget
+        # were ever unset. The outer `Task` is the real ceiling; see the
+        # "Wall-clock" section of the moduledoc.
         max_time: limits.timeout_ms,
         spawn_opts: [
           {:max_heap_size, %{size: limits.max_memory_words, kill: true, error_logger: false}}

@@ -95,6 +95,14 @@ jobs:
       - name: Run tests
         run: mix test --warnings-as-errors
 
+      # The `quality` job's audits read `mix.lock` only, so the alternate
+      # lockfile's dependency set would otherwise never be audited at all.
+      - name: Dependency + retired-package audit (this lockfile)
+        if: ${{ matrix.lockfile != 'mix.lock' }}
+        run: |
+          mix deps.audit
+          mix hex.audit
+
   # Version-independent checks — run once.
   quality:
     name: Quality (format · credo · sobelow · audits)
@@ -124,6 +132,24 @@ jobs:
 
       - name: Check for unused dependencies in mix.lock
         run: mix deps.unlock --check-unused
+
+      # `mix.lock.lua1` exists only to pin the second Lua backend, but nothing
+      # else sees it: dependabot watches `mix.lock`, and `deps.unlock
+      # --check-unused`, `deps.audit` and `hex.audit` all read the default
+      # lockfile. Without this guard the first bump to any SHARED dependency
+      # leaves the 1.0 tree on stale — possibly vulnerable — transitive deps
+      # while CI keeps reporting the `lua` dimension green against a materially
+      # different dependency set. The two must differ in the Lua backend and
+      # nothing else; regenerate with
+      # `cp mix.lock mix.lock.lua1 && MIX_LOCKFILE=mix.lock.lua1 mix deps.update lua`.
+      - name: The two lockfiles must differ only in the Lua backend
+        if: ${{ !cancelled() }}
+        run: |
+          strip() { grep -v '^  "\(lua\|luerl\)":' "$1"; }
+          if ! diff -u <(strip mix.lock) <(strip mix.lock.lua1); then
+            echo "::error::mix.lock and mix.lock.lua1 have drifted apart outside the Lua backend."
+            exit 1
+          fi
 
       # !cancelled() so one run surfaces every failure, not just the first.
       - name: Check formatting

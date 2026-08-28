@@ -46,8 +46,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   - **Memory**: a `:max_heap_size` with `kill: true` on the process holding the
     Lua heap kills an allocation bomb the instant it exceeds the ceiling, before
     it can OOM the node.
-  - **Wall-clock**: an outer `Task` backstop bounds total runtime (plus, on
-    `:luerl` only, the sandbox's own `max_time` inside it).
+  - **Wall-clock**: the outer `Task` bounds total runtime. On both backends this
+    is the *only* wall-clock enforcement point — `lua 1.0` has no `max_time`, and
+    `lua 0.4`'s is never consulted while a script is still running once a step
+    budget is set (see `Compat`).
   - **Crash isolation**: the script runs under `Task.Supervisor.async_nolink`, so
     a sandbox crash/kill surfaces as an error to the caller instead of taking the
     caller down with it.
@@ -83,12 +85,16 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     normal result. The same source that parks on `:luerl` can deliver on
     `:lua_vm`.
 
-  Two guarantees also change *where* they are enforced. `lua 1.0` has no
-  `max_time` equivalent, so on `:lua_vm` the outer `Task` is the **only**
-  wall-clock enforcement point rather than a backstop behind the sandbox's own
-  timer. And because `:lua_vm` evaluates in-process, the memory ceiling is the
-  `Task`'s own `:max_heap_size` rather than `spawn_opts` on a luerl runner — the
-  runtime sets that flag on both backends, so the ceiling holds either way.
+  Memory also changes *where* it is enforced: because `:lua_vm` evaluates
+  in-process, the ceiling is the `Task`'s own `:max_heap_size` rather than
+  `spawn_opts` on a luerl runner — the runtime sets that flag on both backends,
+  so the ceiling holds either way.
+
+  Wall-clock, by contrast, does **not** differ, despite `lua 0.4` appearing to
+  offer a `max_time` that the newer release drops: luerl only consults that timer
+  once its runner has already terminated, whenever `max_reductions` is set — and
+  it always is here. The outer `Task` is the sole wall-clock ceiling on both.
+  `Compat` quotes the luerl code path.
 
   ## Host APIs
 
@@ -134,13 +140,13 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     loop is bounded exactly like a tight loop of Lua. A host function that
     **blocks** is the awkward case, and it is where the two backends diverge:
 
-      * On `:luerl` it escapes both budgets. The reduction watchdog polls
+      * On `:luerl` it escapes the step budget. The reduction watchdog polls
         `process_info(runner, :reductions)`, and a descheduled runner never
-        advances, so it never trips the step budget and never reaches the
-        `max_time` check either. Only the outer `Task` backstop returns — and
-        because the runner is spawned *unlinked*, brutal-killing that `Task`
-        leaves it alive, leaking one process per delivery for as long as the call
-        blocks.
+        advances, so it never trips — and because that watchdog loops until the
+        runner dies, luerl's own `max_time` is never reached either. Only the
+        outer `Task` returns, and because the runner is spawned *unlinked*,
+        brutal-killing that `Task` leaves it alive, leaking one process per
+        delivery for as long as the call blocks.
       * On `:lua_vm` the evaluator *is* the `Task`, so `Task.shutdown(:brutal_kill)`
         actually kills it and nothing leaks.
 
@@ -417,22 +423,19 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
         run_sandboxed(script, event, defaults, limits)
       end)
 
-    # Outer wall-clock backstop. On `:luerl` it allows a grace second over the
-    # sandbox's own `max_time`, so the sandbox returns its classified resource
-    # error rather than losing the race to an opaque killed-task exit; on
-    # `:lua_vm` there is no inner timer, so this IS the wall-clock ceiling and the
-    # grace is zero (see `Compat.wall_clock_grace_ms/0`). Because the task is
-    # `async_nolink`, a brutal-kill or crash here comes back as `{:exit, _}` —
-    # never propagated to (and crashing) the caller.
-    case Task.yield(task, wall_clock_ms(limits)) || Task.shutdown(task, :brutal_kill) do
+    # THE wall-clock ceiling, on both backends — not a backstop behind an inner
+    # one. `lua 1.0` has no `max_time` at all, and `lua 0.4`'s is only consulted
+    # after its runner has already terminated whenever a step budget is set (see
+    # the "Wall-clock" section of `Compat`), so there is no inner timer to leave
+    # grace for and the timeout an operator is told about is the one applied.
+    # Because the task is `async_nolink`, a brutal-kill or crash here comes back
+    # as `{:exit, _}` — never propagated to (and crashing) the caller.
+    case Task.yield(task, limits.timeout_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       {:exit, _reason} -> {:error, "transform sandbox crashed or was killed"}
       nil -> {:error, "script execution timed out after #{limits.timeout_ms}ms"}
     end
   end
-
-  defp wall_clock_ms(%Limits{} = limits),
-    do: limits.timeout_ms + Compat.wall_clock_grace_ms()
 
   @impl true
   def sign_session(source, %Limits{} = _limits, _orchestrate)
@@ -452,10 +455,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
         run_session(source, limits, orchestrate)
       end)
 
-    # ONE wall-clock backstop for the whole signing pipeline (all callbacks share
+    # ONE wall-clock ceiling for the whole signing pipeline (all callbacks share
     # it), so a pathological source can't multiply latency by the number of
     # callbacks the way per-call Tasks would.
-    case Task.yield(task, wall_clock_ms(limits)) || Task.shutdown(task, :brutal_kill) do
+    case Task.yield(task, limits.timeout_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       {:exit, _reason} -> {:error, "signing sandbox crashed or was killed"}
       nil -> {:error, "signing callbacks timed out after #{limits.timeout_ms}ms"}

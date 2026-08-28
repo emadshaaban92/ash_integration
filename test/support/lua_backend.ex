@@ -15,10 +15,17 @@ defmodule AshIntegration.Test.LuaBackend do
   version actually loaded, that assertion is where it surfaces.
   """
 
-  @doc "`:lua_vm` on `lua 1.0`, `:luerl` on `lua 0.4`."
+  @doc """
+  `:lua_vm` on `lua 1.0`, `:luerl` on `lua 0.4`.
+
+  The requirement must stay byte-identical to `Compat`'s, `">= 1.0.0-0"` and not
+  `">= 1.0.0"`: Elixir excludes pre-releases from a requirement carrying none, so
+  the shorter form answers `:luerl` for a `1.0.0-rc`. Both gates agreeing on the
+  *wrong* answer would keep the agreement test green while every delivery parked.
+  """
   @spec backend() :: :lua_vm | :luerl
   def backend do
-    if Version.match?(to_string(Application.spec(:lua, :vsn)), ">= 1.0.0") do
+    if Version.match?(to_string(Application.spec(:lua, :vsn)), ">= 1.0.0-0") do
       :lua_vm
     else
       :luerl

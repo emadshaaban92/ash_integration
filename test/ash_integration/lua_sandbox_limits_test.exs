@@ -149,15 +149,44 @@ defmodule AshIntegration.LuaSandboxLimitsTest do
       assert Compat.backend() == LuaBackend.backend()
     end
 
-    test "wall-clock grace matches where wall-clock is actually enforced" do
-      # `:luerl` has an inner `max_time`, so the outer Task waits a grace second
-      # to let the sandbox's own classified error win the race. `:lua_vm` has no
-      # inner timer, so the Task IS the ceiling and there is nothing to wait for.
-      if LuaBackend.luerl?() do
-        assert Compat.wall_clock_grace_ms() == 1_000
-      else
-        assert Compat.wall_clock_grace_ms() == 0
-      end
+    test "the version gate admits pre-releases" do
+      # `Version.match?/2` excludes pre-releases from a requirement that carries
+      # none, so `">= 1.0.0"` answers false for `1.0.0-rc.1` — which would compile
+      # the luerl branch against the 1.0 VM and park every delivery. `mix.exs`
+      # accepts `~> 1.0`, so Hex can resolve such a version without anyone
+      # touching the constraint. Both gates must use the `-0` form.
+      refute Version.match?("1.0.0-rc.1", ">= 1.0.0")
+      assert Version.match?("1.0.0-rc.1", ">= 1.0.0-0")
+      assert Version.match?("0.4.0", ">= 1.0.0-0") == false
+    end
+
+    @tag timeout: 30_000
+    test "the wall-clock ceiling is the configured one, on both backends" do
+      # Neither backend has a usable inner timer — `lua 1.0` has none, and
+      # `lua 0.4`'s `max_time` is only consulted once its runner has already
+      # terminated whenever `max_reductions` is set — so the outer Task waits
+      # exactly `timeout_ms` and no grace beyond it. A blocking host call is the
+      # one case that reaches the Task's timer with the step budget unable to
+      # fire, which is precisely what makes this measurable.
+      Application.put_env(:ash_integration, :lua_sandbox,
+        timeout_ms: 300,
+        max_steps: 100_000_000,
+        max_heap_words: 500_000,
+        apis: [AshIntegration.Test.BlockingLuaAPI]
+      )
+
+      {micros, result} =
+        :timer.tc(fn ->
+          Lua.execute(~S|function transform(e, d) return {x = blocking.sleep(10000)} end|, %{})
+        end)
+
+      assert {:error, message} = result
+      assert message =~ "timed out" or message =~ "crashed or was killed"
+
+      # Generous upper bound (scheduling noise, CI), but far below the 1_300ms a
+      # one-second grace would produce.
+      elapsed = div(micros, 1000)
+      assert elapsed < 1_000, "expected ~300ms wall-clock ceiling, waited #{elapsed}ms"
     end
   end
 end

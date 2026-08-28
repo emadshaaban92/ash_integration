@@ -54,14 +54,23 @@ defmodule AshIntegration.LuaPcallBudgetTest do
   """
 
   @tag timeout: 20_000
-  test "a runaway loop wrapped in pcall always terminates, well inside the wall-clock ceiling" do
+  test "a runaway loop wrapped in pcall is stopped by the step budget, not the clock" do
     # True on BOTH backends, and the part that matters most: catching the budget
-    # error cannot make the run hang. The 2s wall-clock backstop is not what stops
-    # it — the step budget is — so this completes far below that.
+    # error cannot make the run hang. The step budget is what ends it, so this
+    # finishes well inside the 2s wall-clock ceiling — which, being the only
+    # wall-clock enforcement point, is what the run would hit if it did not.
     {micros, result} = :timer.tc(fn -> Lua.execute(@pcall_bomb, %{}) end)
 
-    assert match?({:ok, _}, result) or match?({:error, _}, result)
-    assert div(micros, 1000) < 2_000
+    # Bind the outcome per backend rather than accepting "either tuple", which
+    # every possible return satisfies and so asserts nothing.
+    if LuaBackend.luerl?() do
+      assert {:error, _} = result
+    else
+      assert {:ok, %{"caught" => true}} = result
+    end
+
+    elapsed = div(micros, 1000)
+    assert elapsed < 2_000, "expected the step budget to end this, not the clock (#{elapsed}ms)"
   end
 
   @tag timeout: 20_000
@@ -81,6 +90,36 @@ defmodule AshIntegration.LuaPcallBudgetTest do
       # DELIVERED. Same source, opposite outcome.
       assert {:ok, %{"caught" => true, "still_running" => true}} = result
     end
+  end
+
+  test "a script cannot forge a step-budget failure by raising the marker itself" do
+    # The `:lua_vm` backend raises the budget breach as an ordinary Lua error, so
+    # the runtime has to tell a real breach from a script quoting it. `error/2` at
+    # level 0 suppresses the position prefix, reproducing the VM's own marker byte
+    # for byte — if the runtime matched on the message, this source would fabricate
+    # a resource-limit failure and bury its real diagnostic, sending an operator
+    # after a runaway loop that never happened.
+    forge = ~S"""
+    function transform(event, defaults)
+      error("instruction budget exceeded", 0)
+    end
+    """
+
+    assert {:error, message} = Lua.execute(forge, %{})
+
+    # The script's own error reaches `last_error`...
+    assert message =~ "instruction budget exceeded"
+    # ...but it is NOT reported as a resource limit, on either backend.
+    refute message =~ "exceeded its step budget"
+  end
+
+  test "a real breach is still reported as one, right beside the forgery" do
+    # The other half of the pair: the discriminator must not be so strict that a
+    # genuine breach stops being recognised.
+    assert {:error, message} =
+             Lua.execute(~S|function transform(e, d) while true do end end|, %{})
+
+    assert message =~ "exceeded its step budget"
   end
 
   @tag timeout: 20_000

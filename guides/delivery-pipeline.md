@@ -667,8 +667,9 @@ bounded so one script can't take down the node:
 - **Memory** — a `:max_heap_size` with `kill: true` on the process holding the Lua
   heap kills an allocation bomb the instant it exceeds the ceiling, before it can
   OOM the node.
-- **Wall-clock** — an outer `Task` backstop (plus, on `lua 0.4`, the sandbox's own
-  `max_time` inside it).
+- **Wall-clock** — an outer `Task`. This is the only wall-clock enforcement point
+  on either backend: `lua 1.0` has no timer of its own, and `lua 0.4`'s `max_time`
+  is never consulted while a script is still running once a step budget is set.
 - **Crash isolation** — the script runs under `Task.Supervisor.async_nolink`, so
   a sandbox crash/kill surfaces as a parked delivery, never as a crash of the
   delivery worker.
@@ -706,8 +707,12 @@ are on:
 - On **`lua 1.0`** it is enforced by **raising a catchable Lua error**. Total CPU
   is still bounded — the budget is per top-level evaluation and is never refilled,
   so catching it buys no extra work — but a script can burn its whole budget,
-  catch the error, and still return a deliverable descriptor. `lua 1.0` also has
-  no wall-clock ceiling of its own, so the outer `Task` is the only one.
+  catch the error, and still return a deliverable descriptor.
+
+The wall-clock ceiling, despite appearances, is **not** a difference: `lua 0.4`
+exposes a `max_time` flag that `lua 1.0` has no equivalent for, but luerl only
+consults it after its runner has already terminated whenever a step budget is
+set — and one always is. The outer `Task` is the sole wall-clock bound on both.
 
 `lua 1.0` in exchange bounds two things `0.4` cannot express (call depth and
 single-string size, both derived from the same limits), and because it evaluates

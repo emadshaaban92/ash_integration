@@ -20,12 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     still bounded (the budget is per top-level evaluation and is never refilled,
     so catching it buys nothing), but a script can burn its whole budget, catch
     the error, and still return a deliverable descriptor.
-  - `lua 1.0` also has **no wall-clock ceiling of its own**, so the outer `Task`
-    becomes the only one; memory moves from the luerl runner's `spawn_opts` to
-    that `Task`'s own `:max_heap_size` (already set, so the ceiling holds either
-    way). Conversely, because `lua 1.0` evaluates in-process, brutal-killing the
-    `Task` actually kills the evaluator — the `0.4` hazard where a **blocking**
-    host function leaks one unlinked runner per delivery disappears.
+  - Memory moves from the luerl runner's `spawn_opts` to the transform `Task`'s
+    own `:max_heap_size` (already set, so the ceiling holds either way).
+    Conversely, because `lua 1.0` evaluates in-process, brutal-killing the `Task`
+    actually kills the evaluator — the `0.4` hazard where a **blocking** host
+    function leaks one unlinked runner per delivery disappears.
+  - **Wall-clock is not part of the difference, and the outer `Task` timeout is
+    now honest about that.** `lua 0.4` exposes a `max_time` flag `lua 1.0` has no
+    equivalent for, but `luerl_sandbox:do_run/3` only reaches its `max_time`
+    receive once the runner has already terminated, whenever `max_reductions` is
+    set — and the runtime always sets one. The outer `Task` was consequently
+    waiting `timeout_ms + 1_000` for an inner timer that never fires, so a script
+    configured with `timeout_ms: 300` was stopped at ~1300ms while `last_error`
+    reported "timed out after 300ms". The grace is removed: the `Task` now waits
+    exactly `timeout_ms` on both backends.
   - On `lua 1.0` the runtime additionally sets `:max_call_depth` and
     `:max_string_bytes` (from the same `Limits`), ceilings `lua 0.4` cannot
     express, so the newer backend is bounded no less tightly.
@@ -106,6 +114,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Limits` vocabulary). `:max_reductions` named luerl's own flag, which the
     `lua 1.0` backend has no equivalent for; it is still honoured as a deprecated
     alias, so a host that set it keeps its configured ceiling.
+  - **Transform timeouts are now the configured value.** The transform and
+    signing `Task`s waited `timeout_ms + 1_000`; the extra second existed to let
+    an inner luerl `max_time` fire first, which it never does (see the Security
+    section). A subscription configured with a 300ms transform ceiling was
+    stopped at ~1300ms. It is now stopped at ~300ms, as configured — a
+    **behaviour change** for any host relying on the undocumented extra second.
 
 - **Dispatch now uses an age-based terminal model, not an attempt ceiling.** An
   undispatched `Event` no longer becomes poison after `max_attempts` claims; instead

@@ -104,9 +104,10 @@ them; if you must change one, update this list and the relevant design doc.
      the delivery. On `lua 1.0` (`:lua_vm`) it raises a catchable Lua error: total
      CPU is still bounded (the budget is per top-level evaluation and never
      refilled), but a script can burn it, catch it, and still return a
-     deliverable descriptor. `lua 1.0` also has no wall-clock ceiling of its own,
-     so the outer `Task` is the only one. `0.4` stays the pinned default for that
-     reason; see `runtime/lua/compat.ex` and
+     deliverable descriptor. That is why `0.4` stays the pinned default. The
+     wall-clock ceiling is *not* part of the difference: it is the outer `Task`
+     on both, because luerl's `max_time` is never consulted while a script is
+     still running once a step budget is set. See `runtime/lua/compat.ex` and
      `test/ash_integration/lua_pcall_budget_test.exs`.
 6. **The signature is computed fresh at send, per attempt** — recomputed over the
    exact body bytes with a send-time timestamp, so anti-replay stays honest on
