@@ -54,3 +54,24 @@ defmodule AshIntegration.Test.CollidingLuaAPI do
     datetime |> DateTime.to_date() |> Date.to_gregorian_days()
   end
 end
+
+defmodule AshIntegration.Test.BlockingLuaAPI do
+  @moduledoc """
+  A host API that **blocks** — the one thing the purity rule forbids, here on
+  purpose.
+
+  It is the only way to reach the outer `Task`'s wall-clock timer: a blocked
+  process advances neither BEAM reductions nor VM instructions, so no step budget
+  can fire and the wall-clock ceiling is left to decide. That makes it the probe
+  for asserting what that ceiling actually is (see `lua_sandbox_limits_test.exs`).
+
+  Never do this in a real host API.
+  """
+
+  use Lua.API, scope: "blocking"
+
+  deflua sleep(ms) do
+    Process.sleep(trunc(ms))
+    "done"
+  end
+end

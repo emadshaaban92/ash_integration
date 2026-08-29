@@ -63,7 +63,7 @@ defmodule AshIntegration.LuaSandboxTest do
     end
 
     @tag timeout: 10_000
-    test "returns error when a script runs away (reduction budget or wall-clock)" do
+    test "returns error when a script runs away (step budget or wall-clock)" do
       script = ~S"""
       function transform(event, defaults)
         while true do end
@@ -71,7 +71,12 @@ defmodule AshIntegration.LuaSandboxTest do
       """
 
       assert {:error, message} = Lua.execute(script, %{})
-      assert message =~ "reduction" or message =~ "timed out"
+      # Which of the two ceilings trips first depends on the backend's unit (BEAM
+      # reductions vs VM instructions) against the config-driven defaults, so this
+      # asserts the observable outcome — the delivery parks with a resource-limit
+      # message — rather than picking one. `lua_sandbox_limits_test.exs` pins the
+      # step budget specifically, under budgets tight enough to make it the winner.
+      assert message =~ "exceeded its step budget" or message =~ "timed out"
     end
 
     test "event data round-trips through Lua" do

@@ -74,6 +74,14 @@ defmodule AshIntegration.Transform.RuntimeTest do
     test "rejects a script that does not parse (syntax error caught at save)" do
       assert {:error, message} = Runtime.validate(:lua, "result = {")
       assert message =~ "does not parse"
+
+      # The backend's own diagnostic has to reach the operator. `Lua.parse_chunk/1`
+      # is one of the two places the two `lua` releases disagree: `0.4` answers
+      # `{:error, [String.t()]}`, `1.0` answers `{:error, %Lua.CompilerException{}}`
+      # — and `to_string/1` on an exception struct raises, so a single-shape
+      # formatter would crash here rather than degrade.
+      assert String.length(message) > String.length("script does not parse: ")
+      refute message =~ "Lua.CompilerException"
     end
 
     test "accepts a script that parses but raises at runtime (it parks at dispatch)" do
@@ -105,7 +113,10 @@ defmodule AshIntegration.Transform.RuntimeTest do
       tight = %Limits{timeout_ms: 1_000, max_steps: 1_000_000, max_memory_words: 200_000}
 
       assert {:error, message} = Lua.execute("while true do end", %{}, nil, tight)
-      assert message =~ "reduction" or message =~ "timed out"
+      # `Limits` vocabulary, not either backend's native unit: `:luerl` counts
+      # BEAM reductions and `:lua_vm` counts VM instructions, and both report the
+      # breach as the step budget.
+      assert message =~ "exceeded its step budget"
     end
   end
 end
