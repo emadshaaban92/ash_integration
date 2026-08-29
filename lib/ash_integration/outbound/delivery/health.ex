@@ -36,6 +36,7 @@ defmodule AshIntegration.Outbound.Delivery.Health do
 
   alias AshIntegration.Outbound.Delivery.Scheduler
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
+  alias AshIntegration.Telemetry
 
   def opts_schema do
     [
@@ -187,11 +188,21 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     |> Ash.Changeset.filter(Ash.Expr.expr(suspended == false))
     |> Ash.update(authorize?: false, return_notifications?: true)
     |> case do
-      {:ok, _record, _notifications} ->
+      {:ok, record, _notifications} ->
+        # The readable name comes off the record the filtered update just returned —
+        # the same one `Ash.get!/2` above already fetched, so labelling the event
+        # costs no query. Only the suspended entity's OWN name is in hand here: the
+        # subscription scope would need its `connection` loaded to also carry
+        # `connection_name`, which is a query this transition does not otherwise run.
         :telemetry.execute(
           [:ash_integration, scope.name, :suspended],
           %{count: 1},
-          %{id: id, failure_class: scope.failure_class, window_attempts: window_attempts()}
+          %{
+            :id => id,
+            scope.name_key => Telemetry.name_of(record),
+            :failure_class => scope.failure_class,
+            :window_attempts => window_attempts()
+          }
         )
 
       {:error, _stale} ->
@@ -377,12 +388,14 @@ defmodule AshIntegration.Outbound.Delivery.Health do
     [
       %{
         name: :connection,
+        name_key: :connection_name,
         id_column: "connection_id",
         failure_class: "transport",
         resource: AshIntegration.connection_resource()
       },
       %{
         name: :subscription,
+        name_key: :subscription_name,
         id_column: "subscription_id",
         failure_class: "response",
         resource: AshIntegration.subscription_resource()

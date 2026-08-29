@@ -148,6 +148,13 @@ defmodule Example.Outbound.ParkedHealthTest do
       assert meta.failure_class == "parked"
       assert meta.threshold == 2
       assert measurements.parked_count == 2
+
+      # The readable label rides along, read off the record the filtered suspend
+      # already returned — nil here only because this host's Subscription declares
+      # no `name`; the key is the contract. `connection_name` is deliberately absent:
+      # this path holds the subscription alone and will not query for its connection.
+      assert Map.has_key?(meta, :subscription_name)
+      refute Map.has_key?(meta, :connection_name)
     end
 
     test "enabled but below the threshold does not suspend", %{connection: dest} do

@@ -145,6 +145,12 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
   # Emit `[:ash_integration, :delivery, :parked]` from the persisted rows (after the
   # insert), not from the pure spec builder. A reprocess re-park re-emits from the
   # Reprocessor.
+  #
+  # The readable names come off the SPEC, not the delivery: these rows are what
+  # `Ash.bulk_create` handed back, so `delivery.connection`/`delivery.subscription`
+  # are `%Ash.NotLoaded{}` and reading them here would mean a query inside the
+  # dispatch transaction. `Specs.park_spec/4` captured them from the already-loaded
+  # subscription instead.
   defp emit_parked(specs, deliveries) do
     specs
     |> Enum.zip(deliveries)
@@ -158,7 +164,9 @@ defmodule AshIntegration.Outbound.Dispatch.Changes.DispatchEvent do
             event_type: delivery.event_type,
             event_key: delivery.event_key,
             subscription_id: delivery.subscription_id,
+            subscription_name: Map.get(spec, :subscription_name),
             connection_id: delivery.connection_id,
+            connection_name: Map.get(spec, :connection_name),
             reason: delivery.last_error,
             failure_kind: Map.get(spec, :failure_kind)
           }

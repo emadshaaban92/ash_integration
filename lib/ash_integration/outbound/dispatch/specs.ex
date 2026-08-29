@@ -21,8 +21,15 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
 
   alias AshIntegration.Outbound.Delivery.Resolver
   alias AshIntegration.Outbound.Wire.Envelope
+  alias AshIntegration.Telemetry
 
-  @type spec :: %{:attrs => map(), :coalesce? => boolean(), optional(:failure_kind) => atom()}
+  @type spec :: %{
+          :attrs => map(),
+          :coalesce? => boolean(),
+          optional(:failure_kind) => atom(),
+          optional(:connection_name) => String.t() | nil,
+          optional(:subscription_name) => String.t() | nil
+        }
 
   @doc """
   Run the producer's batched `project/3` **once** over the whole `(type, version)`
@@ -161,10 +168,21 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
 
   # `failure_kind` (`:project`/`:transform`) is carried on the spec so the caller
   # can emit `:parked` telemetry after the row is persisted (see DispatchEvent).
+  #
+  # The readable `connection_name`/`subscription_name` ride along for the same
+  # reason, and can ONLY be captured here: the persisted rows the caller emits from
+  # come back out of a bulk insert with no associations loaded, while `subscription`
+  # (with its `connection` — `Dispatcher.subscriptions_for/2` loads it for the
+  # resolver) is right here in hand. Carrying them on the spec is what keeps the
+  # `:parked` emit query-free.
   defp park_spec(event, subscription, reason, failure_kind) do
     event
     |> spec(subscription, %{delivery: nil, state: :parked, last_error: reason})
-    |> Map.put(:failure_kind, failure_kind)
+    |> Map.merge(%{
+      failure_kind: failure_kind,
+      subscription_name: Telemetry.name_of(subscription),
+      connection_name: Telemetry.name_of(subscription.connection)
+    })
   end
 
   defp cancelled_spec(event, subscription, reason) do

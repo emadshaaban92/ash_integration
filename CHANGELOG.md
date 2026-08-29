@@ -242,6 +242,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Human-readable `connection_name` / `subscription_name` in the outbound health
+  telemetry.** Every event that identified a route only by UUID now also carries
+  the readable name, so a backend that cannot join back to Postgres — Loki
+  structured metadata, a Grafana panel, Sentry tags — can label the route without
+  a lookup. This matters most where the ids are unstable: a reseeded environment
+  mints fresh UUIDs, so a static id→name map goes stale while the name does not.
+  Affected events: `[:ash_integration, :delivery, :parked]` (both emitters),
+  `[:ash_integration, :delivery, :delivered]`,
+  `[:ash_integration, :delivery, :terminal]`,
+  `[:ash_integration, :connection, :suspended]`, and
+  `[:ash_integration, :subscription, :suspended]` (both the derived-health
+  transition and the opt-in parked-suspend).
+
+  No event costs a query for its name. Each emit site reads a record the pipeline
+  already holds — the delivery relay's claim-time `[:connection, :subscription]`
+  load, the loaded subscription the dispatch specs were built from, the record a
+  suspension's own filtered update returned — and the dispatch park carries the
+  names on the spec precisely because the rows that come back out of the bulk
+  insert have no associations loaded. The one place a name is deliberately absent
+  is `connection_name` on `[:ash_integration, :subscription, :suspended]`: that
+  path holds the subscription only, and loading its connection to label the event
+  would be exactly the extra query this avoids.
+
+  `connection_name` is always populated (the `AshIntegration.Connection` extension
+  adds `name` `allow_nil?: false`). **`subscription_name` is `nil` unless your
+  Subscription resource declares its own `name` attribute** —
+  `AshIntegration.Outbound.Delivery.Subscription` adds no `name` of its own (a
+  subscription is labelled by its connection plus event type), and the extension
+  leaves a `name` you declare yourself intact.
+
 - **Host APIs in the Lua sandbox**, with a built-in `datetime`. A transform (and a
   custom signing script) can now render a timestamp in any timezone, so *which*
   zone to use stays the per-subscription decision it is — the previous workaround

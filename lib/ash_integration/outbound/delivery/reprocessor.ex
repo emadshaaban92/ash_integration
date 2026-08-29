@@ -15,6 +15,7 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
   alias AshIntegration.Outbound.Wire.Envelope
   alias AshIntegration.Outbound.Delivery.Scheduler
   alias AshIntegration.Outbound.Declare.Registry
+  alias AshIntegration.Telemetry
 
   @doc """
   Re-run one delivery from its immutable Event.
@@ -184,6 +185,10 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
   # `Specs`). The opt-in parked-suspend is evaluated once by the caller
   # (`reprocess_event`/`reprocess_parked_for_connection`), not per re-parked row.
   # Park semantics are unchanged.
+  #
+  # The readable names are free: every path into here runs after
+  # `do_reprocess_event/1`'s `Ash.load!(delivery, [:event, :subscription, :connection])`
+  # — the same load whose nil-checks decide whether a reprocess can run at all.
   defp park!(delivery, reason, failure_kind) do
     update!(delivery, :park, %{delivery: nil, last_error: reason})
 
@@ -195,7 +200,9 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
         event_type: delivery.event_type,
         event_key: delivery.event_key,
         subscription_id: delivery.subscription_id,
+        subscription_name: Telemetry.name_of(delivery.subscription),
         connection_id: delivery.connection_id,
+        connection_name: Telemetry.name_of(delivery.connection),
         reason: reason,
         failure_kind: failure_kind
       }
