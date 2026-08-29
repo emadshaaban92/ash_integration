@@ -41,6 +41,21 @@ defmodule AshIntegration.Telemetry do
       `[:ash_integration, :subscription, :probe]` — a bounded recovery probe pass let
       a suspended connection/subscription through (`promoted` metadata says whether a
       head was actually scheduled).
+
+  ## Human-readable names
+
+  Every event that identifies a connection or a subscription by id also carries the
+  matching human-readable `connection_name` / `subscription_name`, so a log/metrics
+  backend that cannot join back to Postgres (Loki structured metadata, a Grafana
+  panel, Sentry tags) can label the route without a lookup. The names are read off
+  records the emitting pipeline **already holds** — no event ever costs an extra
+  query for them, and a site with nothing loaded emits `nil` rather than fetching.
+
+  `connection_name` is always populated: the `AshIntegration.Connection` extension
+  adds `name` `allow_nil?: false` with a unique identity. `subscription_name` is
+  `nil` unless the host's Subscription resource declares its own `name` attribute —
+  `AshIntegration.Outbound.Delivery.Subscription` does not add one (a subscription
+  is labelled by its connection plus event type).
   """
 
   @events [
@@ -65,4 +80,17 @@ defmodule AshIntegration.Telemetry do
   `:telemetry.attach_many/4`.
   """
   def events, do: @events
+
+  @doc """
+  The human-readable `name` carried by an already-loaded connection/subscription
+  record, or `nil`.
+
+  Deliberately total: an `%Ash.NotLoaded{}`, a `nil` association, or a resource with
+  no `name` attribute all yield `nil`. Telemetry metadata must never be the reason a
+  query runs, so an emit site reads whatever it already has in hand and accepts
+  `nil` — it never loads to fill this in.
+  """
+  @spec name_of(term()) :: String.t() | nil
+  def name_of(%{name: name}) when is_binary(name), do: name
+  def name_of(_other), do: nil
 end

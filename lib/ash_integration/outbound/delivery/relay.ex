@@ -74,6 +74,7 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   alias AshIntegration.Outbound.Delivery.Dispatcher
   alias AshIntegration.Outbound.Delivery.Supervisor, as: Stage
   alias AshIntegration.Outbound.Wire.Transport
+  alias AshIntegration.Telemetry
   alias AshIntegration.Transport.Utils
   alias Broadway.Message
 
@@ -381,6 +382,10 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
 
   # `duration_ms` is the source-change → ack latency: the source Event's
   # `created_at` (stamped in the source transaction) to `delivered_at`.
+  #
+  # `connection_name`/`subscription_name` cost nothing here: the claim loads
+  # `[:connection, :subscription, event: …]` on every row (`Dispatcher.load_claimed/1`),
+  # which is also what `delivery.connection.transport_config.type` below reads.
   defp record_delivered(delivery, delivered) do
     :telemetry.execute(
       [:ash_integration, :delivery, :delivered],
@@ -395,7 +400,9 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
         event_type: delivery.event_type,
         event_key: delivery.event_key,
         subscription_id: delivery.subscription_id,
+        subscription_name: Telemetry.name_of(delivery.subscription),
         connection_id: delivery.connection_id,
+        connection_name: Telemetry.name_of(delivery.connection),
         transport: delivery.connection.transport_config.type
       }
     )
@@ -405,7 +412,9 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
 
   # Surface a delivery that just went terminal loudly — operator log + `[:ash_integration,
   # :delivery, :terminal]` telemetry, emitted only when the `:failed` write actually
-  # applied. The row is left `:failed` (lane blocked) and never auto-resolved.
+  # applied. The row is left `:failed` (lane blocked) and never auto-resolved. The
+  # readable names ride along free — off the same claim-time
+  # `[:connection, :subscription]` load that `suspended?/1` matches on.
   defp record_terminal(delivery, reason, error_message) do
     Logger.error(
       "Outbound delivery: #{reason} delivery #{delivery.id} (#{delivery.event_type}, key " <>
@@ -421,7 +430,9 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
         event_type: delivery.event_type,
         event_key: delivery.event_key,
         connection_id: delivery.connection_id,
+        connection_name: Telemetry.name_of(delivery.connection),
         subscription_id: delivery.subscription_id,
+        subscription_name: Telemetry.name_of(delivery.subscription),
         terminal_reason: reason
       }
     )

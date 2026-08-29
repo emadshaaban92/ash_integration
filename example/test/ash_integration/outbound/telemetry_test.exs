@@ -1,8 +1,10 @@
 defmodule Example.Outbound.TelemetryTest do
   @moduledoc """
   Coverage for the outbound pipeline's `:telemetry` events: `:parked` (at dispatch
-  and on a reprocess re-park), `:suspended`/`:unsuspended`/`:resumed`, and
-  `:delivered`. See `AshIntegration.Telemetry` for the full reference.
+  and on a reprocess re-park), `:suspended`/`:unsuspended`/`:resumed`,
+  `:delivered`, and the human-readable `connection_name`/`subscription_name` every
+  route-identifying event carries. See `AshIntegration.Telemetry` for the full
+  reference.
   """
   use Example.DataCase, async: false
 
@@ -191,9 +193,228 @@ defmodule Example.Outbound.TelemetryTest do
     end
   end
 
+  describe "human-readable names" do
+    # `connection_name`/`subscription_name` exist so a backend that cannot join back
+    # to Postgres (Loki structured metadata, a Grafana panel, Sentry) can label a
+    # route it only ever sees as a UUID — and reseeding mints new UUIDs, so a static
+    # id→name map is not an option.
+    #
+    # `subscription_name` is nil throughout: this host's Subscription resource
+    # declares no `name` (the extension adds none — a subscription is labelled by its
+    # connection plus event type). The KEY is the contract; the value is the host's.
+    # `AshIntegration.TelemetryTest` covers the populated case.
+
+    test "[:delivery, :parked] at dispatch carries the connection name", %{connection: dest} do
+      seed_subscription!(dest, ~s|error("boom")|)
+
+      ref = attach([[:ash_integration, :delivery, :parked]])
+
+      create_widget!(%{name: "w", stock: 1})
+      drain_dispatch!()
+
+      assert_received {[:ash_integration, :delivery, :parked], ^ref, %{count: 1}, meta}
+      assert meta.connection_name == dest.name
+      assert Map.has_key?(meta, :subscription_name)
+      assert is_nil(meta.subscription_name)
+    end
+
+    test "the dispatch-time park reads NO connection/subscription row after the insert",
+         %{connection: dest} do
+      # The proof that the name is free at this site. The rows `emit_parked/2` fires
+      # from are what `Ash.bulk_create` handed back — associations unloaded — so a
+      # name read off the DELIVERY would have to be a SELECT, and it would land
+      # AFTER the EventDelivery insert, inside the dispatch transaction. The names
+      # ride on the spec (captured from the already-loaded subscription) instead, so
+      # the query log goes quiet on those tables once the insert has run.
+      seed_subscription!(dest, ~s|error("boom")|)
+      create_widget!(%{name: "w", stock: 1})
+
+      ref = attach([[:ash_integration, :delivery, :parked]])
+      queries = record_queries(fn -> drain_dispatch!() end)
+
+      assert_received {[:ash_integration, :delivery, :parked], ^ref, %{count: 1}, meta}
+      assert meta.connection_name == dest.name
+
+      after_insert =
+        queries
+        |> Enum.drop_while(&(not insert_of?(&1, EventDelivery)))
+        |> Enum.drop(1)
+
+      assert after_insert != [], "expected the drain to continue past the delivery insert"
+
+      refute Enum.any?(after_insert, &reads?(&1, Connection)),
+             "the parked emit must not look the connection up: #{inspect(after_insert)}"
+
+      refute Enum.any?(after_insert, &reads?(&1, Subscription)),
+             "the parked emit must not look the subscription up: #{inspect(after_insert)}"
+    end
+
+    test "[:delivery, :parked] on a reprocess re-park carries the connection name",
+         %{connection: dest} do
+      seed_subscription!(dest, ~s|error("boom")|)
+      create_widget!(%{name: "w", stock: 1})
+      drain_dispatch!()
+
+      ref = attach([[:ash_integration, :delivery, :parked]])
+      assert {:error, _} = Reprocessor.reprocess_event(single_delivery())
+
+      assert_received {[:ash_integration, :delivery, :parked], ^ref, %{count: 1}, meta}
+      assert meta.connection_name == dest.name
+      assert Map.has_key?(meta, :subscription_name)
+    end
+
+    test "[:delivery, :delivered] carries the connection name", %{connection: dest} do
+      stub_webhook_success()
+      s = create_subscription!(dest)
+      scheduled_delivery!(s)
+
+      ref = attach([[:ash_integration, :delivery, :delivered]])
+      drain_delivery!()
+
+      assert_received {[:ash_integration, :delivery, :delivered], ^ref, _measurements, meta}
+      assert meta.connection_name == dest.name
+      assert Map.has_key?(meta, :subscription_name)
+    end
+
+    test "[:delivery, :terminal] carries the connection name", %{connection: dest} do
+      stub_webhook_failure(400)
+      s = create_subscription!(dest)
+      d = scheduled_delivery!(s)
+
+      ref = attach([[:ash_integration, :delivery, :terminal]])
+      drain_delivery!()
+
+      assert_received {[:ash_integration, :delivery, :terminal], ^ref, %{attempts: 1}, meta}
+      assert meta.terminal_reason == :permanent
+      assert meta.connection_name == dest.name
+      assert Map.has_key?(meta, :subscription_name)
+
+      assert reload(d).terminal_reason == :permanent
+    end
+
+    test "the delivery relay names the connection it HOLDS, never one it looks up",
+         %{owner: owner} do
+      # The decisive no-extra-query proof. The relay's claim loads
+      # `[:connection, :subscription]` on every row; here that load is done up front
+      # and the connection is then RENAMED in the database behind it. The real
+      # `handle_message`/`handle_batch` path still reports the name it was handed —
+      # a lookup at emit time would have reported the new one.
+      stub_webhook_success()
+      dest = create_connection!(owner)
+      claimed = claim_shaped_delivery!(create_subscription!(dest))
+
+      rename_connection!(dest, "renamed-behind-the-relay")
+
+      ref = attach([[:ash_integration, :delivery, :delivered]])
+      drain_with_message(claimed)
+
+      assert_received {[:ash_integration, :delivery, :delivered], ^ref, _measurements, meta}
+
+      assert meta.connection_name == dest.name
+      refute meta.connection_name == "renamed-behind-the-relay"
+      assert reload(dest).name == "renamed-behind-the-relay"
+    end
+
+    test "[:connection, :suspended] carries the connection name", %{owner: owner} do
+      dead = create_connection!(owner, base_url: "https://wms.unreachable.example.invalid/hook")
+      scheduled_delivery!(create_subscription!(dead))
+
+      ref = attach([[:ash_integration, :connection, :suspended]])
+
+      with_window(1, fn ->
+        with_egress_blocking(fn -> drain_delivery!() end)
+        Health.recompute()
+      end)
+
+      assert_received {[:ash_integration, :connection, :suspended], ^ref, %{count: 1}, meta}
+      assert meta.id == dead.id
+      assert meta.connection_name == dead.name
+    end
+
+    test "[:subscription, :suspended] carries the subscription name key", %{connection: dest} do
+      stub_webhook_failure(503)
+      s = create_subscription!(dest)
+      scheduled_delivery!(s)
+
+      ref = attach([[:ash_integration, :subscription, :suspended]])
+
+      with_window(1, fn ->
+        drain_delivery!()
+        Health.recompute()
+      end)
+
+      assert_received {[:ash_integration, :subscription, :suspended], ^ref, %{count: 1}, meta}
+      assert meta.id == s.id
+      assert Map.has_key?(meta, :subscription_name)
+
+      # Only the suspended entity itself is in hand on this path — its connection is
+      # not loaded, and loading it just to label the event is the query this design
+      # refuses. Join on `id` downstream if you need it.
+      refute Map.has_key?(meta, :connection_name)
+    end
+  end
+
   # ── Helpers (modeled on delivery_relay_test / reprocessor_test) ─────────────
 
   defp attach(events), do: :telemetry_test.attach_event_handlers(self(), events)
+
+  # The ordered Ecto query log for `fun`, as raw SQL strings.
+  defp record_queries(fun) do
+    handler_id = {__MODULE__, :queries, System.unique_integer()}
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:example, :repo, :query],
+        fn _event, _measurements, %{query: query}, _config ->
+          send(test_pid, {handler_id, query})
+        end,
+        nil
+      )
+
+    try do
+      fun.()
+    after
+      :telemetry.detach(handler_id)
+    end
+
+    drain_queries(handler_id, [])
+  end
+
+  defp drain_queries(handler_id, acc) do
+    receive do
+      {^handler_id, query} -> drain_queries(handler_id, [query | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp insert_of?(query, resource), do: query =~ ~r/^\s*INSERT INTO "#{table(resource)}"/i
+
+  defp reads?(query, resource), do: query =~ ~r/^\s*SELECT\b.*\b"#{table(resource)}"/is
+
+  defp table(resource), do: AshPostgres.DataLayer.Info.table(resource)
+
+  # An EventDelivery loaded exactly as the delivery relay's claim loads it
+  # (`Dispatcher.load_claimed/1`), so `drain_with_message/1` drives the real path
+  # over a real claim-shaped struct.
+  defp claim_shaped_delivery!(subscription) do
+    delivery = scheduled_delivery!(subscription)
+    # A claim stamps the lease token the write-back fence matches on; without it the
+    # fenced `:deliver` applies to nothing and never reaches the `:delivered` emit.
+    set_fields!(delivery, claimed_at: DateTime.utc_now())
+
+    EventDelivery
+    |> Ash.get!(delivery.id, load: [:connection, :subscription, :event], authorize?: false)
+  end
+
+  defp rename_connection!(connection, name) do
+    table = table(Connection)
+
+    from(c in {table, Connection}, where: c.id == ^connection.id)
+    |> Example.Repo.update_all(set: [name: name])
+  end
 
   defp single_delivery do
     [d] = EventDelivery |> Ash.Query.sort(id: :asc) |> Ash.read!(authorize?: false)

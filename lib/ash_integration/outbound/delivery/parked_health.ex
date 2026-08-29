@@ -31,6 +31,8 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
   require Ash.Query
   require Logger
 
+  alias AshIntegration.Telemetry
+
   @typedoc "Derived parked-health tier."
   @type status :: :healthy | :degraded | :parked
 
@@ -138,12 +140,15 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
     # its EventDelivery notifications.
     |> Ash.update(authorize?: false, return_notifications?: true)
     |> case do
-      {:ok, _record, _notifications} ->
+      {:ok, record, _notifications} ->
         Logger.warning(
           "Parked-suspending subscription #{subscription_id} after #{count} parked deliveries"
         )
 
-        emit_parked_suspended(subscription_id, count, reason)
+        # Thread the RECORD, not just the id: the filtered update already returned the
+        # subscription this `Ash.get!`/update pair fetched, so the emit can label the
+        # event without a second lookup.
+        emit_parked_suspended(record, count, reason)
 
       # A concurrent crosser already suspended it (or it was suspended for another
       # reason). Nothing to do.
@@ -157,12 +162,18 @@ defmodule AshIntegration.Outbound.Delivery.ParkedHealth do
   # `failure_class: "parked"` (vs `"transport"`/`"response"`). `parked_count`
   # carries the magnitude that crossed the threshold. Fired once per crossing (only
   # the filtered-update winner reaches here).
-  defp emit_parked_suspended(subscription_id, parked_count, reason) do
+  #
+  # `subscription_name` matches the `Health.suspend/2` emit: read off the record the
+  # caller already holds, `nil` when the host's Subscription declares no `name`. The
+  # subscription's `connection` is NOT loaded on this path, so `connection_name`
+  # would cost a query and is deliberately absent.
+  defp emit_parked_suspended(subscription, parked_count, reason) do
     :telemetry.execute(
       [:ash_integration, :subscription, :suspended],
       %{parked_count: parked_count},
       %{
-        id: subscription_id,
+        id: subscription.id,
+        subscription_name: Telemetry.name_of(subscription),
         threshold: AshIntegration.parked_suspension_threshold(),
         failure_class: "parked",
         last_error: reason
