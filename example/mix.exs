@@ -80,7 +80,7 @@ defmodule Example.MixProject do
       {:bandit, "~> 1.5"},
       {:igniter, "~> 0.5", only: [:dev, :test]},
       {:live_select, "~> 1.0"},
-      {:lua, "~> 0.4"},
+      {:lua, "~> 1.0"},
       {:tidewave, "~> 0.1", only: [:dev]},
       {:ash_integration, path: ".."},
       {:cloak, "~> 1.1"},
