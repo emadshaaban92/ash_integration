@@ -30,7 +30,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime do
   through (it stringifies atom keys but pays no serialization cost), while a
   future out-of-process or WASM runtime serializes them to JSON/msgpack at its
   own edge. Defining the contract in terms of serializable data — rather than,
-  say, luerl tables — is what keeps that future additive.
+  say, the Lua VM's own table representation — is what keeps that future additive.
 
   ## Resource limits
 

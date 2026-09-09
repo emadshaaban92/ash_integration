@@ -11,15 +11,6 @@ updates:
         update-types:
           - minor
           - patch
-    ignore:
-      # `lua` is deliberately pinned to 0.4 in mix.lock even though mix.exs
-      # accepts `~> 0.4 or ~> 1.0`. Both backends are tested in CI (see the
-      # `lua` dimension of the test matrix and mix.lock.lua1), and moving the
-      # DEFAULT to 1.0 is a security-relevant decision, not a version bump:
-      # `lua 1.0` raises the CPU-budget breach as a `pcall`-catchable Lua error
-      # instead of killing the runner, and has no wall-clock ceiling of its own.
-      # See `Runtime.Lua.Compat`. Promote it by editing mix.lock deliberately.
-      - dependency-name: lua
 
   # Example consumer app.
   - package-ecosystem: mix

@@ -106,8 +106,11 @@ defmodule AshIntegration.Transport.Signing do
 
   @doc """
   Build the frozen `now` sub-context shared by every signing callback in one send
-  attempt (and advanced fresh on the next). The sandbox has no clock, so the host
-  supplies the timestamp in several formats.
+  attempt (and advanced fresh on the next). The sandbox has no clock — the
+  runtime sandboxes `os.time`/`os.date`/`os.clock` and friends precisely so a
+  callback cannot read one — so the host supplies the timestamp in several
+  formats. Freezing it per attempt is what lets a retry reproduce the same
+  canonical string.
   """
   @spec now_context() :: map()
   def now_context do

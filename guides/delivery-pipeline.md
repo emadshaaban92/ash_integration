@@ -663,13 +663,36 @@ Lua transforms are **operator-authored but untrusted at runtime** (a typo, a
 pathological loop, or hostile event data flowing into the script). Each run is
 bounded so one script can't take down the node:
 
-- **CPU** — a `max_steps` budget stops a runaway loop.
+- **No I/O and no ambient clock** — `io`, `file`, `package`, `load`, `require`
+  and the process-reaching parts of `os` are sandboxed by the `lua` package, and
+  the runtime additionally refuses *reading a clock*. A transform is snapshotted
+  at dispatch and replayed on reprocess, and a signing callback re-runs per
+  delivery attempt against a frozen `ctx.now` — a run that reads an ambient clock
+  silently stops reproducing either one. What is refused is the clock, not time
+  handling: the line falls between the two forms of the same function.
+
+  | Call | | Why |
+  | --- | --- | --- |
+  | `os.time()` | refused | reads the clock |
+  | `os.time({year = 2024, …})` | **works** | converts a table it was handed |
+  | `os.date()`, `os.date(fmt)` | refused | formats *now* |
+  | `os.date(fmt, t)` | **works** | formats the instant `t` it was handed |
+  | `os.clock()`, `os.time_ms()`, `os.time_us()` | refused | no argument form exists |
+  | `os.difftime(a, b)` | **works** | arithmetic over both arguments |
+  | `datetime.to_zone/format` | **works** | operates on a timestamp passed in |
+
+  So `os.date("!%Y-%m-%dT%H:%M:%SZ", event.data.created_at)` is fine — it is a
+  pure function of its arguments and returns the same bytes on every attempt.
+- **CPU** — a `max_steps` budget stops a runaway loop, and a script cannot
+  `pcall` its way past it (see below).
+- **Call depth and string size** — recursion deeper than 1000 frames, and any
+  single string over a quarter of the heap ceiling, are refused outright rather
+  than left to the heap ceiling to catch.
 - **Memory** — a `:max_heap_size` with `kill: true` on the process holding the Lua
   heap kills an allocation bomb the instant it exceeds the ceiling, before it can
   OOM the node.
-- **Wall-clock** — an outer `Task`. This is the only wall-clock enforcement point
-  on either backend: `lua 1.0` has no timer of its own, and `lua 0.4`'s `max_time`
-  is never consulted while a script is still running once a step budget is set.
+- **Wall-clock** — an outer `Task`, and the only wall-clock enforcement point:
+  the VM has no timer of its own.
 - **Crash isolation** — the script runs under `Task.Supervisor.async_nolink`, so
   a sandbox crash/kill surfaces as a parked delivery, never as a crash of the
   delivery worker.
@@ -681,43 +704,53 @@ defaults shown):
 ```elixir
 config :ash_integration,
   lua_sandbox: [
-    timeout_ms:     5_000,
-    max_steps:      100_000_000,   # ≈ a brief spin before the script is stopped
-    max_heap_words: 50_000_000     # heap+stack ceiling per run, in words (~400MB)
+    timeout_ms:     5_000,       # wall-clock ceiling per run
+    max_steps:      5_000_000,   # VM instructions; stops a tight loop in <1s
+    max_heap_words: 50_000_000   # heap+stack ceiling per run, in words (~400MB)
   ]
 ```
 
-(`:max_reductions` is still accepted as a deprecated alias for `:max_steps`. It
-named the `lua 0.4` backend's own flag; see below.)
+`max_steps` counts **VM instructions**. It is sized so the step budget is what
+stops a runaway tight loop — deterministically, with the budget named in
+`last_error` — rather than the coarser wall-clock backstop, while still leaving
+~5000x headroom over the heaviest realistic transform (a pass-through costs 1
+instruction; building a body from 1000 line items costs ~1000). Raising it much
+past the default puts it back behind `timeout_ms`, where it can never fire.
 
-### Which Lua backend, and where the CPU ceiling is enforced
+> **Upgrading from before 0.3.0?** The CPU ceiling was then spelled
+> `:max_reductions` and counted BEAM reductions on the luerl backend, where
+> `100_000_000` was the right order of magnitude. As VM instructions that same
+> number needs 20s+ of CPU — well past the default 5s `timeout_ms` — so it could
+> never fire, and every runaway would be stopped by the wall-clock backstop
+> instead (`timed out` in `last_error` rather than `exceeded its step budget`).
+>
+> `:max_reductions` is therefore **clamped to the default** rather than read
+> verbatim: a value below the default is kept (asking for a stricter ceiling than
+> stock still means something), one above it is capped. The runtime logs a
+> warning at boot naming the value and what it was clamped to. Rename the setting
+> to `:max_steps` and pick a value in VM instructions to silence it.
 
-The library accepts `lua ~> 0.4 or ~> 1.0` and picks its backend at **compile
-time**. `lua 0.4` runs on Erlang's luerl; `lua 1.0` ships its own Elixir Lua 5.3
-VM and has no luerl dependency. `0.4` is the pinned default. Everything in the
-runtime is on the API both releases share except the CPU ceiling, which is
-isolated in `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat`.
+### Exhausting the step budget always parks the delivery
 
-One difference is visible to a script, so it is worth knowing which backend you
-are on:
+The library requires `lua ~> 1.0`, which ships its own Elixir Lua 5.3 VM and
+evaluates in the calling process.
 
-- On **`lua 0.4`** the step budget is enforced by **killing** the process running
-  the Lua code. `pcall` cannot catch a process kill, so a runaway script always
-  parks the delivery.
-- On **`lua 1.0`** it is enforced by **raising a catchable Lua error**. Total CPU
-  is still bounded — the budget is per top-level evaluation and is never refilled,
-  so catching it buys no extra work — but a script can burn its whole budget,
-  catch the error, and still return a deliverable descriptor.
+That VM raises a budget breach as an **ordinary Lua error**, which means `pcall`
+catches it. On its own that would be a hole: a script could wrap its body in
+`pcall`, burn its entire budget, swallow the error, and go on to return a
+perfectly well-formed descriptor — which would then be delivered.
 
-The wall-clock ceiling, despite appearances, is **not** a difference: `lua 0.4`
-exposes a `max_time` flag that `lua 1.0` has no equivalent for, but luerl only
-consults it after its runner has already terminated whenever a step budget is
-set — and one always is. The outer `Task` is the sole wall-clock bound on both.
+`AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Budget` closes it by
+checking the instruction tally on the way out of a *successful* evaluation as
+well as a failed one. Reaching the ceiling is a resource-limit failure whether or
+not the script noticed, so the delivery parks either way, and `last_error` says
+the breach was caught and its result discarded.
 
-`lua 1.0` in exchange bounds two things `0.4` cannot express (call depth and
-single-string size, both derived from the same limits), and because it evaluates
-in-process, killing the `Task` actually kills the evaluator — see the blocking
-host-function note below.
+Total CPU was bounded regardless — the budget is per top-level evaluation and a
+caught breach is never refunded, so looping over `pcall` buys no extra work. What
+the check preserves is the stronger property operators actually rely on: a script
+that runs out of budget **parks** rather than shipping whatever it had computed
+so far.
 
 ## Host APIs in the sandbox
 
@@ -768,15 +801,13 @@ Three properties keep this inside the threat model:
   qualifies, anything that opens a socket does not. This is a contract with the
   host — a configured module runs with the node's full authority.
 - **A CPU-bound host function is inside the budget.** Host functions are invoked
-  by whichever process runs the Lua code (luerl's runner on `lua 0.4`, the
-  transform `Task` itself on `lua 1.0`), so their work and allocations count
-  against the same step and heap ceilings — calling one in a tight loop is bounded
-  exactly like a tight loop of Lua. A host function that **blocks** defeats the
-  step budget on either backend: the work never advances, so nothing counts it.
-  Only the outer `Task` backstop returns. On `lua 0.4` it is worse still — the
-  luerl runner is spawned unlinked and survives that `Task`'s kill, leaking one
-  process per delivery for as long as it blocks (on `lua 1.0` the evaluator *is*
-  the `Task`, so it dies with it). That is the concrete cost of breaking the
+  by the transform `Task` — the process running the Lua code — so their work and
+  allocations count against the same step and heap ceilings; calling one in a
+  tight loop is bounded exactly like a tight loop of Lua. A host function that
+  **blocks** defeats the step budget: blocked work executes no VM instructions,
+  so nothing counts it, and only the outer `Task` backstop returns. The evaluator
+  *is* that `Task`, so killing it does kill the evaluation and nothing leaks —
+  but the budget is gone all the same. That is the concrete cost of breaking the
   purity rule, and why it is a rule.
 - **Shadowing hurts only the shadowing script.** APIs are loaded before the
   author's chunk, so `datetime = nil` is legal — and every run builds a fresh

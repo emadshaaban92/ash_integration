@@ -1,15 +1,63 @@
 defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   @max_script_size 10_240
   @default_timeout_ms 5_000
-  # ~100M steps ≈ a fraction of a second of runaway CPU before the script is
-  # stopped. The unit is the backend's (BEAM reductions on `:luerl`, VM
-  # instructions on `:lua_vm`) and neither is a wall-clock measure, so the outer
-  # wall-clock backstop catches anything that slips past either way.
-  @default_max_steps 100_000_000
+  # The unit is VM instructions, and this default is sized so the step budget is
+  # the thing that stops a runaway tight loop — deterministically, with a message
+  # naming the budget — rather than the coarser wall-clock backstop.
+  #
+  # Measured on the `lua 1.0` VM, the cheapest possible loop (`while true do end`)
+  # runs ~4.6M instructions/second and an arithmetic one ~3M, so 5M stops them in
+  # roughly 1–2s: inside the 5s default `timeout_ms`, with enough margin that the
+  # ordering still holds on hardware several times slower. Allocation-heavy loops
+  # run far fewer instructions per second (a table-building loop manages ~84k/s),
+  # so for those the wall-clock or heap ceiling legitimately fires first — an
+  # instruction is not a fixed amount of work, and no single budget can be the
+  # first to fire for every shape of script.
+  #
+  # The headroom over real transforms is enormous: a pass-through costs 1
+  # instruction, and building a body from 1000 line items costs ~1000. This is
+  # ~5000x the heaviest realistic script.
+  #
+  # NOTE when re-tuning: before 0.3.0 this counted BEAM reductions on the luerl
+  # backend, where 100M was the right order of magnitude. As VM instructions the
+  # same number takes 20s+ of CPU, so it could never fire before the wall-clock
+  # ceiling and the step budget was effectively inert.
+  @default_max_steps 5_000_000
   # Heap+stack ceiling in WORDS (≈8 bytes each on 64-bit, so the default is
   # ~400MB). Exceeding it kills the process holding the heap instantly — an
   # allocation bomb can't OOM the node while waiting for the wall-clock timeout.
   @default_max_heap_words 50_000_000
+
+  # The documented `lua_sandbox` block, rendered from the attributes above so the
+  # copy-paste config in the moduledoc cannot drift from the shipped defaults.
+  # (It has, twice: the defaults were re-tuned while the docs kept the old
+  # numbers, and a host pasting one got a sandbox the docs did not describe.)
+  # `guides/delivery-pipeline.md` carries the same block and cannot interpolate,
+  # so `lua_sandbox_limits_test.exs` pins it against these same values instead.
+  @doc_limits_block [
+                      {"timeout_ms", @default_timeout_ms, "wall-clock ceiling per run"},
+                      {"max_steps", @default_max_steps,
+                       "VM instructions; stops a tight loop in <1s"},
+                      {"max_heap_words", @default_max_heap_words,
+                       "heap+stack ceiling per run, in words (~400MB)"}
+                    ]
+                    |> Enum.map(fn {key, value, note} ->
+                      grouped =
+                        value
+                        |> Integer.to_string()
+                        |> String.replace(~r/(\d)(?=(\d{3})+$)/, "\\1_")
+
+                      {"#{key}:", grouped, note}
+                    end)
+                    |> then(fn rows ->
+                      key_width = rows |> Enum.map(&byte_size(elem(&1, 0))) |> Enum.max()
+                      val_width = rows |> Enum.map(&byte_size(elem(&1, 1))) |> Enum.max()
+
+                      Enum.map_join(rows, "\n", fn {key, value, note} ->
+                        "          #{String.pad_trailing(key, key_width + 1)}" <>
+                          "#{String.pad_trailing(value <> ",", val_width + 2)}# #{note}"
+                      end)
+                    end)
 
   @moduledoc """
   Sandboxed Lua execution environment for outbound transform scripts.
@@ -19,17 +67,11 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   transform engine. The resolver reaches it through that behaviour (never by
   name), so a future runtime can slot in beside it.
 
-  Everything here runs on the **stable `Lua` API** — the surface `lua 0.4.x` and
-  `lua 1.0.x` spell identically. The single genuinely version-specific concern,
-  putting a CPU ceiling on an evaluation, lives behind
-  `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat`, which also
-  decides which backend this node compiled against:
-
-  - **`:luerl`** (`lua 0.4`) — the Lua code runs in a luerl-spawned runner process.
-  - **`:lua_vm`** (`lua 1.0`) — `lua`'s own Elixir Lua 5.3 VM, evaluating
-    in-process. `lua 1.0` dropped luerl as a dependency entirely.
-
-  Nothing else in this module knows which one it is.
+  Execution runs on `lua 1.0`'s own Elixir Lua 5.3 VM, in the calling process.
+  Putting a CPU ceiling on an evaluation — configuring it, recognising a breach,
+  and reporting one — lives behind
+  `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Budget`; nothing else
+  in this module deals in the VM's own units.
 
   ## Bounding an untrusted script
 
@@ -37,64 +79,67 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   pathological loop, or hostile event data flowing into the script). Execution is
   bounded so one script can't take down the node:
 
-  - **Function sandboxing** (`Lua.new/1`): `io`, `os.execute`, `os.exit`,
+  - **Function sandboxing** (`Lua.new/1`): `io`, `file`, `os.execute`, `os.exit`,
     `os.getenv`, `package`, `load`, `require`, `dofile`, … all raise if called.
+    `Budget.new_state/1` additionally refuses reading an **ambient clock**, which
+    `Lua.new/1` leaves reachable: a transform is snapshotted at dispatch and
+    replayed on reprocess, and a signing callback re-runs per attempt against a
+    frozen `ctx.now`, so a run that reads one silently stops reproducing. The
+    line falls between the two forms of the same function, not around it —
+    `os.time()`/`os.date()`/`os.clock()` are refused, while `os.time(table)`,
+    `os.date(fmt, t)` and `os.difftime(a, b)` are pure functions of their
+    arguments and still work. See `Budget`.
   - **Script size**: scripts over #{@max_script_size} bytes are rejected up front.
-  - **CPU / steps**: a `max_steps` budget stops a runaway loop — by killing the
-    luerl runner on `:luerl`, by raising a Lua error on `:lua_vm`. See
-    "Where the backends differ" below; the difference is observable to a script.
+  - **CPU / steps**: a `max_steps` budget stops a runaway loop. The VM raises the
+    breach as a catchable Lua error, so `Budget` also refuses a result from an
+    evaluation that spent its whole budget — a script cannot `pcall` its way past
+    the ceiling and still deliver. See `Budget`.
+  - **Call depth / string size**: recursion deeper than 1000 frames, and any
+    single string over a quarter of the heap ceiling, are refused outright rather
+    than left to the heap ceiling to catch. See `Budget`.
   - **Memory**: a `:max_heap_size` with `kill: true` on the process holding the
     Lua heap kills an allocation bomb the instant it exceeds the ceiling, before
     it can OOM the node.
-  - **Wall-clock**: the outer `Task` bounds total runtime. On both backends this
-    is the *only* wall-clock enforcement point — `lua 1.0` has no `max_time`, and
-    `lua 0.4`'s is never consulted while a script is still running once a step
-    budget is set (see `Compat`).
+  - **Wall-clock**: the outer `Task` bounds total runtime, and is the *only*
+    wall-clock enforcement point — the VM has no timer of its own.
   - **Crash isolation**: the script runs under `Task.Supervisor.async_nolink`, so
     a sandbox crash/kill surfaces as an error to the caller instead of taking the
     caller down with it.
 
   The three resource axes are expressed in the runtime-neutral
   `AshIntegration.Outbound.Delivery.Transform.Limits` vocabulary
-  (`max_steps`, `max_memory_words`, `timeout_ms`) and mapped onto whichever
-  primitives the compiled-against backend actually offers — see `Compat`.
-  Limits are configurable (with safe defaults):
+  (`max_steps`, `max_memory_words`, `timeout_ms`) and mapped onto the VM's own
+  primitives by `Budget`. Limits are configurable (with safe defaults):
 
       config :ash_integration,
         lua_sandbox: [
-          timeout_ms:     5_000,
-          max_steps:      100_000_000,
-          max_heap_words: 50_000_000
+  #{@doc_limits_block}
         ]
 
-  `:max_reductions` is still accepted as a deprecated alias for `:max_steps`;
-  it named luerl's own flag, which the `:lua_vm` backend does not have.
+  `max_steps` counts **VM instructions**, not BEAM reductions — a budget carried
+  over from a pre-0.3.0 config is off by more than an order of magnitude in the
+  wrong direction and will never fire before `timeout_ms`. See the
+  `@default_max_steps` attribute for how the default is sized.
 
-  ## Where the backends differ
+  `:max_reductions` is still read as a deprecated alias for `:max_steps`, but
+  **clamped to the default** rather than honoured verbatim: it named the flag
+  `lua 0.4`'s luerl backend used, and a value written in BEAM reductions cannot
+  be read as VM instructions without disabling the ceiling. A value below the
+  default is kept (that intent still means something); one above it is capped.
+  `warn_about_sandbox_config/0` says so at boot.
 
-  `Compat` documents this in full; the security-relevant part belongs here too,
-  because it is a property of *this* sandbox and not an implementation detail:
+  ## Hitting the ceiling always parks the delivery
 
-  - On **`:luerl`**, the step budget is enforced by **killing** the process the
-    Lua code runs in. Nothing inside Lua can observe or survive that, so a
-    runaway script always ends in `{:error, …}` and the delivery parks.
-  - On **`:lua_vm`**, it is enforced by **raising a Lua error**, which `pcall`
-    **catches**. Total CPU is still bounded (the budget is per top-level
-    evaluation and is never refilled, so the next loop back-edge re-raises), but
-    a script can burn its whole budget, catch the error, and still return a
-    normal result. The same source that parks on `:luerl` can deliver on
-    `:lua_vm`.
-
-  Memory also changes *where* it is enforced: because `:lua_vm` evaluates
-  in-process, the ceiling is the `Task`'s own `:max_heap_size` rather than
-  `spawn_opts` on a luerl runner — the runtime sets that flag on both backends,
-  so the ceiling holds either way.
-
-  Wall-clock, by contrast, does **not** differ, despite `lua 0.4` appearing to
-  offer a `max_time` that the newer release drops: luerl only consults that timer
-  once its runner has already terminated, whenever `max_reductions` is set — and
-  it always is here. The outer `Task` is the sole wall-clock ceiling on both.
-  `Compat` quotes the luerl code path.
+  This is a property of *this* sandbox rather than an implementation detail, so
+  it belongs here as well as in `Budget`. The VM raises a budget breach as an
+  **ordinary Lua error**, which `pcall` catches — so a script could otherwise
+  burn its entire budget, swallow the error, and return a half-computed
+  descriptor that then gets delivered. `Budget.eval/4` closes that by checking
+  the instruction tally on the way out of a *successful* evaluation as well as a
+  failed one: a run that reached its ceiling is an error whether or not the
+  script noticed. Total CPU was bounded either way (the budget is per top-level
+  evaluation and a caught breach is never refunded); what the check preserves is
+  that a script which runs out of budget **parks** instead of delivering.
 
   ## Host APIs
 
@@ -123,7 +168,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   removes `datetime.to_zone`/`datetime.format` for every script on the node, and
   of two host modules sharing a scope only the last survives. That is
   occasionally what a host wants; far more often it's an accidental name clash,
-  so `warn_about_host_apis/0` flags both shapes at boot.
+  so `warn_about_sandbox_config/0` flags both shapes at boot.
 
   Three properties hold this together:
 
@@ -134,24 +179,15 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     is a contract with the host, not something the runtime can enforce: a
     configured module runs with the full authority of the node.
   - **A host function that burns CPU is inside the budget.** It is invoked by
-    whichever process is running the Lua code — luerl's runner on `:luerl`, the
-    `Task` itself on `:lua_vm` — so its work and its allocations count against
+    the `Task` that is running the Lua code, so its work and its allocations count against
     the same step and heap ceilings as the script's own: calling one in a tight
     loop is bounded exactly like a tight loop of Lua. A host function that
-    **blocks** is the awkward case, and it is where the two backends diverge:
-
-      * On `:luerl` it escapes the step budget. The reduction watchdog polls
-        `process_info(runner, :reductions)`, and a descheduled runner never
-        advances, so it never trips — and because that watchdog loops until the
-        runner dies, luerl's own `max_time` is never reached either. Only the
-        outer `Task` returns, and because the runner is spawned *unlinked*,
-        brutal-killing that `Task` leaves it alive, leaking one process per
-        delivery for as long as the call blocks.
-      * On `:lua_vm` the evaluator *is* the `Task`, so `Task.shutdown(:brutal_kill)`
-        actually kills it and nothing leaks.
-
-    Either way a blocking host function defeats the step budget, which is the
-    sharpest reason the purity rule above is a rule and not a preference.
+    **blocks** is the awkward case: blocked work executes no VM instructions, so
+    nothing counts it against the step budget and only the outer `Task` backstop
+    returns. The evaluator *is* that `Task`, so `Task.shutdown(:brutal_kill)`
+    does kill it and nothing is leaked — but the step budget is defeated all the
+    same, which is the sharpest reason the purity rule above is a rule and not a
+    preference.
   - **A script can shadow them, and that hurts only itself.** The APIs are loaded
     before the author's chunk, so `datetime = nil` at the top of a script is
     legal. Every run builds a fresh state and re-loads the APIs into it, so a
@@ -209,20 +245,27 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   require Logger
 
   alias AshIntegration.Outbound.Delivery.Transform.Limits
-  alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat
+  alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Budget
   alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI
 
   # Always loaded, ahead of any host-configured API.
   @builtin_apis [DatetimeAPI]
 
   @doc """
-  Boot check (from `AshIntegration.Supervisor`): warn about a
-  `lua_sandbox: [apis: …]` entry that isn't a loadable `Lua.API` module, one that
-  claims a built-in's scope and so replaces it, or two entries that claim the same
-  scope as each other and so replace one another.
+  Boot check (from `AshIntegration.Supervisor`) for everything in
+  `config :ash_integration, lua_sandbox: […]` that is wrong in a way the runtime
+  can survive but an operator cannot see:
 
-  All three are otherwise invisible until a transform runs — the first parks
-  every delivery, the other two silently remove functions scripts were calling.
+    * a resource limit that is not a positive integer, which falls back to its
+      default rather than crashing a delivery worker;
+    * `:max_reductions`, whose unit changed in 0.3.0 and whose value is clamped;
+    * an `:apis` entry that isn't a loadable `Lua.API` module, one that claims a
+      built-in's scope and so replaces it, or two that claim the same scope as
+      each other.
+
+  Each is otherwise invisible until a transform runs — a bad `:apis` entry parks
+  every delivery, the scope collisions silently remove functions scripts were
+  calling, and a bad limit quietly gives you a sandbox you did not configure.
   This **warns rather than raises**, following
   `AshIntegration.Outbound.PoolCheck`: refusing the host's boot over a
   transform-sandbox setting is a heavier failure than the one it prevents, and a
@@ -230,8 +273,122 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   module before loading it, so a bad entry parks with the same message rather
   than slipping through.
   """
-  @spec warn_about_host_apis() :: :ok
-  def warn_about_host_apis do
+  @spec warn_about_sandbox_config() :: :ok
+  def warn_about_sandbox_config do
+    warn_about_unusable_limits()
+    warn_about_deprecated_step_budget()
+    warn_about_host_apis()
+  end
+
+  # Every `lua_sandbox` limit that must be a positive integer, with the accessor
+  # that reads it, so the check below covers the whole set rather than whichever
+  # keys someone remembered.
+  @limit_keys [:timeout_ms, :max_steps, :max_reductions, :max_heap_words]
+
+  # A limit configured with something that is not a positive integer is a typo an
+  # operator cannot see: `max_steps: "5000000"` (an env var read without
+  # `String.to_integer/1`, say) is silently ignored and the default applies, so
+  # the sandbox is not the one they configured. `max_steps/0` guards on
+  # `is_integer/1` — it has to, since a bad value would otherwise reach
+  # `Lua.new/1` — which makes the fallback total and therefore silent. This is
+  # what makes it audible.
+  defp warn_about_unusable_limits do
+    case Enum.filter(@limit_keys, &unusable_limit?/1) do
+      [] ->
+        :ok
+
+      bad ->
+        config = sandbox_config()
+
+        Logger.warning("""
+        AshIntegration: these `lua_sandbox` limits are not positive integers and are being
+        IGNORED, so the default applies instead of the value you configured:
+        #{Enum.map_join(bad, ", ", fn key -> "#{inspect(key)}: #{inspect(Keyword.get(config, key))}" end)}.
+
+        Every limit is a positive integer — `timeout_ms` in milliseconds, `max_steps` in VM
+        instructions, `max_heap_words` in 8-byte BEAM words.
+        """)
+    end
+
+    :ok
+  end
+
+  defp unusable_limit?(key) do
+    case Keyword.fetch(sandbox_config(), key) do
+      # Absent, or explicitly nil, both mean "not configured".
+      :error -> false
+      {:ok, nil} -> false
+      {:ok, value} -> not (is_integer(value) and value > 0)
+    end
+  end
+
+  # `:max_reductions` is read in a DIFFERENT UNIT than it was written in, so a
+  # host carrying a pre-0.3.0 config forward is silently running a ceiling that
+  # means something else. Warned at boot rather than per run: it is a config
+  # mistake with a one-line fix, and the runtime would otherwise look fine right
+  # up until a runaway reported "timed out" instead of naming the budget.
+  # Reads the two keys through `positive_or_nil/2` — the SAME reading `max_steps/0`
+  # uses. A warning that disagrees with the code it describes is worse than none:
+  # with `[max_steps: 0, max_reductions: 1_000]` a raw `Keyword.get` + `is_integer/1`
+  # saw two integers and advised "`:max_steps` wins; drop `:max_reductions`", but
+  # `0` is not usable so the ALIAS was the live ceiling — following that advice
+  # loosened it from 1_000 to the 5_000_000 default. And `[max_steps: "5000", …]`
+  # matched neither clause, so a clamped alias went unmentioned entirely.
+  defp warn_about_deprecated_step_budget do
+    config = sandbox_config()
+
+    case {positive_or_nil(config, :max_steps), positive_or_nil(config, :max_reductions)} do
+      {steps, reductions} when is_integer(steps) and is_integer(reductions) ->
+        Logger.warning("""
+        AshIntegration: `lua_sandbox` sets BOTH `:max_steps` (#{steps}) and the
+        deprecated `:max_reductions` (#{reductions}).
+
+        `:max_steps` wins; drop `:max_reductions`.
+        """)
+
+      {nil, reductions} when is_integer(reductions) ->
+        warn_deprecated_reductions(reductions)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp warn_deprecated_reductions(reductions) do
+    effective = deprecated_step_budget(reductions)
+
+    clamp_note =
+      if effective < reductions do
+        "That value is being CLAMPED to #{effective}. Read as VM instructions, " <>
+          "#{reductions} needs far more CPU than the #{@default_timeout_ms}ms default " <>
+          "`timeout_ms` allows, so the step budget could never fire — every runaway would " <>
+          "be stopped by the wall-clock backstop instead, reporting \"timed out\" rather " <>
+          "than naming the budget."
+      else
+        "It is below the #{@default_max_steps} default, so it is being used as-is — but it " <>
+          "was written in a different unit, so confirm it is still the ceiling you want."
+      end
+
+    Logger.warning("""
+    AshIntegration: `lua_sandbox: [max_reductions: #{reductions}]` is deprecated and its
+    UNIT HAS CHANGED.
+
+    Before 0.3.0 it counted BEAM reductions on the luerl backend. The runtime now runs on the
+    `lua 1.0` VM and counts VM instructions, which are not comparable.
+
+    #{clamp_note}
+
+    Rename it to `:max_steps` and pick a value in VM instructions. The default is
+    #{@default_max_steps}, which stops a tight loop in well under a second and is still
+    ~5000x the heaviest realistic transform.
+    """)
+  end
+
+  # The `:apis` half of the boot check. Private: `warn_about_sandbox_config/0` is
+  # the single entry point the supervisor calls.
+  defp warn_about_host_apis do
     configured = configured_apis()
     {loadable, unloadable} = Enum.split_with(configured, &lua_api_module?/1)
 
@@ -388,12 +545,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     end
   end
 
-  # `parse_chunk/1` is one of the two places the stable API is NOT literally
-  # identical: `lua 0.4` answers `{:error, [String.t()]}`, `lua 1.0` answers
-  # `{:error, %Lua.CompilerException{}}`. Both shapes are matched here rather than
-  # in `Compat` because both clauses compile on both versions (the struct exists
-  # in each) — there is no conditional compilation to isolate. `to_string/1` on an
-  # exception struct RAISES, so the list clause alone would crash on `lua 1.0`.
+  # `parse_chunk/1` answers `{:error, %Lua.CompilerException{}}`. The list clause
+  # below is kept as a fallback for a future release that reports raw strings
+  # again: `to_string/1` on an exception struct RAISES, so a single clause of
+  # either shape would crash on the other.
   defp format_errors(error) when is_exception(error), do: Exception.message(error)
 
   defp format_errors(errors), do: errors |> List.wrap() |> Enum.map_join("; ", &to_string/1)
@@ -406,14 +561,11 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   def execute(script, event, defaults, %Limits{} = limits) do
     task =
       Task.Supervisor.async_nolink(AshIntegration.TaskSupervisor, fn ->
-        # This flag is doing two jobs. On `:lua_vm` it IS the memory ceiling —
-        # that backend evaluates in this very process. On `:luerl` the runner
-        # carries its own `:max_heap_size`, but that only bounds script
-        # *execution*: reading and decoding the `result` table
-        # (read_result/decode_result) runs here in the Task after the runner
-        # returns, so a script that builds a within-budget-but-huge `result` could
-        # balloon this process's heap outside that ceiling.
-        # (kill: true → surfaces as `{:exit, _}`.)
+        # THE memory ceiling: the VM evaluates in this very process, so this flag
+        # bounds the Lua heap itself — and, just as importantly, the reading and
+        # decoding of the `result` table (read_result/decode_result), which also
+        # runs here and could otherwise balloon the heap on a
+        # within-budget-but-huge result. (kill: true → surfaces as `{:exit, _}`.)
         Process.flag(:max_heap_size, %{
           size: limits.max_memory_words,
           kill: true,
@@ -423,11 +575,9 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
         run_sandboxed(script, event, defaults, limits)
       end)
 
-    # THE wall-clock ceiling, on both backends — not a backstop behind an inner
-    # one. `lua 1.0` has no `max_time` at all, and `lua 0.4`'s is only consulted
-    # after its runner has already terminated whenever a step budget is set (see
-    # the "Wall-clock" section of `Compat`), so there is no inner timer to leave
-    # grace for and the timeout an operator is told about is the one applied.
+    # THE wall-clock ceiling — not a backstop behind an inner one. The VM has no
+    # timer of its own, so there is no inner deadline to leave grace for and the
+    # timeout an operator is told about is the one actually applied.
     # Because the task is `async_nolink`, a brutal-kill or crash here comes back
     # as `{:exit, _}` — never propagated to (and crashing) the caller.
     case Task.yield(task, limits.timeout_ms) || Task.shutdown(task, :brutal_kill) do
@@ -491,7 +641,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   end
 
   defp compile_session(source, lua, %Limits{} = limits, orchestrate) do
-    case Compat.eval(lua, source <> @detect_callbacks, limits, "signing source") do
+    case Budget.eval(lua, source <> @detect_callbacks, limits, "signing source") do
       {:ok, lua} ->
         defined = read_defined(lua)
         orchestrate.(fn fname, ctx -> sign_call_on(lua, limits, defined, fname, ctx) end)
@@ -509,7 +659,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     if MapSet.member?(defined, fname) do
       lua = set_global(lua, :__ctx, ctx)
 
-      case Compat.eval(lua, "__sign_result = #{fname}(__ctx)", limits, "signing callback") do
+      case Budget.eval(lua, "__sign_result = #{fname}(__ctx)", limits, "signing callback") do
         {:ok, lua} -> {:ok, {:defined, decode_result(Lua.get!(lua, [:__sign_result]))}}
         {:error, message} -> {:error, message}
       end
@@ -532,9 +682,8 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   end
 
   # Runs inside the async_nolink task. This function only builds the pre-seeded
-  # state and reads the outcome back; `Compat.eval/4` is the bounded execution
-  # call (a luerl-spawned runner on `:luerl`, an in-process VM run on `:lua_vm`)
-  # and classifies every failure into one message vocabulary.
+  # state and reads the outcome back; `Budget.eval/4` is the bounded execution
+  # call and classifies every failure into one message vocabulary.
   defp run_sandboxed(script, event, defaults, %Limits{} = limits) do
     with {:ok, lua} <- new_state(limits) do
       lua =
@@ -545,7 +694,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
       # The author's source defines `transform`; @invoke calls it (or passes the
       # defaults through, for a no-op script) and stashes the RETURN value in the
       # bridge global we read back. Both run under the one bounded sandbox call.
-      case Compat.eval(lua, script <> @invoke, limits, "script") do
+      case Budget.eval(lua, script <> @invoke, limits, "script") do
         {:ok, lua} -> read_result(lua)
         {:error, message} -> {:error, message}
       end
@@ -566,18 +715,44 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   # A FRESH sandbox state per run, with the built-in and host-configured APIs
   # loaded into it. Nothing is carried over between runs, so a script that
   # shadows or clobbers an API global affects only its own execution. `limits`
-  # reaches `Compat.new_state/1` because on the `:lua_vm` backend the CPU ceiling
-  # is an option ON the state; on `:luerl` it rides with the execution call
-  # instead and this is a plain `Lua.new/0`.
+  # reaches `Budget.new_state/1` because the CPU, call-depth and string-size
+  # ceilings are options ON the state.
+  #
+  # Built in two steps with a rescue each, because BOTH steps raise
+  # `ArgumentError` and they mean opposite things: `Lua.new/1` rejects an
+  # out-of-range ceiling (`max_steps: 0`), while `load_host_api/2` rejects a
+  # non-`Lua.API` module. Building the state inside the same `try` as the reduce
+  # would let a bad *limit* be reported as a bad `:apis` config, sending an
+  # operator to the wrong setting entirely.
   defp new_state(%Limits{} = limits) do
-    {:ok, Enum.reduce(host_apis(), Compat.new_state(limits), &load_host_api/2)}
+    with {:ok, lua} <- build_state(limits) do
+      load_host_apis(lua)
+    end
+  end
+
+  defp build_state(%Limits{} = limits) do
+    {:ok, Budget.new_state(limits)}
+  rescue
+    # `Lua.new/1` validates the ceilings `Budget` derives from `Limits`, so this
+    # is a bad limit — name that, not the APIs. Config cannot reach here (every
+    # `lua_sandbox` limit falls back to its default when it is not a positive
+    # integer), so in practice this is a caller passing explicit `%Limits{}`.
+    e in ArgumentError ->
+      {:error, "invalid transform sandbox limits: #{Exception.message(e)}"}
+
+    e ->
+      {:error, "could not build the transform sandbox: #{Exception.message(e)}"}
+  end
+
+  defp load_host_apis(lua) do
+    {:ok, Enum.reduce(host_apis(), lua, &load_host_api/2)}
   rescue
     # The only thing `load_host_api/2` itself raises — attribute it precisely.
     e in ArgumentError ->
       {:error, "could not load the configured Lua host APIs: #{Exception.message(e)}"}
 
-    # Anything else (a module's `install/3`, `Lua.new/1`) is a different failure and
-    # shouldn't be reported as a bad `:apis` config.
+    # Anything else (a module's `install/3`) is a different failure and shouldn't
+    # be reported as a bad `:apis` config.
     e ->
       {:error, "could not build the transform sandbox: #{Exception.message(e)}"}
   end
@@ -641,7 +816,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
   defp keyword_table?([{k, _v} | _]) when is_binary(k), do: true
   defp keyword_table?(_), do: false
 
-  # Lua/luerl returns a sequence (array) table as an integer-keyed proplist
+  # Lua returns a sequence (array) table as an integer-keyed proplist
   # (`[{1, v1}, {2, v2}, ...]`). Decode it to an ordered list of decoded values.
   defp sequence_table?([{k, _v} | _]) when is_integer(k), do: true
   defp sequence_table?(_), do: false
@@ -653,24 +828,82 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   # The built-ins always load; host-configured APIs load after them. A host scope
   # that collides with a built-in's therefore REPLACES it wholesale (`Lua.load_api/2`
-  # resets the scope table rather than merging), which `warn_about_host_apis/0`
+  # resets the scope table rather than merging), which `warn_about_sandbox_config/0`
   # surfaces at boot because the far likelier cause is an accidental name clash.
   defp host_apis, do: @builtin_apis ++ configured_apis()
 
   defp configured_apis, do: List.wrap(Keyword.get(sandbox_config(), :apis, []))
 
-  defp timeout_ms, do: Keyword.get(sandbox_config(), :timeout_ms, @default_timeout_ms)
+  defp timeout_ms, do: positive_integer(:timeout_ms, @default_timeout_ms)
 
-  # `:max_reductions` named luerl's own flag, which the `:lua_vm` backend has no
-  # equivalent for. `:max_steps` (the `Limits` vocabulary) is the name to use; the
-  # old key stays honoured so a host that set it keeps its configured ceiling
-  # rather than silently reverting to the default.
+  # `:max_reductions` named the flag `lua 0.4`'s luerl backend used, which this
+  # runtime no longer runs on. `:max_steps` (the `Limits` vocabulary) is the name
+  # to use.
+  #
+  # The old key is still read, but it is CLAMPED to the default rather than
+  # honoured verbatim, because the unit changed underneath it. `:max_steps` is
+  # new in 0.3.0, so every host upgrading from an earlier release wrote
+  # `:max_reductions`, and wrote it in BEAM reductions. Read as VM instructions
+  # those numbers are wrong by more than an order of magnitude in the direction
+  # that disables the ceiling: a carried-over `max_reductions: 100_000_000` needs
+  # 20s+ of CPU, so it can never fire before `timeout_ms` and every runaway is
+  # stopped by the wall-clock backstop instead — the exact inert-budget defect
+  # 0.3.0 fixed for the default, reintroduced for the only population this alias
+  # exists to serve.
+  #
+  # `min/2` is the honest reading of intent across that unit change:
+  #
+  #   * A value BELOW the default was someone asking for a stricter ceiling than
+  #     stock. That intent still means something, so it is kept.
+  #   * A value ABOVE it cannot mean "looser than stock" in the new unit, because
+  #     in the new unit it means "no ceiling at all". It is capped at the default,
+  #     which is itself ~5000x the heaviest realistic transform.
+  #
+  # Either way `warn_about_sandbox_config/0` tells the operator at boot, so the
+  # clamp is visible rather than a silent second surprise.
   defp max_steps do
     config = sandbox_config()
 
-    Keyword.get(config, :max_steps) || Keyword.get(config, :max_reductions) ||
-      @default_max_steps
+    case {positive_or_nil(config, :max_steps), positive_or_nil(config, :max_reductions)} do
+      {steps, _} when is_integer(steps) -> steps
+      {_, reductions} when is_integer(reductions) -> min(reductions, @default_max_steps)
+      _ -> @default_max_steps
+    end
   end
 
-  defp max_heap_words, do: Keyword.get(sandbox_config(), :max_heap_words, @default_max_heap_words)
+  # The configured value if it is a positive integer, else `nil` so the caller
+  # falls through. Every limit treats a bad value the same way — fall back to the
+  # default and say so at boot — rather than each key failing in its own place
+  # and its own way.
+  defp positive_or_nil(config, key) do
+    case Keyword.get(config, key) do
+      value when is_integer(value) and value > 0 -> value
+      _ -> nil
+    end
+  end
+
+  @doc false
+  # The clamp above, exposed so the boot warning and its test read the same rule
+  # rather than restating it.
+  @spec deprecated_step_budget(integer()) :: integer()
+  def deprecated_step_budget(reductions), do: min(reductions, @default_max_steps)
+
+  defp max_heap_words, do: positive_integer(:max_heap_words, @default_max_heap_words)
+
+  # A configured limit, or `default` if it is anything other than a positive
+  # integer — `nil` included, since `Keyword.get/3` returns a stored `nil` rather
+  # than the default.
+  #
+  # This is a SAFETY fallback, not tidiness. These values are not merely read;
+  # they are handed to `Process.flag(:max_heap_size, %{size: …})` and
+  # `Task.yield(task, …)`, neither of which tolerates a non-integer. A bad
+  # `:timeout_ms` used to raise `FunctionClauseError` inside `Task.yield/2` —
+  # in the CALLER, taking down the delivery worker rather than parking the
+  # delivery — and a bad `:max_heap_words` killed the sandbox `Task`, which the
+  # caller then reported as "sandbox crashed or was killed", pointing at the
+  # script instead of the config. A typo in a ceiling must not be able to do
+  # either. `warn_about_sandbox_config/0` names the offending key at boot so the
+  # fallback is not silent.
+  defp positive_integer(key, default),
+    do: positive_or_nil(sandbox_config(), key) || default
 end

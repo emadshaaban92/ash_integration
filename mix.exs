@@ -1,7 +1,7 @@
 defmodule AshIntegration.MixProject do
   use Mix.Project
 
-  @version "0.2.2"
+  @version "0.3.0"
   @source_url "https://github.com/emadshaaban92/ash_integration"
 
   def project do
@@ -10,16 +10,6 @@ defmodule AshIntegration.MixProject do
       version: @version,
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
-      # Dual-backend testing: `MIX_LOCKFILE=mix.lock.lua1 mix test` resolves the
-      # whole dependency set against an alternate lockfile (today: `lua 1.0`
-      # instead of the default `lua 0.4` — see
-      # `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat`). Each
-      # lockfile gets its OWN deps/_build tree: sharing them would leave the other
-      # backend's compiled artifacts in place, and the backend is picked at COMPILE
-      # time, so a shared build directory would quietly test the wrong one.
-      lockfile: lockfile(),
-      deps_path: variant_path("deps"),
-      build_path: variant_path("_build"),
       start_permanent: Mix.env() == :prod,
       # Tests define Ash resources at compile time, and each one carries its own
       # `Inspect` implementation. Consolidated protocols would make those runtime
@@ -64,25 +54,6 @@ defmodule AshIntegration.MixProject do
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
-  # An empty `MIX_LOCKFILE` (an unset CI matrix value, a stray `MIX_LOCKFILE=`)
-  # means "the default", not "a lockfile named nothing".
-  defp lockfile do
-    case System.get_env("MIX_LOCKFILE") do
-      nil -> "mix.lock"
-      "" -> "mix.lock"
-      path -> path
-    end
-  end
-
-  # "mix.lock" -> `base`; "mix.lock.lua1" -> `base.lua1`.
-  defp variant_path(base) do
-    case Path.basename(lockfile()) do
-      "mix.lock" -> base
-      "mix.lock." <> variant -> base <> "." <> variant
-      other -> base <> "." <> Path.rootname(other)
-    end
-  end
-
   defp deps do
     [
       {:ash, "~> 3.0"},
@@ -96,13 +67,11 @@ defmodule AshIntegration.MixProject do
       {:brod, "~> 4.0", optional: true},
       {:swoosh, "~> 1.0", optional: true},
       {:gen_smtp, "~> 1.0", optional: true},
-      {:lua, "~> 0.4 or ~> 1.0"},
-      # `lua 0.4` runs on luerl and we drive its sandbox directly
-      # (`:luerl_sandbox.run/3` is the ONLY CPU budget that release offers).
-      # `lua 1.0` ships its own VM and has no luerl dependency at all, so this is
-      # declared here rather than leaned on transitively, and `optional: true` so a
-      # host on `lua 1.0` is not forced to carry it. See `Runtime.Lua.Compat`.
-      {:luerl, "~> 1.5", optional: true},
+      # `lua 1.0` ships its own Elixir Lua 5.3 VM (no luerl). The transform
+      # sandbox needs its `Lua.new/1` limit options — `:max_instructions`,
+      # `:max_call_depth`, `:max_string_bytes` — which `lua 0.4` has no
+      # equivalent for, so 0.4 is not supported. See `Runtime.Lua.Budget`.
+      {:lua, "~> 1.0"},
       {:jason, "~> 1.0"},
       {:phoenix, "~> 1.7"},
       {:phoenix_live_view, "~> 1.0"},

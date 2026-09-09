@@ -589,11 +589,11 @@ Registered APIs must be **pure computation** — no I/O, no network, no filesyst
 
 Pick a scope name that doesn't collide with a built-in: built-ins load first and a host module with the same scope **replaces** it entirely rather than merging, so a host API scoped `datetime` removes `datetime.to_zone` for every script on the node. A collision is logged at boot.
 
-A **CPU-bound** host function runs inside the script's own step and heap budgets. A **blocking** one escapes them: blocked work never advances, so nothing counts it against the step budget — only the outer `Task` backstop returns, and on the `lua 0.4` backend the unlinked luerl runner survives even that, leaking a process per delivery. That is what the purity rule is protecting. The same APIs are loaded for [custom signing scripts](guides/delivery-pipeline.md).
+A **CPU-bound** host function runs inside the script's own step and heap budgets. A **blocking** one escapes them: blocked work executes no VM instructions, so nothing counts it against the step budget and only the outer `Task` backstop returns. That is what the purity rule is protecting. The same APIs are loaded for [custom signing scripts](guides/delivery-pipeline.md).
 
 **Signature & auth.** The descriptor (body as a term, headers, routing) is resolved at dispatch and snapshotted on the event, then replayed on every retry. Two secret-derived outputs are **never** snapshotted and are injected live at delivery: `Authorization`/auth (resolved from the encrypted connection — a transform-set `authorization` header still wins), and the **signature**, which is recomputed fresh per attempt under the connection's `signing` scheme with a frozen send-time timestamp. Signing live keeps the anti-replay timestamp honest on retries and makes a rotated secret apply immediately — so reprocess is only needed to pick up an edited transform or connection/route config, not a secret rotation.
 
-Scripts run in a sandboxed environment with no I/O, a 10KB size limit, and a 5-second timeout.
+Scripts run in a sandboxed environment with no I/O and no clock (`os.time`, `os.date` and friends raise — a transform is replayed on reprocess and a signing callback re-runs per attempt, so a script reading an ambient clock stops reproducing), a 10KB size limit, and a 5-second timeout.
 
 ## Architecture
 

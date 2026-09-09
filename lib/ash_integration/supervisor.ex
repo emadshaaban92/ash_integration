@@ -43,7 +43,7 @@ defmodule AshIntegration.Supervisor do
       # transform ran (and parked, or silently lost the built-in's functions).
       # Warns (never crashes) — refusing the host's boot over a transform-sandbox
       # setting is a heavier failure than the one it prevents.
-      AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.warn_about_host_apis()
+      AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.warn_about_sandbox_config()
 
       children = [
         AshIntegration.Transport.KafkaClientManager,
