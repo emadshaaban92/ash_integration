@@ -3,6 +3,9 @@ import Config
 config :ash, :known_types, []
 config :ash, :custom_types, []
 
+# Required by ash 3.33. `:codepoints` is Ash's recommendation.
+config :ash, :default_string_length_count, :codepoints
+
 config :ash_integration, :config, []
 config :ash_integration, :vault, AshIntegration.TestVault
 
