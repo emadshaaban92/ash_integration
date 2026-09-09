@@ -3,12 +3,7 @@ import Config
 config :ash, :known_types, []
 config :ash, :custom_types, []
 
-# Ash 3.33 requires every app to say how string `min_length`/`max_length` are
-# counted. `:codepoints` is Ash's recommendation and matches how SQL data layers
-# count, so validation agrees with the database and `max_length` actually bounds
-# the stored size (`:mixed`, the legacy behaviour, counts graphemes in Elixir, and
-# a single grapheme can carry unboundedly many combining marks). Hosts set this
-# for their own app; this is the suite's setting.
+# Required by ash 3.33. `:codepoints` is Ash's recommendation.
 config :ash, :default_string_length_count, :codepoints
 
 config :ash_integration, :config, []

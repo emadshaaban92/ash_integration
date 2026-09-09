@@ -85,21 +85,6 @@ config :ash_integration,
 declare event types — the derived event-type catalog the dashboard and dispatcher
 read.
 
-### Ash string-length counting
-
-Ash 3.33 requires every host app to say how string `min_length` / `max_length`
-are counted — without it your app does not compile:
-
-```elixir
-config :ash, :default_string_length_count, :codepoints
-```
-
-`:codepoints` is Ash's recommendation, and it is what this library is developed
-and tested against. It also matters here specifically: a subscription's
-`transform_source` is capped at 10,240, and under the legacy `:mixed` setting
-that cap counts graphemes — a single grapheme can carry an unbounded number of
-combining marks, so the cap would not bound the size of the stored script.
-
 ### Optional settings
 
 ```elixir
