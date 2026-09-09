@@ -17,6 +17,12 @@ config :ash,
   default_actions_require_atomic?: true,
   read_action_after_action_hooks_in_order?: true,
   bulk_actions_default_to_errors?: true,
+  # How string `min_length`/`max_length` are counted. `:codepoints` is Ash's
+  # recommendation: it matches how SQL data layers count, so validation agrees
+  # with the database and `max_length` actually bounds the stored size. The
+  # legacy `:mixed` counts graphemes in Elixir, and one grapheme can carry
+  # unboundedly many combining marks.
+  default_string_length_count: :codepoints,
   transaction_rollback_on_error?: true,
   redact_sensitive_values_in_errors?: true,
   known_types: [AshPostgres.Timestamptz, AshPostgres.TimestamptzUsec]

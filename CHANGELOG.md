@@ -93,19 +93,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Dependencies refreshed for both the library and the example app.** `ash`
-  moves to `3.32.3`, which clears the advisories Hex reported against `3.32.0`
+  moves to `3.33.1`, which clears the advisories Hex reported against `3.32.0`
   (`Ash.Type.CiString` / `Ash.Type.Decimal` / `Ash.Type.String` constraint
   handling, `parent(...)` filter scoping, `Ash.Type.Union` tag dumping,
-  `Ash.Vector` dimension headers, `Ash.Type.UUIDv7` validation). Also bumped:
-  `ash_postgres 2.13.0`, `ash_cloak 0.4.0`, `ash_phoenix 2.3.25`,
+  `Ash.Vector` dimension headers, `Ash.Type.UUIDv7` validation) and against
+  `3.32.3` (grapheme-counted string length — see the host-config note below).
+  Alongside it `mint 1.10.0` clears two Mint DoS advisories (quadratic
+  chunk-size parsing, unbounded status-line/chunk-extension buffering) and
+  `igniter 0.8.4` a terminal-escape-injection advisory; `mix deps.audit` and
+  `mix hex.audit` are clean on both lockfiles. Also bumped:
+  `ash_postgres 2.13.1`, `ash_sql 0.7.3`, `ash_cloak 0.4.0`, `ash_phoenix 2.3.25`,
   `phoenix 1.8.13`, `phoenix_live_view 1.2.11`, `req 0.7.4`, `brod 4.6.3`,
-  `swoosh 1.28.0`, `tidewave 0.9.0`, `ex_doc 0.40.4`, plus the example's
+  `swoosh 1.28.0`, `tidewave 0.9.0`, `ex_doc 0.40.4`, `usage_rules 1.2.8`,
+  `ranch 2.3.0`, `spitfire 0.4.1`, plus the example's
   `ash_authentication 4.14.2`, `ash_authentication_phoenix 2.17.3`,
   `phoenix_live_dashboard 0.9.1`, `telemetry_metrics 1.2.0` and `mimic 2.4.0`.
   `mix.lock.lua1` was regenerated from `mix.lock` so the two still differ only
   in the Lua backend, and `lua` itself stays pinned per lockfile (`0.4` on the
   default, `1.0` on the variant) — that pin is the point of the dual-backend
-  matrix, not staleness.
+  matrix, not staleness. The example keeps `dns_cluster 0.2.0` and
+  `lua ~> 0.4`: both newer releases are outside the requirements it declares.
+
+- **Hosts must now set `config :ash, :default_string_length_count`.** This is an
+  `ash 3.33` requirement, not one this library adds — an app that does not set it
+  fails to compile, with an Ash error naming the two choices. Both this repo's
+  suite and the example app set `:codepoints`, Ash's recommendation: it matches
+  how SQL data layers count, so validation agrees with the database. The choice
+  is visible here because a subscription's `transform_source` is capped at
+  `max_length: 10_240`; under the legacy `:mixed` setting that cap counts
+  graphemes, and one grapheme can carry an unbounded number of combining marks,
+  so it would not bound the size of the stored script. See the README's
+  "Ash string-length counting" section.
 
 - **The Lua transform runtime now runs on the stable `Lua` API and works on both
   `lua 0.4` and `lua 1.0`.** It previously called `:luerl_sandbox.run/3` directly
