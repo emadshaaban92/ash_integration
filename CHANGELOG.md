@@ -248,8 +248,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `design/configurable-signing.md` §5.
   - **The `lua_sandbox` CPU-budget option is `:max_steps`** (the runtime-neutral
     `Limits` vocabulary). `:max_reductions` named the flag the luerl backend
-    used; it is still honoured as a deprecated alias, so a host that set it keeps
-    its configured ceiling.
+    used; it is still honoured as a deprecated alias, but its unit changed with
+    the backend, so a carried-over value above the shipped default is clamped to
+    that default rather than used as written — see the `:max_reductions` entry
+    above.
 
 - **Dispatch now uses an age-based terminal model, not an attempt ceiling.** An
   undispatched `Event` no longer becomes poison after `max_attempts` claims; instead

@@ -287,7 +287,7 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
   # A limit configured with something that is not a positive integer is a typo an
   # operator cannot see: `max_steps: "5000000"` (an env var read without
-  # `String.to_integer/1`, say) is silently ignored and the default applies, so
+  # `String.to_integer/1`, say) is silently ignored and something else applies, so
   # the sandbox is not the one they configured. `max_steps/0` guards on
   # `is_integer/1` — it has to, since a bad value would otherwise reach
   # `Lua.new/1` — which makes the fallback total and therefore silent. This is
@@ -302,8 +302,10 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
 
         Logger.warning("""
         AshIntegration: these `lua_sandbox` limits are not positive integers and are being
-        IGNORED, so the default applies instead of the value you configured:
+        IGNORED, so the value you configured is not the one in force:
         #{Enum.map_join(bad, ", ", fn key -> "#{inspect(key)}: #{inspect(Keyword.get(config, key))}" end)}.
+
+        #{ignored_limit_effect(bad, config)}
 
         Every limit is a positive integer — `timeout_ms` in milliseconds, `max_steps` in VM
         instructions, `max_heap_words` in 8-byte BEAM words.
@@ -311,6 +313,23 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
     end
 
     :ok
+  end
+
+  # What applies in place of an ignored limit. Every key falls back to its own
+  # default EXCEPT `:max_steps`, which falls through to `:max_reductions` first —
+  # so with `[max_steps: "5000000", max_reductions: 1_000]` the ceiling in force
+  # is the clamped alias (1_000), not the default. Naming the default there would
+  # send an operator looking for a ceiling that is not the one running.
+  defp ignored_limit_effect(bad, config) do
+    alias_budget = positive_or_nil(config, :max_reductions)
+
+    if :max_steps in bad and is_integer(alias_budget) do
+      "`:max_steps` falls back to the deprecated `:max_reductions` before the default, so the " <>
+        "step budget in force is #{deprecated_step_budget(alias_budget)} VM instructions, not " <>
+        "the #{@default_max_steps} default. Every other limit above falls back to its default."
+    else
+      "The default applies instead."
+    end
   end
 
   defp unusable_limit?(key) do
@@ -367,8 +386,8 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua do
           "be stopped by the wall-clock backstop instead, reporting \"timed out\" rather " <>
           "than naming the budget."
       else
-        "It is below the #{@default_max_steps} default, so it is being used as-is — but it " <>
-          "was written in a different unit, so confirm it is still the ceiling you want."
+        "It is at or below the #{@default_max_steps} default, so it is being used as-is — but " <>
+          "it was written in a different unit, so confirm it is still the ceiling you want."
       end
 
     Logger.warning("""
