@@ -7,8 +7,13 @@
 > time* vs *send time*, the *snapshot* (`event.delivery`), *reprocess*, *park*, and
 > the `failure_class: :transport | :response` taxonomy. See
 > `design/outbound-architecture.md`. A signing secret is `ash_cloak`-encrypted at
-> rest; the transform sandbox is luerl-backed and has no clock or crypto (`os`/`io`
-> are blocked). It does load pure **host APIs** — the built-in `datetime`
+> rest; the transform sandbox runs on `lua 1.0`'s Lua 5.3 VM and has no crypto and
+> no clock — `io`/`file`/`package`/`load`/`require` and the process-reaching parts
+> of `os` are sandboxed by the `lua` package, and the runtime additionally
+> sandboxes the clock readers (`os.time`, `os.date`, `os.clock`, and `lua 1.0`'s
+> non-standard `os.time_ms`/`os.time_us`) so a callback cannot sign a different
+> string on each delivery attempt. Pure time arithmetic over values passed in
+> (`os.difftime`) stays. It does load pure **host APIs** — the built-in `datetime`
 > (timezone conversion/`strftime` over a timestamp *passed in*, never a clock)
 > plus any the host registers — into signing sessions as well as transforms; see
 > `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua`.
@@ -94,8 +99,9 @@ subscription.signing_source || connection.signing.source     -- custom scheme on
 
 An override against a `none`/`stripe` connection is a config error (rejected at
 save). **Whole-source**, not per-function merge — per-function merge ("load two
-sources, let the second redefine globals") is a luerl-ism that wouldn't port to
-other runtimes; whole override keeps "one source = one complete behaviour."
+sources, let the second redefine globals") leans on a Lua-specific loading trick
+that wouldn't port to other runtimes; whole override keeps "one source = one
+complete behaviour."
 
 ## 4. The `custom` scheme: a staged signing behaviour
 
@@ -161,7 +167,7 @@ edits a byte blob.
 | `ctx.url`, `ctx.path`, `ctx.host` | full URL, path **incl. query**, host |
 | `ctx.headers` | the resolved headers about to be sent |
 | `ctx.body` | the encoded wire body string (what Model 1 hashes by default) |
-| `ctx.data` | the structured body (read-only) — for building canonical strings in Model 2 (numbers are luerl floats — format explicitly when signing; see §5) |
+| `ctx.data` | the structured body (read-only) — for building canonical strings in Model 2 (format numbers explicitly when signing; see §5) |
 | `ctx.now.unix_seconds` / `unix_millis` / `iso8601` / `rfc1123` | frozen send time (ISO-8601 ms-precision `Z`; RFC-1123 HTTP-date) |
 | `ctx.digest` / `ctx.digest_base64` | hex / base64 of `content` under the scheme's `algorithm`; available to `string_to_sign` onward |
 | `ctx.signature` | available to the placement callbacks |
@@ -215,8 +221,9 @@ verified one of two ways, and embedded signatures force the second:
 
 **The guarantee, by construction.** Round-tripping a structured body through the
 sandbox and re-encoding can change bytes even when the author touched nothing
-(luerl has only floats: `100`→`100.0`; map key order can shift). We avoid
-*detecting* this (a diff can't tell author-edit from luerl-drift). Instead:
+(map key order can shift; a number that passes through Lua arithmetic can change
+subtype). We avoid *detecting* this (a diff can't tell author-edit from
+round-trip drift). Instead:
 
 - the body is encoded **exactly once**, and
 - a placement `body` callback existing is the *only* trigger for re-encoding.
@@ -237,15 +244,23 @@ bytes), so re-encoding is fine — the receiver re-extracts fields.
   structurally (we can't introspect what `content` returns). So "caught
   structurally" covers the default-`content` case only; the override case is a
   documented footgun.
-- **luerl number coercion reaches author-built strings, not just the body.** The
+- **Number formatting reaches author-built strings, not just the body.** The
   guarantee above is about the *body re-encode* path. A separate, related footgun:
-  a Model-2 author builds `string_to_sign` from `ctx.data` **inside luerl**, where
-  every number is a float — `100` can stringify as `100.0`, and large integers can
-  lose precision. That produces a *valid signature over the wrong string* → a
-  silent 401, the exact failure this design fights. The library can't fix it (it's
-  the author's string), so it must be **documented loudly**, with guidance to
-  format numbers explicitly (`string.format("%d", n)`, or the gateway's required
-  precision) rather than relying on `tostring`. Surfaced on `ctx.data` (§4.4).
+  a Model-2 author builds `string_to_sign` from `ctx.data` **inside Lua**, where
+  the 5.3 integer/float distinction decides how a number stringifies. An integer
+  survives as one (`100` → `"100"`, exact to 64 bits), but any value that passes
+  through `/` becomes a float — `100 / 2` stringifies as `"50.0"`, not `"50"`.
+  That produces a *valid signature over the wrong string* → a silent 401, the
+  exact failure this design fights. The library can't fix it (it's the author's
+  string), so it must be **documented loudly**, with guidance to format numbers
+  explicitly (`string.format("%d", n)`, `//` for integer division, or the
+  gateway's required precision) rather than relying on `tostring`. Surfaced on
+  `ctx.data` (§4.4).
+
+  > Before 0.3.0 this library ran on `lua 0.4`/luerl, where *every* number was a
+  > float (`100` → `"100.0"`) and large integers lost precision. A signing source
+  > written against that behaviour — one that strips a trailing `.0`, or formats
+  > defensively around it — must be re-checked against Lua 5.3 semantics.
 - **Unsupported sub-case:** embedded *and* the receiver re-hashes the exact
   transmitted bytes. `Jason.encode!` gives no canonical-JSON (JCS) guarantee, so
   those bytes aren't bit-reproducible cross-implementation. Rare/ill-defined;
@@ -402,7 +417,7 @@ secret; `stripe`/`custom` validate a non-blank one at save.)
 - **Host crypto functions in the guest** (`sha256_hex`, HMAC) — secret exposure
   (HMAC) and WASM host-import friction; replaced by "library applies crypto between
   pure callbacks."
-- **Per-function override (merge)** — luerl-only merge semantics; portability trap;
+- **Per-function override (merge)** — Lua-specific merge semantics; portability trap;
   deferred (additive later).
 - **Built-in profiles *instead of* custom** — too rigid alone; **adopted as the
   `none`/`stripe`/… variants *alongside* `custom`**, which keeps the common cases

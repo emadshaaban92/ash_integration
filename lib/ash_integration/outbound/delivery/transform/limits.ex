@@ -6,11 +6,11 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Limits do
   `AshIntegration.Outbound.Delivery.Transform.Runtime` implementation maps these
   onto its native primitives:
 
-  | Field               | Meaning                       | Lua `0.4` (luerl)      | Lua `1.0` (own VM)   | WASM (Wasmtime)     |
-  | ------------------- | ----------------------------- | ---------------------- | -------------------- | ------------------- |
-  | `:timeout_ms`       | wall-clock ceiling            | outer Task             | outer Task           | epoch interruption  |
-  | `:max_steps`        | CPU / work budget             | `max_reductions`       | `max_instructions`   | fuel                |
-  | `:max_memory_words` | memory ceiling (8-byte words) | runner `:max_heap_size` | Task `:max_heap_size` | linear-memory pages |
+  | Field               | Meaning                       | Lua (`lua 1.0`'s VM)  | WASM (Wasmtime)     |
+  | ------------------- | ----------------------------- | --------------------- | ------------------- |
+  | `:timeout_ms`       | wall-clock ceiling            | outer Task            | epoch interruption  |
+  | `:max_steps`        | CPU / work budget             | `max_instructions`    | fuel                |
+  | `:max_memory_words` | memory ceiling (8-byte words) | Task `:max_heap_size` | linear-memory pages |
 
   Keeping the vocabulary uniform means an operator sees the same failure
   modes ("timed out", "exceeded its step budget", "exceeded its memory
@@ -20,14 +20,12 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Limits do
   that unit up to the caller.
 
   Uniform *vocabulary* is not uniform *enforcement*, and this struct deliberately
-  does not pretend otherwise. `:max_steps` names a work budget; what happens when
-  a script exhausts it is the backend's business, and the two Lua backends differ
-  in a way a script can observe — `lua 0.4` kills the process running the Lua code
-  (uncatchable), `lua 1.0` raises a `pcall`-catchable Lua error. Wall-clock, by
-  contrast, is the caller's `Task` on both: `lua 0.4`'s `max_time` looks like an
-  inner ceiling but is never consulted while a script is still running once a
-  step budget is set. See
-  `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat`.
+  does not pretend otherwise. `:max_steps` names a work budget; how a runtime
+  stops a script that exhausts one is its own business. What every runtime owes
+  the caller is the *outcome*: exhausting the budget must end the run in an
+  error, never in a result. The Lua runtime raises its breach as an ordinary,
+  `pcall`-catchable Lua error, so it enforces that outcome explicitly — see
+  `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Budget`.
   """
 
   @type t :: %__MODULE__{

@@ -4,7 +4,6 @@ defmodule AshIntegration.LuaHostAPIsTest do
   use ExUnit.Case, async: false
 
   alias AshIntegration.Outbound.Delivery.Transform.Runtime.Lua
-  alias AshIntegration.Test.LuaBackend
 
   # The realistic near-miss: a real, loadable module that exports `scope/0` for
   # its own reasons but never did `use Lua.API`, so it has no `__lua_functions__/0`
@@ -29,19 +28,14 @@ defmodule AshIntegration.LuaHostAPIsTest do
     Lua.execute("function transform(event, defaults)\n#{body}\nend", event)
   end
 
-  # "this name is gone" reads differently on each backend, and both phrasings are
-  # worth pinning: `:luerl` reports the call site as an undefined function,
-  # `:lua_vm` reports the missing field on the scope table. Asserting the actual
-  # per-backend text beats relaxing this to something vague that both satisfy —
-  # a message that stopped naming the missing name would still pass that.
+  # Pin the actual text the VM produces for "this name is gone": it reports the
+  # missing field on the scope table. Relaxing this to something vaguer would
+  # still pass if the message stopped naming the missing name at all, which is
+  # the whole diagnostic value.
   defp assert_missing_function(message, scope, name) do
-    if LuaBackend.luerl?() do
-      assert message =~ "undefined function"
-    else
-      assert message =~ "attempt to call a nil value"
-      assert message =~ "field '#{name}'"
-      assert message =~ "global '#{scope}'"
-    end
+    assert message =~ "attempt to call a nil value"
+    assert message =~ "field '#{name}'"
+    assert message =~ "global '#{scope}'"
   end
 
   describe "host-registered APIs" do
@@ -217,7 +211,7 @@ defmodule AshIntegration.LuaHostAPIsTest do
     test "warns about an unloadable :apis entry" do
       put_sandbox_config(apis: [NotQuiteALuaAPI, NoSuchModuleAtAll])
 
-      log = capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end)
+      log = capture_log(fn -> assert :ok = Lua.warn_about_sandbox_config() end)
 
       assert log =~ "NotQuiteALuaAPI"
       assert log =~ "NoSuchModuleAtAll"
@@ -227,7 +221,7 @@ defmodule AshIntegration.LuaHostAPIsTest do
     test "warns that a colliding scope replaces the built-in, naming what is lost" do
       put_sandbox_config(apis: [AshIntegration.Test.CollidingLuaAPI])
 
-      log = capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end)
+      log = capture_log(fn -> assert :ok = Lua.warn_about_sandbox_config() end)
 
       assert log =~ "CollidingLuaAPI"
       assert log =~ "REPLACES"
@@ -239,7 +233,7 @@ defmodule AshIntegration.LuaHostAPIsTest do
     test "warns that two host entries share a scope, naming what is lost" do
       put_sandbox_config(apis: [AshIntegration.Test.LuaAPI, AshIntegration.Test.ShoutingLuaAPI])
 
-      log = capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end)
+      log = capture_log(fn -> assert :ok = Lua.warn_about_sandbox_config() end)
 
       assert log =~ "ShoutingLuaAPI"
       assert log =~ "LuaAPI"
@@ -254,7 +248,7 @@ defmodule AshIntegration.LuaHostAPIsTest do
     test "says so when the winner redefines every shadowed name" do
       put_sandbox_config(apis: [AshIntegration.Test.ShoutingLuaAPI, AshIntegration.Test.LuaAPI])
 
-      log = capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end)
+      log = capture_log(fn -> assert :ok = Lua.warn_about_sandbox_config() end)
 
       assert log =~ "No functions disappear"
       assert log =~ "implementations replace theirs"
@@ -263,19 +257,19 @@ defmodule AshIntegration.LuaHostAPIsTest do
     test "listing the same module twice is not a collision" do
       put_sandbox_config(apis: [AshIntegration.Test.LuaAPI, AshIntegration.Test.LuaAPI])
 
-      assert capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end) == ""
+      assert capture_log(fn -> assert :ok = Lua.warn_about_sandbox_config() end) == ""
     end
 
     test "stays quiet for a valid configuration" do
       put_sandbox_config(apis: [AshIntegration.Test.LuaAPI])
 
-      assert capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end) == ""
+      assert capture_log(fn -> assert :ok = Lua.warn_about_sandbox_config() end) == ""
     end
 
     test "stays quiet when no :apis are configured" do
       put_sandbox_config(timeout_ms: 5_000)
 
-      assert capture_log(fn -> assert :ok = Lua.warn_about_host_apis() end) == ""
+      assert capture_log(fn -> assert :ok = Lua.warn_about_sandbox_config() end) == ""
     end
   end
 

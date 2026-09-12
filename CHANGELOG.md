@@ -5,40 +5,136 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0]
 
 ### Security
 
-- **Recorded a real difference between the two Lua backends' CPU ceilings.** No
-  behaviour changes on the pinned `lua 0.4` backend; this documents (and tests)
-  what would change if a host moved to `lua 1.0`. Transform sources are
-  operator-authored but untrusted at runtime, so the difference matters:
-  - On `lua 0.4` the step budget is enforced by **killing** the process running
-    the Lua code. `pcall` cannot catch a process kill, so a runaway script always
-    parks the delivery.
-  - On `lua 1.0` it is enforced by **raising a catchable Lua error**. Total CPU is
-    still bounded (the budget is per top-level evaluation and is never refilled,
-    so catching it buys nothing), but a script can burn its whole budget, catch
-    the error, and still return a deliverable descriptor.
-  - Memory moves from the luerl runner's `spawn_opts` to the transform `Task`'s
-    own `:max_heap_size` (already set, so the ceiling holds either way).
-    Conversely, because `lua 1.0` evaluates in-process, brutal-killing the `Task`
-    actually kills the evaluator — the `0.4` hazard where a **blocking** host
-    function leaks one unlinked runner per delivery disappears.
-  - **Wall-clock is not part of the difference, and the outer `Task` timeout is
-    now honest about that.** `lua 0.4` exposes a `max_time` flag `lua 1.0` has no
-    equivalent for, but `luerl_sandbox:do_run/3` only reaches its `max_time`
-    receive once the runner has already terminated, whenever `max_reductions` is
-    set — and the runtime always sets one. The outer `Task` was consequently
-    waiting `timeout_ms + 1_000` for an inner timer that never fires, so a script
-    configured with `timeout_ms: 300` was stopped at ~1300ms while `last_error`
-    reported "timed out after 300ms". The grace is removed: the `Task` now waits
-    exactly `timeout_ms` on both backends.
-  - On `lua 1.0` the runtime additionally sets `:max_call_depth` and
-    `:max_string_bytes` (from the same `Limits`), ceilings `lua 0.4` cannot
-    express, so the newer backend is bounded no less tightly.
-  - `test/ash_integration/lua_pcall_budget_test.exs` pins all of this on both
-    backends.
+- **The transform sandbox no longer exposes an ambient clock.** `Lua.new/1`
+  sandboxes `io`, `file`, `package`, `load`, `require`, `os.execute`, `os.exit`,
+  `os.getenv`, `os.remove`, `os.rename` and `os.tmpname`, but left the clock
+  readable. The runtime now refuses **reading** a clock, with the line falling
+  between the two forms of the same function rather than around it:
+
+  | Call | | Why |
+  | --- | --- | --- |
+  | `os.time()` | refused | reads the clock |
+  | `os.time({year = 2024, …})` | works | converts a table it was handed |
+  | `os.date()`, `os.date(fmt)` | refused | formats *now* |
+  | `os.date(fmt, t)` | works | formats the instant `t` it was handed |
+  | `os.clock()`, `os.time_ms()`, `os.time_us()` | refused | no argument form exists |
+  | `os.difftime(a, b)` | works | arithmetic over both arguments |
+
+  The test is on the argument's **value**, in the position the VM consults, not
+  on how many arguments were passed: `os.time(nil)`, `os.date(fmt, nil)` and
+  `os.date(fmt, "x")` each carry an argument and still read the clock, so all
+  three are refused. The allowed forms are pure functions of their arguments and
+  reproduce exactly, so `os.date("!%Y-%m-%dT%H:%M:%SZ", event.data.created_at)`
+  keeps working — as does the `datetime` host API.
+  - **This closes a silent-signature-drift hole.** A signing callback is re-run
+    per delivery attempt, and the scheme freezes a send-time `ctx.now` precisely
+    so a retry reproduces the same canonical string. A callback reaching for
+    `os.time()` instead signed *different bytes on every attempt* — a valid
+    signature over the wrong string, i.e. the silent 401 that the signing design
+    exists to prevent. The same applies to a transform, whose descriptor is
+    snapshotted at dispatch and replayed on reprocess.
+  - The library's docs already stated the sandbox had no clock, and `datetime`
+    was documented as operating on "a timestamp passed in, never a clock" — the
+    behaviour now matches. **A script calling the no-argument forms will now
+    park**; pass the instant instead — `ctx.now` (signing), a field on the event
+    (transforms), or the argument form of the same call. The refusal message
+    names those alternatives.
+  - Not covered: `math.random` is also non-deterministic across runs and is left
+    available, since it has legitimate uses and no documented promise attached.
+    A signing callback must not use it, for the same reason.
+
+- **The default step budget was inert and is re-tuned: `max_steps` now defaults
+  to `5_000_000` (was `100_000_000`).** The old value was sized for BEAM
+  reductions on the luerl backend. As `lua 1.0` VM instructions the same number
+  needs 20s+ of CPU — far beyond the 5s default `timeout_ms` — so at stock
+  config the step budget could never fire: every runaway was stopped by the
+  coarse wall-clock backstop instead, reporting "timed out" rather than naming
+  the budget. The deterministic ceiling this release is built around was
+  therefore unreachable unless an operator had lowered `max_steps` by hand.
+  - Measured on the `lua 1.0` VM, a tight loop now parks in well under a second
+    with `script exceeded its step budget` in `last_error`.
+  - Headroom is unchanged in practice: a pass-through transform costs 1
+    instruction and building a body from 1000 line items costs ~1000, so the new
+    default is still ~5000x the heaviest realistic script.
+  - Allocation-heavy loops run far fewer instructions per second, so for those
+    the wall-clock or heap ceiling still fires first — an instruction is not a
+    fixed amount of work, and no single budget is the first to fire for every
+    shape of script.
+  - A host that set `:max_steps` keeps its configured value; only the default
+    moved. `:max_reductions` is handled separately — see below.
+
+- **The deprecated `:max_reductions` alias is now clamped, because its unit
+  changed.** `:max_steps` is new in 0.3.0, so every host upgrading from an
+  earlier release configured its CPU ceiling as `:max_reductions`, in BEAM
+  reductions. Reading those values as VM instructions reintroduced the
+  inert-budget defect above for precisely the population the alias exists to
+  serve: a carried-over `max_reductions: 100_000_000` needs 20s+ of CPU, so a
+  runaway returned `timed out after 5000ms` at 5001ms instead of
+  `exceeded its step budget` at ~500ms.
+  - A value **below** the shipped default is still honoured — asking for a
+    stricter ceiling than stock is intent that survives the unit change.
+  - A value **above** it is capped at the default, which cannot mean "looser than
+    stock" in the new unit because in the new unit it means "no ceiling at all".
+  - Either case logs a warning at boot naming the value, what it was clamped to,
+    and the one-line fix. An explicit `:max_steps` is never clamped. The warning
+    reads both keys exactly as the runtime does, so it cannot advise a change
+    that would loosen the live ceiling.
+  - **A `lua_sandbox` limit that is not a positive integer now falls back to its
+    default instead of reaching the runtime**, and is named at boot. This is a
+    safety fix, not tidiness: these values are handed to
+    `Process.flag(:max_heap_size, %{size: …})` and `Task.yield(task, …)`. A
+    non-integer `:timeout_ms` (`"5000"`, or an explicit `nil` — `Keyword.get/3`
+    returns a stored `nil` rather than its default) raised `FunctionClauseError`
+    inside `Task.yield/2`, **in the caller**, taking down the delivery worker
+    rather than parking the delivery; a bad `:max_heap_words` killed the sandbox
+    `Task` and was reported as "sandbox crashed or was killed", pointing at the
+    script instead of the config. All four limit keys are now handled the same
+    way.
+
+- **A transform can no longer `pcall` its way past the step budget and still
+  deliver.** The Lua VM raises a CPU-budget breach as an ordinary Lua error, so
+  `pcall` catches it — a script could wrap its body in `pcall`, burn its entire
+  budget, swallow the error, and go on to return a perfectly well-formed
+  descriptor, which was then **delivered**. Transform sources are
+  operator-authored but untrusted at runtime, so this mattered: the same source
+  that should have parked the delivery shipped a half-computed payload instead.
+  - Total CPU was bounded either way (the budget is per top-level evaluation and
+    a caught breach is never refunded, so looping over `pcall` bought no extra
+    work). What was lost was the stronger property operators rely on: **reaching
+    the ceiling parks the delivery**.
+  - `Runtime.Lua.Budget` now checks the instruction tally on the way out of a
+    *successful* evaluation as well as a failed one. A run that reached its
+    ceiling is a resource-limit error whether or not the script noticed, and
+    `last_error` says the breach was caught and its result discarded.
+  - The check is exact in both directions — the VM raises *at* the ceiling, so a
+    run that completes is always strictly under it — and an expensive-but-honest
+    script is never mistaken for a swallowed breach.
+  - It **fails closed**: if the VM's instruction tally cannot be read (a future
+    `lua 1.x` renaming the counters is an ordinary dependency bump, since
+    `mix.exs` accepts `~> 1.0`), the evaluation is refused with a message naming
+    that cause rather than treated as "no breach" — which would silently reopen
+    the hole. A test pins the counters where the VM keeps them, so such a bump
+    fails there first.
+  - `test/ash_integration/lua_pcall_budget_test.exs` pins both directions.
+
+- **Runaway recursion and single-string allocation bombs are now refused
+  outright.** The runtime sets `:max_call_depth` (a fixed 1000 frames) and
+  `:max_string_bytes` (a quarter of the configured heap ceiling).
+  Previously both were left to the reduction and heap ceilings to catch —
+  whichever tripped first, and for a single large string that meant racing the
+  GC-time heap check rather than a deterministic refusal.
+
+- **The transform and signing `Task`s now wait exactly `timeout_ms`.** They
+  previously waited `timeout_ms + 1_000`, a grace added for an inner `max_time`
+  timer that the old luerl backend never actually fires once a step budget is
+  set (and that the current VM does not have at all). A subscription configured
+  with `timeout_ms: 300` was stopped at ~1300ms while `last_error` reported
+  "timed out after 300ms". The outer `Task` is the only wall-clock enforcement
+  point, and the timeout an operator is told about is now the one applied.
 
 - **TLS certificate verification is now on by default for Kafka and SMTP
   connections.** Previously a Kafka `:tls` / `:sasl_tls` connection sent
@@ -102,7 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app set `:codepoints`). Alongside it `mint 1.10.0` clears two Mint DoS
   advisories (quadratic chunk-size parsing, unbounded status-line and
   chunk-extension buffering) and `igniter 0.8.4` a terminal-escape-injection
-  advisory; `mix deps.audit` and `mix hex.audit` are clean on both lockfiles.
+  advisory; `mix deps.audit` and `mix hex.audit` are clean.
   Also bumped:
   `ash_postgres 2.13.1`, `ash_sql 0.7.3`, `ash_cloak 0.4.0`, `ash_phoenix 2.3.25`,
   `phoenix 1.8.13`, `phoenix_live_view 1.2.11`, `req 0.7.4`, `brod 4.6.3`,
@@ -110,40 +206,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ranch 2.3.0`, `spitfire 0.4.1`, plus the example's
   `ash_authentication 4.14.2`, `ash_authentication_phoenix 2.17.3`,
   `phoenix_live_dashboard 0.9.1`, `telemetry_metrics 1.2.0` and `mimic 2.4.0`.
-  `mix.lock.lua1` was regenerated from `mix.lock` so the two still differ only
-  in the Lua backend, and `lua` itself stays pinned per lockfile (`0.4` on the
-  default, `1.0` on the variant) — that pin is the point of the dual-backend
-  matrix, not staleness. The example keeps `dns_cluster 0.2.0` and
-  `lua ~> 0.4`: both newer releases are outside the requirements it declares.
+  `lua` moved to `1.0.2` (see the `lua ~> 1.0` entry below), and `luerl` was
+  dropped. The example keeps `dns_cluster 0.2.0`: the newer release is outside
+  the requirement it declares.
 
-- **The Lua transform runtime now runs on the stable `Lua` API and works on both
-  `lua 0.4` and `lua 1.0`.** It previously called `:luerl_sandbox.run/3` directly
-  at three sites and hand-reconstructed `%Lua{}` from a raw luerl state at four
-  more. `lua 1.0` replaced luerl with its own Elixir Lua 5.3 VM and dropped luerl
-  as a dependency, so every transform and signing run would have parked on a 1.0
-  install. Everything now goes through `Lua.new/1`, `Lua.eval!/2` and `Lua.get!/2`,
-  with the one genuinely version-specific concern — where the CPU ceiling lives —
-  isolated in
-  `AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.Compat`.
-  - **`lua 0.4` remains the pinned default.** `mix.exs` now accepts
-    `~> 0.4 or ~> 1.0`; `mix.lock` still pins `0.4`, and CI runs the full suite
-    against **both** (a second lockfile, `mix.lock.lua1`, selected via
-    `MIX_LOCKFILE` — which also redirects `deps`/`_build` to per-lockfile trees).
-  - **`:luerl` is now a declared dependency** (`optional: true`). Calling
-    `:luerl_sandbox` while declaring only `{:lua, "~> 0.4"}` was an undeclared
-    dependency; `lua 1.0` has no luerl dependency at all, so it must be declared
-    rather than leaned on transitively. Hosts on `lua 1.0` are not forced to carry
-    it.
-  - **The `lua_sandbox` CPU-budget option is now `:max_steps`** (the runtime-neutral
-    `Limits` vocabulary). `:max_reductions` named luerl's own flag, which the
-    `lua 1.0` backend has no equivalent for; it is still honoured as a deprecated
-    alias, so a host that set it keeps its configured ceiling.
-  - **Transform timeouts are now the configured value.** The transform and
-    signing `Task`s waited `timeout_ms + 1_000`; the extra second existed to let
-    an inner luerl `max_time` fire first, which it never does (see the Security
-    section). A subscription configured with a 300ms transform ceiling was
-    stopped at ~1300ms. It is now stopped at ~300ms, as configured — a
-    **behaviour change** for any host relying on the undocumented extra second.
+- **A bad `lua_sandbox` resource limit is no longer reported as a bad host-API
+  config.** `Lua.new/1` validates the ceilings derived from `Limits`, so e.g.
+  `max_steps: 0` raises `ArgumentError` — the same exception a non-`Lua.API`
+  entry in `:apis` raises. Both were caught by one rescue, so an invalid *limit*
+  came back as "could not load the configured Lua host APIs", pointing an
+  operator at a setting they had not touched. State building and API loading are
+  now rescued separately and each names its own setting.
+
+- **BREAKING: the Lua transform runtime now requires `lua ~> 1.0`; support for
+  `lua 0.4` (the luerl-backed release) is removed.** `mix.exs` previously
+  accepted `~> 0.4 or ~> 1.0` and selected a backend at compile time. Hosts must
+  upgrade `lua` to `1.0` or later.
+  - **Why.** `lua 1.0` ships its own Elixir Lua 5.3 VM and is the better sandbox
+    on every axis that matters here: it can express `:max_call_depth` and
+    `:max_string_bytes` (which `0.4` cannot), and because it evaluates in the
+    calling process, brutal-killing the transform `Task` actually kills the
+    evaluator — closing a `0.4` hazard where a **blocking** host function leaked
+    one unlinked luerl runner per delivery, for as long as it blocked. The one
+    property `0.4` enforced more strictly, an uncatchable CPU ceiling, is now
+    enforced explicitly on `1.0` (see Security).
+  - **`:luerl` is no longer a dependency**, optional or otherwise, and the
+    `MIX_LOCKFILE`/`mix.lock.lua1` dual-lockfile scheme and the `lua` dimension
+    of the CI matrix are gone with it.
+  - `Runtime.Lua.Compat` — the compile-time version shim — is replaced by
+    `Runtime.Lua.Budget`, which owns the sandbox's CPU, call-depth and
+    string-size ceilings and the classification of a budget breach.
+  - **Script-visible: numbers now follow Lua 5.3 semantics.** luerl had only
+    floats, so `100` reached a script as `100.0` and large integers lost
+    precision. Integers are now integers (`100` stringifies as `"100"`, exact to
+    64 bits), and `/` always produces a float (`100 / 2` stringifies as
+    `"50.0"`; use `//` for integer division). **A custom signing source is the
+    place to check**: a Model-2 callback that builds its canonical string from
+    `ctx.data` — or that worked around the old float coercion by stripping a
+    trailing `.0` — can now sign a *different* string and produce a valid
+    signature over the wrong bytes, i.e. a silent 401. See
+    `design/configurable-signing.md` §5.
+  - **The `lua_sandbox` CPU-budget option is `:max_steps`** (the runtime-neutral
+    `Limits` vocabulary). `:max_reductions` named the flag the luerl backend
+    used; it is still honoured as a deprecated alias, but its unit changed with
+    the backend, so a carried-over value above the shipped default is clamped to
+    that default rather than used as written — see the `:max_reductions` entry
+    above.
 
 - **Dispatch now uses an age-based terminal model, not an attempt ceiling.** An
   undispatched `Event` no longer becomes poison after `max_attempts` claims; instead

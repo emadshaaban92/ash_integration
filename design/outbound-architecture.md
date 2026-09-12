@@ -566,9 +566,10 @@ rather than crashing a lane:
 - **Sandbox resource limits** — the Lua run is bounded by a `max_steps` budget,
   a `:max_heap_size` on the process holding the Lua heap, and a wall-clock
   ceiling, and runs under `Task.Supervisor.async_nolink` so a crash/kill is
-  isolated from the caller (`config :ash_integration, lua_sandbox: …`). Where the
-  step budget and the wall-clock ceiling are actually enforced differs between
-  `lua 0.4` and `lua 1.0` — see `Runtime.Lua.Compat`.
+  isolated from the caller (`config :ash_integration, lua_sandbox: …`). The VM
+  raises a step-budget breach as a `pcall`-catchable Lua error, so the runtime
+  also refuses a result from a run that spent its whole budget — see
+  `Runtime.Lua.Budget`.
 
 **Secret hygiene in audit rows.** The delivery log redacts secret-bearing header
 values (`authorization`, `x-signature`, …) from the snapshotted descriptor copy,

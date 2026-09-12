@@ -98,24 +98,40 @@ defmodule AshIntegration.Transform.RuntimeTest do
 
   describe "Lua implements the behaviour contract" do
     test "default_limits/0 reflects the runtime-neutral vocabulary" do
-      assert %Limits{
-               timeout_ms: timeout_ms,
-               max_steps: max_steps,
-               max_memory_words: max_memory_words
-             } = Lua.default_limits()
+      limits = Lua.default_limits()
 
-      assert is_integer(timeout_ms) and timeout_ms > 0
-      assert is_integer(max_steps) and max_steps > 0
-      assert is_integer(max_memory_words) and max_memory_words > 0
+      assert %Limits{} = limits
+
+      # Read each field through a variable key. Binding them out of the struct
+      # directly lets Elixir 1.20's type checker narrow a field it can prove is
+      # an integer — `max_steps/0` is total, so it does — and then flag the
+      # `is_integer/1` here as an always-true guard, failing the suite under
+      # `--warnings-as-errors` on 1.20 while passing on 1.19. The check is still
+      # worth making: the other two come from config and are NOT statically
+      # known, so this is a real assertion for them and cheap insurance for
+      # `max_steps` if its derivation ever loosens again.
+      for field <- [:timeout_ms, :max_steps, :max_memory_words] do
+        value = Map.fetch!(limits, field)
+
+        assert is_integer(value) and value > 0,
+               "expected #{field} to be a positive integer, got: #{inspect(value)}"
+      end
     end
 
     test "execute/4 honors an explicitly supplied tighter step budget" do
-      tight = %Limits{timeout_ms: 1_000, max_steps: 1_000_000, max_memory_words: 200_000}
+      # `timeout_ms` is deliberately generous. What this pins is that an
+      # explicitly supplied `max_steps` is the ceiling that applies — not that it
+      # beats the clock. Exhausting 1M instructions takes ~100ms, so a 1s
+      # wall-clock ceiling made the two race with only ~10x of margin, and under
+      # enough scheduler starvation the clock won and the assertion below failed
+      # spuriously. Widening the margin removes a failure mode the test was never
+      # about; the ordering of the two ceilings at STOCK config is pinned
+      # separately, and deterministically, in `lua_sandbox_limits_test.exs`.
+      tight = %Limits{timeout_ms: 30_000, max_steps: 1_000_000, max_memory_words: 200_000}
 
       assert {:error, message} = Lua.execute("while true do end", %{}, nil, tight)
-      # `Limits` vocabulary, not either backend's native unit: `:luerl` counts
-      # BEAM reductions and `:lua_vm` counts VM instructions, and both report the
-      # breach as the step budget.
+      # `Limits` vocabulary, not the VM's native unit: it counts instructions,
+      # but the breach an operator sees is reported as the step budget.
       assert message =~ "exceeded its step budget"
     end
   end
