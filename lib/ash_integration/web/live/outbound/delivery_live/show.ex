@@ -170,7 +170,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.Show do
             {(@delivery.next_attempt_at && Helpers.format_datetime(@delivery.next_attempt_at, :long)) ||
               "probe-paced (suspended)"}
           </.field>
-          <.field label="Created">{Helpers.format_datetime(@delivery.created_at, :long)}</.field>
+          <.field label="Created">{Helpers.format_datetime(@delivery.inserted_at, :long)}</.field>
           <.field label="Connection">
             <.link
               navigate={base() <> "/connections/#{@delivery.connection_id}"}

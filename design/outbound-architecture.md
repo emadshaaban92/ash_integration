@@ -373,7 +373,7 @@ model: one key assigns the partition *and* drives log compaction.
 **Recency (LWW).** Consumers do last-write-wins by `event-id` — the UUIDv7 is
 occurrence-ordered on its own (generated in the source transaction, with a
 built-in same-instant tiebreaker), so comparing it directly suffices. `created_at`
-is available in the transform input as a human-readable event timestamp (add it to
+(the Event's `inserted_at`) is available in the transform input as a human-readable event timestamp (add it to
 the wire in Lua if a consumer wants it — it is not emitted by default, §11), but the
 id is the ordering key. LWW *within a key*, not gap detection (UUIDv7 ids aren't
 contiguous); no sequence number.
@@ -467,7 +467,7 @@ and read green everywhere. Parking now surfaces as a **separate health dimension
 without overloading the failure counters or changing when/why a delivery parks:
 
 - **Aggregates.** Subscription and Connection carry `parked_count` (count of
-  `:parked` deliveries) and `oldest_parked_at` (their min `created_at` — how long
+  `:parked` deliveries) and `oldest_parked_at` (their min `inserted_at` — how long
   the head has been stuck). Query-time, filtered to `state == :parked`; the
   connection's span all its subscriptions. A *load* failure surfaces loudly (it is
   not swallowed into a zero).
@@ -517,7 +517,8 @@ Three values are **available in the transform input but not emitted by default**
 add them in Lua only if a specific consumer needs them:
 
 - `created_at` — redundant on Kafka (the native record timestamp), informational on
-  HTTP; carried as `event.created_at`.
+  HTTP; carried as `event.created_at`, filled from the Event's `inserted_at` (the
+  envelope key keeps its name — it is the transform contract).
 - `event_key` — an internal ordering/coalescing key. On Kafka it is already the
   native partition key (the message key, set independently of headers); on HTTP it
   carries no ordering meaning and dedup should key on `event-id`. Carried as
@@ -597,7 +598,7 @@ erDiagram
       string event_type
       int version
       string event_key
-      utc created_at
+      utc inserted_at
       string source_resource
       string source_resource_id
       string source_action
@@ -613,7 +614,7 @@ erDiagram
       uuid subscription_id
       uuid connection_id
       string event_key
-      utc created_at
+      utc inserted_at
       map delivery
       atom state
       int attempts

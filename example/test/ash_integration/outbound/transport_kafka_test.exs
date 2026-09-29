@@ -25,9 +25,9 @@ defmodule Example.Outbound.TransportKafkaTest do
     # Partition key = event_key (the ordering/compaction key, §5.2/§7).
     assert message.key == "widget-123"
     assert message.value == Jason.encode!(%{"hello" => "world"})
-    # Native record timestamp defaulted from the event's created_at (epoch ms),
+    # Native record timestamp defaulted from the event's inserted_at (epoch ms),
     # not produce-time.
-    assert message.ts == DateTime.to_unix(event.event.created_at, :millisecond)
+    assert message.ts == DateTime.to_unix(event.event.inserted_at, :millisecond)
 
     headers = Map.new(message.headers)
 
@@ -210,7 +210,7 @@ defmodule Example.Outbound.TransportKafkaTest do
     data = Map.get(overrides, :data, %{"x" => 1})
     event_key = Map.get(overrides, :event_key, "widget-123")
 
-    # The immutable Event first — its `created_at` is the occurrence time the wire
+    # The immutable Event first — its `inserted_at` is the occurrence time the wire
     # `created-at` header / Kafka `ts` are sourced from.
     event =
       Event
@@ -236,7 +236,7 @@ defmodule Example.Outbound.TransportKafkaTest do
         type: "stock.changed",
         version: 1,
         event_key: event_key,
-        created_at: event.created_at,
+        created_at: event.inserted_at,
         subject: "r1",
         data: data
       })
@@ -246,7 +246,7 @@ defmodule Example.Outbound.TransportKafkaTest do
         sub.connection,
         sub,
         envelope,
-        event.created_at
+        event.inserted_at
       )
 
     delivery_attrs =

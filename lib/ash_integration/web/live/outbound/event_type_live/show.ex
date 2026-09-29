@@ -187,7 +187,7 @@ defmodule AshIntegration.Web.Outbound.EventTypeLive.Show do
           <tr :for={event <- @recent_events}>
             <td class="font-mono text-xs">{event.event_key}</td>
             <td><EventHelpers.outbox_badge event={event} /></td>
-            <td class="text-sm text-base-content/60">{Helpers.format_datetime(event.created_at)}</td>
+            <td class="text-sm text-base-content/60">{Helpers.format_datetime(event.inserted_at)}</td>
             <td class="text-right">
               <.link navigate={base() <> "/events/#{event.id}"} class="btn btn-ghost btn-xs">
                 View

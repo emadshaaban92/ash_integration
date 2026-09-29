@@ -831,8 +831,8 @@ defmodule Example.Outbound.DispatchRelayTest do
     |> Ash.create!(authorize?: false)
   end
 
-  # An undispatched Event whose `created_at` is backdated, so the age sweep can act on
-  # it. `created_at` isn't accepted on create, so seed it directly. An optional
+  # An undispatched Event whose `inserted_at` is backdated, so the age sweep can act on
+  # it. `inserted_at` isn't accepted on create, so seed it directly. An optional
   # `:claimed_at` seeds the soft lease so a test can stand up a still-leased (skipped by
   # the sweep) or a lease-expired (swept) old event.
   defp seed_old_event!(opts) do
@@ -846,7 +846,7 @@ defmodule Example.Outbound.DispatchRelayTest do
       source_resource_id: "r1",
       source_action: "update",
       data: %{"id" => "r1"},
-      created_at: DateTime.add(DateTime.utc_now(), -days_ago, :day),
+      inserted_at: DateTime.add(DateTime.utc_now(), -days_ago, :day),
       claimed_at: Keyword.get(opts, :claimed_at)
     })
   end

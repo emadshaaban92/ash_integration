@@ -58,7 +58,7 @@ coalescing collapsed superseded pending deliveries for a lane.
   producer is registered). Emitted at dispatch and on every reprocess that
   re-parks.
 - `:delivered` — the target acknowledged the send. `duration_ms` is the
-  source-change → ack latency (`created_at` to `delivered_at`); `transport` is
+  source-change → ack latency (the Event's `inserted_at` to `delivered_at`); `transport` is
   `:http` or `:kafka`.
 - `:delivery :terminal` — a delivery went terminal on the first occurrence
   (`terminal_reason: :permanent`, a non-retryable response); left `:failed` with

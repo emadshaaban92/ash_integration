@@ -52,11 +52,11 @@ defmodule Example.Outbound.DashboardLiveTest do
 
       # One success inside the window, one older than 24h.
       build_log!(sub, %{status: :success})
-      build_log!(sub, %{status: :success, created_at: hours_ago(30)})
+      build_log!(sub, %{status: :success, inserted_at: hours_ago(30)})
 
       {:ok, view, _html} = live(conn, @dashboard_path)
 
-      # The tile counts `created_at >= now-24h`, so only the recent log is counted.
+      # The tile counts `inserted_at >= now-24h`, so only the recent log is counted.
       assert delivered_tile(view) =~ ~r/stat-value.*?>\s*1\s*</s
     end
   end

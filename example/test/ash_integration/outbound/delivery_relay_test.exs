@@ -997,7 +997,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
         type: subscription.event_type,
         version: subscription.version,
         event_key: event_key,
-        created_at: event.created_at,
+        created_at: event.inserted_at,
         subject: "r1",
         data: data
       })
@@ -1007,7 +1007,7 @@ defmodule Example.Outbound.DeliveryRelayTest do
         subscription.connection,
         subscription,
         envelope,
-        event.created_at
+        event.inserted_at
       )
 
     EventDelivery

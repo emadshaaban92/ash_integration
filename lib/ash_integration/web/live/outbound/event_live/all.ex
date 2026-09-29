@@ -121,7 +121,7 @@ defmodule AshIntegration.Web.Outbound.EventLive.All do
             <td class="font-mono text-xs">{event.event_key}</td>
             <td class="text-sm">{event.source_resource} · {event.source_action}</td>
             <td><EventHelpers.outbox_badge event={event} /></td>
-            <td class="text-sm text-base-content/60">{Helpers.format_datetime(event.created_at)}</td>
+            <td class="text-sm text-base-content/60">{Helpers.format_datetime(event.inserted_at)}</td>
             <td class="text-right">
               <.link navigate={path(:show, event.id)} class="btn btn-ghost btn-xs">View</.link>
             </td>

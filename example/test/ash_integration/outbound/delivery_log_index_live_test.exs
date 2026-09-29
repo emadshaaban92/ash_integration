@@ -65,7 +65,7 @@ defmodule Example.Outbound.DeliveryLogIndexLiveTest do
     test "?since=24h drops logs older than the window", %{conn: conn, user: user} do
       sub = create_subscription!(create_connection!(user), "widget.updated")
       recent = build_log!(sub, %{status: :success, response_status: 201})
-      old = build_log!(sub, %{status: :success, response_status: 418, created_at: hours_ago(30)})
+      old = build_log!(sub, %{status: :success, response_status: 418, inserted_at: hours_ago(30)})
 
       # The dashboard "Delivered (24h)" tile drills in here:
       {:ok, view, _html} = live(conn, @logs_path <> "?status=success&since=24h")
@@ -80,7 +80,9 @@ defmodule Example.Outbound.DeliveryLogIndexLiveTest do
 
     test "an unknown since value is ignored (no accidental empty list)", %{conn: conn, user: user} do
       sub = create_subscription!(create_connection!(user), "widget.updated")
-      log = build_log!(sub, %{status: :success, response_status: 201, created_at: hours_ago(100)})
+
+      log =
+        build_log!(sub, %{status: :success, response_status: 201, inserted_at: hours_ago(100)})
 
       {:ok, view, _html} = live(conn, @logs_path <> "?since=bogus")
       assert has_element?(view, "#log-#{log.id}")

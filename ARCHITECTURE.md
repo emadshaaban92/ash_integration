@@ -134,7 +134,7 @@ them; if you must change one, update this list and the relevant design doc.
     *unordered* query repeats or skips rows between pages. `:parked` and
     `:for_connection` are unpaginated, and sort for a deterministic replay/display
     order. `id` is the sort key everywhere (a DB-minted UUIDv7: time-ordered *and*
-    unique, unlike `created_at`); `:parked` is ascending on purpose (oldest-first
+    unique, unlike `inserted_at`); `:parked` is ascending on purpose (oldest-first
     replay), everything else descending. Callers rely on the action default rather
     than re-sorting at the call site — a second `Ash.Query.sort/2` only appends a
     duplicate key. Declare it with `Ash.Resource.Preparation.Builtins.build/1`,
@@ -142,6 +142,16 @@ them; if you must change one, update this list and the relevant design doc.
     `Build.prepare/3` reads `opts[:options]`, so a flat keyword list is a *silent*
     no-op. Guarded by
     `example/test/ash_integration/outbound/default_sort_dsl_test.exs`.
+12. **Injected timestamps use Ash's names; the transform envelope does not.** Every
+    extension's transformer adds `create_timestamp :inserted_at` (and, except on
+    the append-only `Log`, `update_timestamp :updated_at`) — the pair Ash's
+    `timestamps()` defines — only if the host hasn't declared an attribute of that
+    name, so a host calling `timestamps()` gets no second creation timestamp.
+    Library code reads `inserted_at` by name (sweeps, retention, indexes,
+    aggregates, UI). The Lua transform envelope is a separate, stored contract: it
+    keeps the key `created_at`, filled from the Event's `inserted_at`
+    (`outbound/wire/envelope.ex`). Guarded by
+    `example/test/ash_integration/outbound/host_timestamps_test.exs`.
 
 ## Design docs — the *why* (read before non-trivial changes)
 

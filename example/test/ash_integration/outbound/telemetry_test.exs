@@ -149,7 +149,7 @@ defmodule Example.Outbound.TelemetryTest do
       d = scheduled_delivery!(s)
 
       # Backdate the source Event so duration_ms reflects source-change → ack
-      # (Event.created_at), not dispatch → ack (EventDelivery.created_at).
+      # (Event.inserted_at), not dispatch → ack (EventDelivery.inserted_at).
       backdate_event!(d.event_id, 5_000)
 
       ref = attach([[:ash_integration, :delivery, :delivered]])
@@ -504,7 +504,7 @@ defmodule Example.Outbound.TelemetryTest do
         type: subscription.event_type,
         version: subscription.version,
         event_key: event_key,
-        created_at: event.created_at,
+        created_at: event.inserted_at,
         subject: "r1",
         data: data
       })
@@ -514,7 +514,7 @@ defmodule Example.Outbound.TelemetryTest do
         subscription.connection,
         subscription,
         envelope,
-        event.created_at
+        event.inserted_at
       )
 
     EventDelivery
@@ -561,7 +561,7 @@ defmodule Example.Outbound.TelemetryTest do
     at = DateTime.add(DateTime.utc_now(), -ms_ago, :millisecond)
 
     from(e in {table, Event}, where: e.id == ^event_id)
-    |> Example.Repo.update_all(set: [created_at: at])
+    |> Example.Repo.update_all(set: [inserted_at: at])
   end
 
   # Drive the relay's deliver path for a single in-hand message (used to exercise

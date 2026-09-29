@@ -227,9 +227,9 @@ defmodule AshIntegration.Outbound.Delivery.Dispatcher do
   defp load_claimed([]), do: {:ok, []}
 
   defp load_claimed(ids) do
-    # Load only the source Event's `created_at` (not its payload) so the relay can
+    # Load only the source Event's `inserted_at` (not its payload) so the relay can
     # report the source-change → ack latency on a successful delivery.
-    event_query = Ash.Query.select(AshIntegration.event_resource(), [:created_at])
+    event_query = Ash.Query.select(AshIntegration.event_resource(), [:inserted_at])
 
     AshIntegration.event_delivery_resource()
     |> Ash.Query.filter(id in ^ids)

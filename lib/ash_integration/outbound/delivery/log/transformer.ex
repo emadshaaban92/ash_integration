@@ -50,7 +50,7 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
        public?: true,
        constraints: [one_of: [:transport, :response, :probe, :permanent]]
      )
-     |> add_create_timestamp_if_not_exists(:created_at)
+     |> add_create_timestamp_if_not_exists(:inserted_at)
      |> add_subscription_relationship_if_not_exists()
      |> add_connection_relationship_if_not_exists()
      |> add_event_delivery_relationship_if_not_exists()
@@ -66,8 +66,8 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
      |> add_index_if_not_exists([:subscription_id])
      |> add_index_if_not_exists([:connection_id])
      |> add_index_if_not_exists([:event_delivery_id])
-     |> add_index_if_not_exists([:created_at])
-     |> add_index_if_not_exists([:connection_id, :event_key, :created_at])
+     |> add_index_if_not_exists([:inserted_at])
+     |> add_index_if_not_exists([:connection_id, :event_key, :inserted_at])
      # Derived-health windows (design/connection-health.md §5). Each scope's breaker
      # reads "the most recent N transport-relevant outcomes for this {connection /
      # subscription}, is any a success?" — the transport window is *successes ∪
@@ -75,7 +75,7 @@ defmodule AshIntegration.Outbound.Delivery.Log.Transformer do
      # MUST be in the index or the breaker could never clear. The partial predicate
      # IS the window (no post-scan filter); `INCLUDE (status)` lets the success check
      # stay index-only; the connection/subscription leading column serves each scope.
-     # Ordered by `id` (uuidv7), not `created_at`: it is this table's existing
+     # Ordered by `id` (uuidv7), not `inserted_at`: it is this table's existing
      # recency key (both read actions sort `id: :desc`), gives a unique total order
      # (no same-µs tie ambiguity), and for the `Log` the row *is* the outcome so `id`
      # is occurrence-ordered (unlike `EventDelivery`, whose `id` is dispatch-time).

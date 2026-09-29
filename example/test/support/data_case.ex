@@ -120,7 +120,7 @@ defmodule Example.DataCase do
   @doc """
   Seed a per-attempt delivery `Log` for a subscription — the bottom of the runtime
   drill-down (Event → Delivery → Log) that the delivery relay writes on each attempt.
-  Seeded directly (bypassing the relay) so a test can pin `status`, `created_at`
+  Seeded directly (bypassing the relay) so a test can pin `status`, `inserted_at`
   (for the Logs view's time-window filter), `duration_ms`, `response_status`, and the
   owning `event_delivery_id`. Connection/subscription/event_type default off the
   subscription. Returns the `Log`.
@@ -140,7 +140,7 @@ defmodule Example.DataCase do
       connection_id: subscription.connection_id,
       subscription_id: subscription.id,
       event_delivery_id: Map.get(o, :event_delivery_id),
-      created_at: Map.get(o, :created_at, DateTime.utc_now())
+      inserted_at: Map.get(o, :inserted_at, DateTime.utc_now())
     })
   end
 

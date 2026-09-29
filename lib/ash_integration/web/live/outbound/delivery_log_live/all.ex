@@ -90,7 +90,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
   defp apply_since(query, since) do
     case window_cutoff(since) do
       nil -> query
-      cutoff -> Ash.Query.filter(query, created_at >= ^cutoff)
+      cutoff -> Ash.Query.filter(query, inserted_at >= ^cutoff)
     end
   end
 
@@ -178,7 +178,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLogLive.All do
             <td class="text-sm">{log.connection && log.connection.name}</td>
             <td class="text-sm">{log.response_status || log.error_message || "—"}</td>
             <td class="text-sm">{log.duration_ms && "#{log.duration_ms} ms"}</td>
-            <td class="text-sm text-base-content/60">{Helpers.format_datetime(log.created_at)}</td>
+            <td class="text-sm text-base-content/60">{Helpers.format_datetime(log.inserted_at)}</td>
             <td class="text-right">
               <.link navigate={path(:show, log.id)} class="btn btn-ghost btn-xs">View</.link>
             </td>

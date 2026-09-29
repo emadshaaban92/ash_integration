@@ -2,7 +2,7 @@ defmodule AshIntegration.Outbound.Wire.Transports.Kafka do
   @moduledoc false
   # Event-first Kafka transport. REPLAYS the snapshot-at-dispatch delivery
   # descriptor on `event.delivery` — topic, partition key, the native record
-  # timestamp (`ts`, epoch ms; defaulted from the event's created_at at dispatch
+  # timestamp (`ts`, epoch ms; defaulted from the event's inserted_at at dispatch
   # instead of letting brod stamp produce-time), bare hyphenated wire-metadata
   # headers — and ENCODES the stored value term to bytes. The bare `signature`
   # header is computed LIVE over those bytes (a send-time MAC, never stored), so a

@@ -188,6 +188,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (hosts): the injected creation timestamp is now `inserted_at`, not
+  `created_at`.** Every extension (Connection, Subscription, Event, EventDelivery,
+  delivery Log) now adds `create_timestamp :inserted_at` — the name Ash's
+  `timestamps()` defines, and the one AshQuick now uses — so the integration
+  tables no longer stand out as the only `created_at` tables in a host app.
+  `updated_at` was already Ash's name and is unchanged. Every internal read
+  follows the rename: the delivery Log's `[:inserted_at]` and
+  `[:connection_id, :event_key, :inserted_at]` indexes, the Event's
+  `idx_events_retention` index, the `oldest_parked_at` aggregates, the dispatch
+  and delivery age sweeps, retention, the relay's `duration_ms`, and the
+  dashboard LiveViews.
+  - **Migrating a host.** Run `mix ash.codegen <name>`. It asks, once per table,
+    whether `created_at` is being renamed to `inserted_at`
+    (`Are you renaming outbound_events.created_at to outbound_events.inserted_at? [Yn]`).
+    **Answer yes to every one.** Answering no generates a drop of `created_at`
+    and an add of `inserted_at`: every existing row loses its creation time, and
+    retention, age sweeps and parked-health all read the new, wrong value. The
+    generated migration's "destructive operations" warning is about the three
+    indexes it drops and recreates under their new names (the Log's two and
+    `idx_events_retention`); the column renames keep their data. On a large
+    delivery-log table, rebuilding those indexes takes a lock for the duration —
+    hand-editing them into `ALTER INDEX … RENAME` is an option if that matters.
+  - **Hosts that call `timestamps()`** on an integration resource now keep their
+    own `inserted_at`/`updated_at` and get no extra column. Previously such a
+    resource got a second creation timestamp, `created_at`, next to its
+    `inserted_at`; that column is now simply no longer added (`mix ash.codegen`
+    will offer to drop it — here a drop is the intended outcome). A host that
+    declared its own `created_at` should rename it to `inserted_at`: the library
+    reads `inserted_at` by name.
+  - **Not changed: the transform and wire contract.** The envelope handed to Lua
+    transforms still exposes `event.created_at`, now filled from the Event's
+    `inserted_at`, so stored `transform_source` and downstream consumers keep
+    working unchanged, and the Kafka record `ts` still defaults to the same
+    instant.
 - **Dependencies refreshed for both the library and the example app.** `ash`
   moves to `3.33.1`, which clears the advisories Hex reported against `3.32.0`
   (`Ash.Type.CiString` / `Ash.Type.Decimal` / `Ash.Type.String` constraint
@@ -466,7 +500,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport/response `consecutive_failures` suspension, are unchanged — but it is no
   longer invisible:
   - New `parked_count` (count of `:parked` deliveries) and `oldest_parked_at` (their
-    min `created_at`) aggregates on both the subscription and connection resources,
+    min creation timestamp) aggregates on both the subscription and connection resources,
     filtered to `state == :parked`. Query-time (no migration), added-if-not-exists
     so hosts can override. The connection's span all its subscriptions.
   - A derived health status (`:healthy | :degraded | :parked`) via

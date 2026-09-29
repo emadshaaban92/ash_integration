@@ -243,7 +243,7 @@ defmodule AshIntegration.Web.Outbound.DeliveryLive.All do
             <td><DeliveryHelpers.state_badge delivery={delivery} /></td>
             <td>{delivery.attempts}</td>
             <td class="text-sm text-base-content/60">
-              {Helpers.format_datetime(delivery.created_at)}
+              {Helpers.format_datetime(delivery.inserted_at)}
             </td>
             <td class="text-right">
               <.link navigate={path(:show, delivery.id)} class="btn btn-ghost btn-xs">View</.link>

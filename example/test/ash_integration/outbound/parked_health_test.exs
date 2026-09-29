@@ -22,7 +22,7 @@ defmodule Example.Outbound.ParkedHealthTest do
   end
 
   describe "aggregates" do
-    test "parked_count counts only :parked deliveries; oldest_parked_at is their min created_at",
+    test "parked_count counts only :parked deliveries; oldest_parked_at is their min inserted_at",
          %{connection: dest} do
       sub = create_subscription!(dest, "widget.updated", "-- noop")
 
@@ -40,7 +40,7 @@ defmodule Example.Outbound.ParkedHealthTest do
       assert loaded.parked_count == 2
 
       assert loaded.oldest_parked_at ==
-               Enum.min([first_parked.created_at, second_parked.created_at], DateTime)
+               Enum.min([first_parked.inserted_at, second_parked.inserted_at], DateTime)
     end
 
     test "the connection aggregates span all its subscriptions", %{connection: dest} do

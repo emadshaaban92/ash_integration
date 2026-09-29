@@ -194,13 +194,13 @@ defmodule Example.Outbound.ContentSuppressionTest do
         type: subscription.event_type,
         version: subscription.version,
         event_key: event_key,
-        created_at: event.created_at,
+        created_at: event.inserted_at,
         subject: "r1",
         data: data
       })
 
     {:ok, delivery, body_hash} =
-      Resolver.resolve(subscription.connection, subscription, envelope, event.created_at)
+      Resolver.resolve(subscription.connection, subscription, envelope, event.inserted_at)
 
     EventDelivery
     |> Ash.Changeset.for_create(

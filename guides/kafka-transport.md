@@ -157,7 +157,7 @@ Each Kafka message is the resolved `defaults` for the route, replayed verbatim:
 
 - **Key**: `defaults.key` (defaults to the event key; used for partitioning)
 - **Value**: JSON-encoded `defaults.value` (defaults to `event.data`). An empty value — `nil`, or an empty Lua table (`{}`/`[]` are indistinguishable in Lua) — is produced as an **empty record value** (`<<>>`), not `"{}"`. You therefore can't emit a literal empty JSON object/array as the value; wrap it in a field if a consumer requires one.
-- **Timestamp**: the native record timestamp (`ts`, epoch ms) — `defaults.timestamp`, defaulting to the event's `created_at` so the record carries **event time**, not produce time. (If the topic is configured `message.timestamp.type=LogAppendTime`, the broker overrides it.)
+- **Timestamp**: the native record timestamp (`ts`, epoch ms) — `defaults.timestamp`, defaulting to the event's creation time (`event.created_at` in the transform input, filled from the Event's `inserted_at`) so the record carries **event time**, not produce time. (If the topic is configured `message.timestamp.type=LogAppendTime`, the broker overrides it.)
 - **Headers** (bare, un-prefixed — leading with the event type):
   - `event-id` — the event's UUIDv7 (use it to deduplicate)
   - `event-type` — the event type, e.g. `product.created`
