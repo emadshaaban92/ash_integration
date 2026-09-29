@@ -229,7 +229,7 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
 
   @doc """
   Opt-in give-up policy: take any undispatched, non-terminal, **unleased** Event whose
-  age (from `created_at`) exceeds `Supervisor.max_dispatch_age_ms/0` terminal — set
+  age (from `inserted_at`) exceeds `Supervisor.max_dispatch_age_ms/0` terminal — set
   `dispatch_terminal_reason: :expired`, so `claim/1` stops picking it up and its
   `(connection, event_key)` lane stays blocked like any terminal head. A row still
   inside its `lease_seconds` window is skipped: it may be mid-fan-out on another
@@ -268,7 +268,7 @@ defmodule AshIntegration.Outbound.Dispatch.Dispatcher do
     result =
       AshIntegration.event_resource()
       |> Ash.Query.filter(
-        is_nil(dispatched_at) and is_nil(dispatch_terminal_reason) and created_at < ^cutoff and
+        is_nil(dispatched_at) and is_nil(dispatch_terminal_reason) and inserted_at < ^cutoff and
           (is_nil(claimed_at) or claimed_at < ^lease_cutoff)
       )
       |> Ash.bulk_update(:expire_dispatch, %{},

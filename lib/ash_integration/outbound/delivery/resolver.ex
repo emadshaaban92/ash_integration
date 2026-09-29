@@ -57,8 +57,9 @@ defmodule AshIntegration.Outbound.Delivery.Resolver do
 
   @doc """
   Resolve `subscription`'s transform against the transform-input `envelope` for
-  `connection`. `created_at` is the event's `DateTime` (the Kafka timestamp
-  default). See the module doc for the return contract.
+  `connection`. `created_at` is the event's `inserted_at` `DateTime` — the same
+  instant the envelope exposes as `created_at` — and is the Kafka timestamp
+  default. See the module doc for the return contract.
   """
   def resolve(connection, subscription, envelope, created_at) do
     %Ash.Union{type: transport, value: config} = connection.transport_config

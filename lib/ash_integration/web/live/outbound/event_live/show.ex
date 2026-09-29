@@ -108,7 +108,7 @@ defmodule AshIntegration.Web.Outbound.EventLive.Show do
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
           <.field label="Wire event-id" mono>{@event.id}</.field>
           <.field label="Event Key" mono>{@event.event_key}</.field>
-          <.field label="Created">{Helpers.format_datetime(@event.created_at, :long)}</.field>
+          <.field label="Created">{Helpers.format_datetime(@event.inserted_at, :long)}</.field>
           <.field label="Dispatched">
             {Helpers.format_datetime(@event.dispatched_at, :long)}
           </.field>

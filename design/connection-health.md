@@ -191,7 +191,7 @@ Three things make the cost bound hold:
 
 - **The supporting index already exists (phase 0) — the pre-existing ones don't
   serve it.** The `Log` was previously indexed on `(connection_id)`,
-  `(created_at)`, and `(connection_id, event_key, created_at)`. The composite
+  `(inserted_at)`, and `(connection_id, event_key, inserted_at)`. The composite
   looks usable but is not: `event_key` sits **between** `connection_id` and the
   recency key, so it orders a connection's rows by key *then* time — to read a
   connection's rows in pure recency order you would have to scan **all** of its
@@ -206,14 +206,14 @@ Three things make the cost bound hold:
     WHERE status = 'success' OR failure_class = 'transport';
   ```
 
-  **Ordered by `id`, not `created_at`** — the `Log`'s `id` is a uuidv7
+  **Ordered by `id`, not `inserted_at`** — the `Log`'s `id` is a uuidv7
   (time-ordered) and is *already* this table's recency key (both read actions
   sort `id: :desc`), so keying the health windows on `id` keeps one ordering
   notion for the table. It also gives a **unique total order** (no
   same-microsecond tie ambiguity that could flap "the last `N`"), and for the
   `Log` the row *is* the outcome, so `id` is occurrence-ordered — the scheduler's
   "delivery `id` is *dispatch*-time, not a valid ordering key" caveat is about
-  `EventDelivery` and does **not** apply here. (`created_at` stays on the row —
+  `EventDelivery` and does **not** apply here. (`inserted_at` stays on the row —
   retention filters on it — it just isn't the health-index key.) `INCLUDE (status)`
   keeps the success check index-only.
 
@@ -228,7 +228,7 @@ Three things make the cost bound hold:
   (currently `suspended`) ∪ (a connection with a transport-relevant `Log` row
   since the last recompute). The first is bounded by the suspended set; the second
   is one recency-ordered scan of the recent `Log` tail (the PK on `id`, the
-  `(created_at)` index, or the partial above) to collect the touched
+  `(inserted_at)` index, or the partial above) to collect the touched
   `connection_id`s. So `groups` is bounded by *recent activity*, never the catalog
   size.
 

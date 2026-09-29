@@ -185,6 +185,12 @@ AshIntegration ships five extensions you attach to your own resources. Each
 injects all attributes, actions, relationships, and code interface automatically —
 you only provide app-specific configuration (module name, table, policies).
 
+The injected bookkeeping timestamps use Ash's own names: every resource gets an
+`inserted_at` creation timestamp, and all but the delivery `Log` (append-only) an
+`updated_at` — the same pair Ash's `timestamps()` defines. Each is added only if the
+resource doesn't already declare an attribute of that name, so a resource that
+calls `timestamps()` itself keeps its own pair rather than getting a second one.
+
 A **Connection** holds the transport, auth, signing scheme, and ordering domain:
 
 ```elixir
@@ -461,14 +467,16 @@ The HTTP and Kafka transports lead with the event type on the wire and support p
 
 Each subscription has a Lua transform script that can customize delivery. The script exposes a `transform(event, defaults)` function: it reads the **read-only** `event` envelope and returns the (possibly modified) `defaults` table — the **pre-seeded, transport-shaped** delivery descriptor for the route. Returning `nil` skips the delivery. The no-op transform just returns `defaults` unchanged — `function transform(event, defaults) return defaults end` — and so does a subscription with no transform at all (a `nil`/blank `transform_source`, or a script that defines no `transform` function). The function only expresses overrides.
 
-The `event` table is the canonical payload envelope (read-only input):
+The `event` table is the canonical payload envelope (read-only input). Its keys are
+a contract with every stored transform, so they don't follow resource renames:
+`event.created_at` is filled from the Event's `inserted_at` attribute.
 
 ```
 event.id          -- the event's UUIDv7
 event.type        -- the event type, e.g. "order.placed"
 event.version     -- the schema version
 event.event_key   -- the ordering/coalescing key
-event.created_at  -- ISO8601 timestamp
+event.created_at  -- ISO8601 timestamp (the Event's `inserted_at`)
 event.subject     -- the triggering record id
 event.data        -- the produced payload
 ```
@@ -487,7 +495,7 @@ defaults.body     -- the body (defaults to event.data)
 -- Kafka
 defaults.topic, defaults.key, defaults.headers (bare, un-prefixed),
 defaults.value     -- the body (defaults to event.data)
-defaults.timestamp -- native record timestamp, epoch ms (defaults to event.created_at)
+defaults.timestamp -- native record timestamp, epoch ms (defaults to event.created_at, i.e. the Event's inserted_at)
 ```
 
 ```lua
@@ -543,7 +551,7 @@ datetime.to_zone(iso8601, tz)       -- ISO-8601 re-rendered with that zone's off
 datetime.format(iso8601, tz, fmt)   -- Calendar.strftime-style formatting, in that zone
 ```
 
-Both take an ISO-8601 timestamp **carrying a UTC offset** (`event.created_at` always does — it is normalized from the event's `DateTime`) and an IANA zone name:
+Both take an ISO-8601 timestamp **carrying a UTC offset** (`event.created_at` always does — it is normalized from the Event's `inserted_at` `DateTime`) and an IANA zone name:
 
 ```lua
 -- Deliver the operator's local time, chosen PER SUBSCRIPTION

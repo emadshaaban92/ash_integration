@@ -53,9 +53,15 @@ defmodule AshIntegration.Outbound.Wire.Envelope do
   `source_resource_id` / `source_action` stay internal and are never exposed to
   the transform (the event type is the contract). Extra keys on `fields` (e.g. a
   stray `source`) are dropped. `created_at` is normalized to a canonical ISO8601
-  string whether the caller passes a `DateTime` (from the Event's `created_at`) or
+  string whether the caller passes a `DateTime` (from the Event's `inserted_at`) or
   a string, so the same event yields a byte-identical input on both the dispatch
   and reprocess paths.
+
+  The envelope key is deliberately `created_at`, not `inserted_at`: the Event's
+  creation timestamp attribute is `inserted_at` (Ash's `timestamps()` name), but
+  the envelope is the Lua transform contract — stored `transform_source` reads
+  `event.created_at`, and the Kafka `ts` default is derived from the same instant.
+  Renaming the attribute does not rename the key.
   """
   def transform_input(fields) do
     %{

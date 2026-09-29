@@ -136,7 +136,7 @@ defmodule AshIntegration.Outbound.Dispatch.Supervisor do
         type: {:or, [:pos_integer, {:in, [nil]}]},
         default: nil,
         doc:
-          "Opt-in give-up policy: an undispatched Event older than this (from `created_at`) is taken terminal (`dispatch_terminal_reason: :expired`) by the age sweep, leaving it stuck with its `(connection, event_key)` lane blocked. `nil` (default) = never expire — a dispatch that keeps failing (almost always transient infra) retries forever, one row per lane, so a degraded DB never poisons the backlog. There is deliberately no attempt ceiling: `dispatch_attempts` is an honest counter, not a verdict. See `design/dispatch-terminal-model.md`."
+          "Opt-in give-up policy: an undispatched Event older than this (from `inserted_at`) is taken terminal (`dispatch_terminal_reason: :expired`) by the age sweep, leaving it stuck with its `(connection, event_key)` lane blocked. `nil` (default) = never expire — a dispatch that keeps failing (almost always transient infra) retries forever, one row per lane, so a degraded DB never poisons the backlog. There is deliberately no attempt ceiling: `dispatch_attempts` is an honest counter, not a verdict. See `design/dispatch-terminal-model.md`."
       ]
     ]
   end

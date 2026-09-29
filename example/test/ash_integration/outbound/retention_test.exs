@@ -168,10 +168,10 @@ defmodule Example.Outbound.RetentionTest do
     ExUnit.CaptureLog.with_log(fn -> Retention.sweep() end)
   end
 
-  # A bare immutable Event with an explicit (old) created_at, so the Event-side
+  # A bare immutable Event with an explicit (old) inserted_at, so the Event-side
   # retention sweep applies. Defaults to dispatched (the normal aged-out case);
   # pass `dispatched_at: nil` to model an event still in the outbox (e.g. poison).
-  defp seed_old_event(created_at, overrides \\ []) do
+  defp seed_old_event(inserted_at, overrides \\ []) do
     Ash.Seed.seed!(
       Event,
       Map.merge(
@@ -183,7 +183,7 @@ defmodule Example.Outbound.RetentionTest do
           source_resource_id: "r1",
           source_action: "update",
           data: %{},
-          created_at: created_at,
+          inserted_at: inserted_at,
           dispatched_at: DateTime.utc_now()
         },
         Map.new(overrides)

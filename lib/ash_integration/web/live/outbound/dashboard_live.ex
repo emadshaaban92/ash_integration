@@ -30,9 +30,9 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
         total_connections: count(conn, actor),
         total_event_types: map_size(AshIntegration.Outbound.Declare.Registry.catalog()),
         delivered_24h:
-          count(Ash.Query.filter(log, status == :success and created_at >= ^since), actor),
+          count(Ash.Query.filter(log, status == :success and inserted_at >= ^since), actor),
         suppressed_24h:
-          count(Ash.Query.filter(log, status == :suppressed and created_at >= ^since), actor),
+          count(Ash.Query.filter(log, status == :suppressed and inserted_at >= ^since), actor),
         # Parked is a STANDING backlog, not a 24h window: a build failure (broken
         # transform/producer) parks deliveries that sit until reprocess. Counts the
         # current `:parked` rows — the blind spot this view used to miss entirely.
@@ -239,7 +239,7 @@ defmodule AshIntegration.Web.Outbound.DashboardLive do
   defp path(:parked), do: base() <> "/deliveries?state=parked"
   defp path(:terminal), do: base() <> "/deliveries?state=terminal"
   # The `since=24h` param time-boxes the Logs list to the same 24h window these tiles
-  # count (`created_at >= now-24h`), so the drill-down's rows match the tile's number.
+  # count (`inserted_at >= now-24h`), so the drill-down's rows match the tile's number.
   defp path(:delivered), do: base() <> "/logs?status=success&since=24h"
   defp path(:suppressed), do: base() <> "/logs?status=suppressed&since=24h"
 

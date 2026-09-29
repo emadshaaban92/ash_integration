@@ -102,7 +102,7 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
           connection,
           subscription,
           envelope(event, data),
-          event.created_at
+          event.inserted_at
         )
     end
   end
@@ -174,7 +174,7 @@ defmodule AshIntegration.Outbound.Delivery.Reprocessor do
       type: event.event_type,
       version: event.version,
       event_key: event.event_key,
-      created_at: event.created_at,
+      created_at: event.inserted_at,
       subject: event.source_resource_id,
       data: data
     })

@@ -210,7 +210,7 @@ defmodule AshIntegration.Outbound.Retention do
     threshold = DateTime.add(now, -days, :day)
 
     AshIntegration.delivery_log_resource()
-    |> Ash.Query.filter(created_at < ^threshold)
+    |> Ash.Query.filter(inserted_at < ^threshold)
   end
 
   defp event_query(now, days) do
@@ -218,7 +218,7 @@ defmodule AshIntegration.Outbound.Retention do
 
     AshIntegration.event_resource()
     |> Ash.Query.filter(
-      created_at < ^threshold and not is_nil(dispatched_at) and not exists(deliveries, true)
+      inserted_at < ^threshold and not is_nil(dispatched_at) and not exists(deliveries, true)
     )
   end
 

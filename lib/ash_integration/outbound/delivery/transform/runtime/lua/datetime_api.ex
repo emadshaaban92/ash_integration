@@ -19,9 +19,11 @@ defmodule AshIntegration.Outbound.Delivery.Transform.Runtime.Lua.DatetimeAPI do
 
   Both take an ISO-8601 timestamp **with a UTC offset** and an IANA zone name.
   `event.created_at` is always in that shape — `AshIntegration.Outbound.Wire.Envelope`
-  normalizes it from the event's `DateTime`. A timestamp pulled out of `event.data`
-  is only as good as its producer, which is why a missing offset raises (below)
-  rather than being read as UTC.
+  normalizes it from the event's `inserted_at` `DateTime`. (The envelope key stays
+  `created_at` even though the Event attribute is `inserted_at`: it is part of the
+  transform contract, so stored transforms that read it keep working.) A timestamp
+  pulled out of `event.data` is only as good as its producer, which is why a
+  missing offset raises (below) rather than being read as UTC.
 
   This is deliberately **not a clock**: it converts a timestamp the script already
   holds and exposes no "now". The sandbox stays deterministic — the same event

@@ -381,7 +381,7 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
   end
 
   # `duration_ms` is the source-change → ack latency: the source Event's
-  # `created_at` (stamped in the source transaction) to `delivered_at`.
+  # `inserted_at` (stamped in the source transaction) to `delivered_at`.
   #
   # `connection_name`/`subscription_name` cost nothing here: the claim loads
   # `[:connection, :subscription, event: …]` on every row (`Dispatcher.load_claimed/1`),
@@ -393,7 +393,7 @@ defmodule AshIntegration.Outbound.Delivery.Relay do
         count: 1,
         attempts: delivery.attempts,
         duration_ms:
-          DateTime.diff(delivered.delivered_at, delivery.event.created_at, :millisecond)
+          DateTime.diff(delivered.delivered_at, delivery.event.inserted_at, :millisecond)
       },
       %{
         event_delivery_id: delivery.id,

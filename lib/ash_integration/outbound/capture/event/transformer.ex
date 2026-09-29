@@ -57,7 +57,7 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
        allow_nil?: true,
        public?: true
      )
-     |> add_create_timestamp_if_not_exists(:created_at)
+     |> add_create_timestamp_if_not_exists(:inserted_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_deliveries_relationship_if_not_exists()
      |> add_default_accept_if_not_set()
@@ -291,7 +291,7 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
   # `dispatch_terminal_reason: :expired` on an undispatched Event older than the
   # configured `max_dispatch_age_ms`, taking it terminal (`claim/1` refuses it; its
   # lane stays blocked). The caller pushes the `is_nil(dispatched_at) and
-  # is_nil(dispatch_terminal_reason) and created_at < cutoff` precondition into the
+  # is_nil(dispatch_terminal_reason) and inserted_at < cutoff` precondition into the
   # query, keeping the action atomic-executable so the sweep is one bulk UPDATE
   # through Ash (so `updated_at` bumps and host notifiers fire). Mirrors the delivery
   # `:expire` action — see `design/dispatch-terminal-model.md`.
@@ -496,7 +496,7 @@ defmodule AshIntegration.Outbound.Capture.Event.Transformer do
       {:ok, index} =
         Transformer.build_entity(AshPostgres.DataLayer, [:postgres, :custom_indexes], :index,
           name: index_name,
-          fields: [:created_at],
+          fields: [:inserted_at],
           where: "dispatched_at IS NOT NULL"
         )
 

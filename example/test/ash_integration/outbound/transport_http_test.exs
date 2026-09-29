@@ -546,7 +546,7 @@ defmodule Example.Outbound.TransportHttpTest do
         type: subscription.event_type,
         version: subscription.version,
         event_key: event_key,
-        created_at: event.created_at,
+        created_at: event.inserted_at,
         subject: "r1",
         data: data
       })
@@ -556,7 +556,7 @@ defmodule Example.Outbound.TransportHttpTest do
         subscription.connection,
         subscription,
         envelope,
-        event.created_at
+        event.inserted_at
       )
 
     # … and the delivery carrying the resolved descriptor the transport replays.

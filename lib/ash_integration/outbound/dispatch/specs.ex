@@ -136,7 +136,7 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
            subscription.connection,
            subscription,
            envelope,
-           event.created_at
+           event.inserted_at
          ) do
       :skip ->
         cancelled_spec(event, subscription, "Skipped by transform")
@@ -206,14 +206,16 @@ defmodule AshIntegration.Outbound.Dispatch.Specs do
 
   # The wire `event-id` is the immutable Event's id; built via the shared
   # `Envelope.transform_input/1` so dispatch and reprocess inputs stay
-  # byte-identical. `created_at` is the Event's immutable occurrence time.
+  # byte-identical. The envelope's `created_at` is the Event's immutable occurrence
+  # time, its `inserted_at` (the envelope key keeps its name: it is the transform
+  # contract).
   defp build_envelope(event, data) do
     Envelope.transform_input(%{
       id: event.id,
       type: event.event_type,
       version: event.version,
       event_key: event.event_key,
-      created_at: event.created_at,
+      created_at: event.inserted_at,
       subject: event.source_resource_id,
       data: data
     })

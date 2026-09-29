@@ -155,7 +155,7 @@ defmodule AshIntegration.Web.Outbound.ConnectionLive.Index do
                 </span>
               </td>
               <td class="text-sm text-base-content/60">
-                {Helpers.format_datetime(connection.created_at)}
+                {Helpers.format_datetime(connection.inserted_at)}
               </td>
               <td>
                 <div class="dropdown dropdown-end">

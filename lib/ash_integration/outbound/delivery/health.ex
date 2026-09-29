@@ -327,7 +327,7 @@ defmodule AshIntegration.Outbound.Delivery.Health do
 
   @doc """
   Opt-in give-up policy: take any still-retrying `:failed` delivery whose age (from
-  `created_at`) exceeds `Supervisor.max_delivery_age_ms/0` terminal — set
+  `inserted_at`) exceeds `Supervisor.max_delivery_age_ms/0` terminal — set
   `terminal_reason: :expired`, so it stops retrying and its lane is blocked like any
   terminal head. No-op unless the age is configured (`nil` = never expire, the safe
   default). Idempotent (matches only `terminal_reason IS NULL`) and safe on every node.
@@ -349,7 +349,7 @@ defmodule AshIntegration.Outbound.Delivery.Health do
 
     result =
       AshIntegration.event_delivery_resource()
-      |> Ash.Query.filter(state == :failed and is_nil(terminal_reason) and created_at < ^cutoff)
+      |> Ash.Query.filter(state == :failed and is_nil(terminal_reason) and inserted_at < ^cutoff)
       |> Ash.bulk_update(:expire, %{},
         strategy: [:atomic, :stream],
         authorize?: false,

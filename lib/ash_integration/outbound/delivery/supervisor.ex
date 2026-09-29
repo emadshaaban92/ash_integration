@@ -190,7 +190,7 @@ defmodule AshIntegration.Outbound.Delivery.Supervisor do
         type: {:or, [:pos_integer, {:in, [nil]}]},
         default: nil,
         doc:
-          "Opt-in give-up policy: a `:failed` delivery still retrying after this age (from `created_at`) is taken terminal (`terminal_reason: :expired`) by the health sweep, blocking its lane like any terminal head. `nil` (default) = never expire — a persistently-failing but retryable delivery retries forever, paced by backoff and bounded operationally by suspension + probe. There is deliberately no attempt ceiling."
+          "Opt-in give-up policy: a `:failed` delivery still retrying after this age (from `inserted_at`) is taken terminal (`terminal_reason: :expired`) by the health sweep, blocking its lane like any terminal head. `nil` (default) = never expire — a persistently-failing but retryable delivery retries forever, paced by backoff and bounded operationally by suspension + probe. There is deliberately no attempt ceiling."
       ],
       lease_seconds: [
         type: {:or, [:pos_integer, {:in, [nil]}]},

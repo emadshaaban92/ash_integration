@@ -98,7 +98,7 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
        always_select?: true,
        constraints: [one_of: [:auto, :manual, :parked]]
      )
-     |> add_create_timestamp_if_not_exists(:created_at)
+     |> add_create_timestamp_if_not_exists(:inserted_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_connection_relationship_if_not_exists()
      |> add_deliveries_relationship_if_not_exists()
@@ -242,7 +242,7 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
 
   # Standing parked-backlog health, the side effect a broken transform leaves with
   # no counter/suspension (`ParkedHealth`): `parked_count` (count of `:parked`
-  # deliveries) + `oldest_parked_at` (min `created_at` of them — how long the head
+  # deliveries) + `oldest_parked_at` (min `inserted_at` of them — how long the head
   # has been stuck). Query-time aggregates filtered to `state == :parked`; mirror
   # `last_delivered_at`, added-if-not-exists so hosts can override.
   defp add_parked_aggregates_if_not_exists(dsl_state) do
@@ -275,7 +275,7 @@ defmodule AshIntegration.Outbound.Delivery.Subscription.Transformer do
         Transformer.build_entity(Dsl, [:aggregates], :min,
           name: :oldest_parked_at,
           relationship_path: :deliveries,
-          field: :created_at,
+          field: :inserted_at,
           filter: [state: :parked],
           public?: true
         )

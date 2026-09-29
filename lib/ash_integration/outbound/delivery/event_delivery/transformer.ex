@@ -94,7 +94,7 @@ defmodule AshIntegration.Outbound.Delivery.EventDelivery.Transformer do
        allow_nil?: true,
        public?: true
      )
-     |> add_create_timestamp_if_not_exists(:created_at)
+     |> add_create_timestamp_if_not_exists(:inserted_at)
      |> add_update_timestamp_if_not_exists(:updated_at)
      |> add_event_relationship_if_not_exists()
      |> add_subscription_relationship_if_not_exists()
