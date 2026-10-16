@@ -74,8 +74,8 @@ jobs:
       - name: Set up Elixir / OTP
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.19"
-          otp-version: "28"
+          elixir-version: "1.20"
+          otp-version: "29"
 
       - name: Cache deps and _build
         uses: actions/cache@v6
@@ -145,8 +145,8 @@ jobs:
       - name: Set up Elixir / OTP
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.19"
-          otp-version: "28"
+          elixir-version: "1.20"
+          otp-version: "29"
 
       - name: Cache example deps and _build
         uses: actions/cache@v6
@@ -189,8 +189,8 @@ jobs:
       - name: Set up Elixir / OTP
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.19"
-          otp-version: "28"
+          elixir-version: "1.20"
+          otp-version: "29"
 
       - name: Cache example deps and _build
         uses: actions/cache@v6
