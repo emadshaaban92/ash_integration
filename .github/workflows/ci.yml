@@ -203,7 +203,7 @@ jobs:
             ${{ runner.os }}-mix-example-
 
       - name: Install Sobelow (archive)
-        run: mix archive.install hex sobelow 0.14.1 --force
+        run: mix archive.install hex sobelow 0.18.1 --force
 
       - name: Install example dependencies
         run: mix deps.get
