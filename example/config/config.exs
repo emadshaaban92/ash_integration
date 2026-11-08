@@ -82,7 +82,7 @@ config :esbuild,
 
 # Configure tailwind (the version is required)
 config :tailwind,
-  version: "4.3.4",
+  version: "4.3.5",
   example: [
     args: ~w(
       --input=assets/css/app.css
